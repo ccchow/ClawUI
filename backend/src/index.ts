@@ -8,6 +8,13 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Increase timeout for long-running Claude CLI calls
+app.use((_req, res, next) => {
+  res.setTimeout(180_000); // 3 minutes
+  next();
+});
+
 app.use(router);
 
 app.listen(PORT, () => {

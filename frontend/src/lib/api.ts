@@ -1,4 +1,4 @@
-const API_BASE = "/api";
+const API_BASE = typeof window !== "undefined" ? "http://localhost:3001/api" : "/api";
 
 export interface ProjectInfo {
   id: string;
