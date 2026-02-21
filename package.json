@@ -8,7 +8,9 @@
   "scripts": {
     "build": "npm run build --workspace=packages/adapter",
     "lint": "eslint packages/*/src/**/*.ts",
-    "clean": "rm -rf packages/*/dist"
+    "clean": "rm -rf packages/*/dist",
+    "mock": "npm run build --workspace=packages/adapter && npm run mock:server --workspace=packages/adapter",
+    "dev:web": "npm run dev --workspace=packages/web"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^7.0.0",
