@@ -56,16 +56,15 @@ export function getTimeline(sessionId: string): Promise<TimelineNode[]> {
   return fetchJSON(`${API_BASE}/sessions/${sessionId}/timeline`);
 }
 
-export function getSuggestions(sessionId: string): Promise<Suggestion[]> {
-  return fetchJSON(`${API_BASE}/sessions/${sessionId}/suggest`, {
-    method: "POST",
-  });
+export interface RunResult {
+  output: string;
+  suggestions: Suggestion[];
 }
 
 export function runPrompt(
   sessionId: string,
   prompt: string
-): Promise<{ result: string }> {
+): Promise<RunResult> {
   return fetchJSON(`${API_BASE}/sessions/${sessionId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

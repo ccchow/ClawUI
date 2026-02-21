@@ -5,7 +5,6 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
   getTimeline,
-  getSuggestions,
   runPrompt,
   type TimelineNode,
   type Suggestion,
@@ -20,7 +19,6 @@ export default function SessionPage() {
   const [nodes, setNodes] = useState<TimelineNode[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loading, setLoading] = useState(true);
-  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,23 +35,11 @@ export default function SessionPage() {
       });
   }, [id]);
 
-  const loadSuggestions = useCallback(() => {
-    setSuggestionsLoading(true);
-    getSuggestions(id)
-      .then((s) => {
-        setSuggestions(s);
-        setSuggestionsLoading(false);
-      })
-      .catch(() => {
-        setSuggestionsLoading(false);
-      });
-  }, [id]);
-
   const handleRun = async (prompt: string) => {
     setRunning(true);
     try {
-      const { result } = await runPrompt(id, prompt);
-      // Append result as a new assistant node
+      const { output, suggestions: newSuggestions } = await runPrompt(id, prompt);
+      // Append prompt + result as new timeline nodes
       setNodes((prev) => [
         ...prev,
         {
@@ -67,12 +53,12 @@ export default function SessionPage() {
           id: `result-${Date.now()}`,
           type: "assistant" as const,
           timestamp: new Date().toISOString(),
-          title: result.slice(0, 120),
-          content: result,
+          title: output.slice(0, 120),
+          content: output,
         },
       ]);
-      // Clear suggestions after running
-      setSuggestions([]);
+      // Update suggestions from the same response
+      setSuggestions(newSuggestions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -123,10 +109,8 @@ export default function SessionPage() {
           <div className="mt-8 space-y-4">
             <SuggestionButtons
               suggestions={suggestions}
-              loading={suggestionsLoading}
               disabled={running}
               onSelect={handleRun}
-              onLoad={loadSuggestions}
             />
 
             <PromptInput

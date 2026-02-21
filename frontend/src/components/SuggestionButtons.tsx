@@ -4,37 +4,16 @@ import type { Suggestion } from "@/lib/api";
 
 interface SuggestionButtonsProps {
   suggestions: Suggestion[];
-  loading: boolean;
   disabled: boolean;
   onSelect: (prompt: string) => void;
-  onLoad: () => void;
 }
 
 export function SuggestionButtons({
   suggestions,
-  loading,
   disabled,
   onSelect,
-  onLoad,
 }: SuggestionButtonsProps) {
-  if (suggestions.length === 0) {
-    return (
-      <button
-        onClick={onLoad}
-        disabled={loading || disabled}
-        className="w-full px-4 py-3 rounded-xl border border-dashed border-border-primary text-text-secondary text-sm hover:border-accent-purple hover:text-accent-purple transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-      >
-        {loading ? (
-          <span className="flex items-center justify-center gap-2">
-            <span className="animate-spin h-4 w-4 border-2 border-accent-purple border-t-transparent rounded-full" />
-            Generating suggestions...
-          </span>
-        ) : (
-          "✨ Get AI suggestions for next steps"
-        )}
-      </button>
-    );
-  }
+  if (suggestions.length === 0) return null;
 
   return (
     <div className="space-y-2">
