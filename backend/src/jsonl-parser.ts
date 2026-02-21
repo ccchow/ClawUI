@@ -33,6 +33,24 @@ export interface ProjectInfo {
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
+/**
+ * Look up the original working directory for a session by finding which project contains it.
+ * Returns the decoded project path (e.g., "/Users/leizhou/Git/ClawUI").
+ */
+export function getSessionCwd(sessionId: string): string | undefined {
+  if (!existsSync(CLAUDE_PROJECTS_DIR)) return undefined;
+  const entries = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const jsonlPath = join(CLAUDE_PROJECTS_DIR, entry.name, `${sessionId}.jsonl`);
+    if (existsSync(jsonlPath)) {
+      const decoded = "/" + entry.name.replace(/-/g, "/").replace(/^\/+/, "");
+      return decoded;
+    }
+  }
+  return undefined;
+}
+
 function summarize(text: string, maxLen = 120): string {
   if (!text) return "";
   const oneLine = text.replace(/\n/g, " ").trim();

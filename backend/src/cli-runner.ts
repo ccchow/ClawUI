@@ -12,7 +12,8 @@ export interface Suggestion {
 
 function runClaude(
   sessionId: string,
-  prompt: string
+  prompt: string,
+  cwd?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -27,6 +28,7 @@ function runClaude(
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024, // 10MB
+        cwd: cwd || process.cwd(),
         env: { ...process.env },
       },
       (error, stdout, stderr) => {
@@ -78,10 +80,11 @@ function parseSuggestions(output: string): { cleanOutput: string; suggestions: S
  */
 export async function runPrompt(
   sessionId: string,
-  prompt: string
+  prompt: string,
+  cwd?: string
 ): Promise<RunResult> {
   const fullPrompt = prompt + SUGGESTION_SUFFIX;
-  const rawOutput = await runClaude(sessionId, fullPrompt);
+  const rawOutput = await runClaude(sessionId, fullPrompt, cwd);
   const { cleanOutput, suggestions } = parseSuggestions(rawOutput);
   return { output: cleanOutput, suggestions };
 }

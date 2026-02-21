@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { listProjects, listSessions, parseTimeline } from "./jsonl-parser.js";
+import { listProjects, listSessions, parseTimeline, getSessionCwd } from "./jsonl-parser.js";
 import { runPrompt } from "./cli-runner.js";
 
 const router = Router();
@@ -50,7 +50,8 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       res.status(400).json({ error: "Prompt too long (max 10000 chars)" });
       return;
     }
-    const { output, suggestions } = await runPrompt(req.params.id as string, prompt.trim());
+    const cwd = getSessionCwd(req.params.id as string);
+    const { output, suggestions } = await runPrompt(req.params.id as string, prompt.trim(), cwd);
     res.json({ output, suggestions });
   } catch (err) {
     res.status(500).json({ error: String(err) });
