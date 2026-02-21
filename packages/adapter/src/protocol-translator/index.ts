@@ -2,6 +2,7 @@ import { EventEmitter } from "events";
 import type {
   AGUIMessage,
   AGUIEventType,
+  AgentType,
   RunStartedData,
   TextMessageData,
   StepStartedData,
@@ -25,6 +26,8 @@ interface TranslationPattern {
  * Translates raw CLI output lines into structured AG-UI events
  * using regex-based pattern matching.
  *
+ * Supports multiple agent types (claude, openclaw) with auto-detection.
+ *
  * Events:
  *  - "event" (message: AGUIMessage)
  */
@@ -32,6 +35,8 @@ export class ProtocolTranslator extends EventEmitter {
   private patterns: TranslationPattern[];
   /** Track which sessions have emitted RUN_STARTED. */
   private startedSessions = new Set<string>();
+  /** Track detected agent type per session. */
+  private sessionAgentType = new Map<string, AgentType>();
 
   constructor() {
     super();
@@ -39,15 +44,36 @@ export class ProtocolTranslator extends EventEmitter {
   }
 
   /**
+   * Set the agent type for a session. If "auto", detection happens on first output.
+   */
+  setAgentType(sessionId: string, agentType: AgentType): void {
+    this.sessionAgentType.set(sessionId, agentType);
+    if (agentType !== "auto") {
+      this.patterns = agentType === "openclaw"
+        ? this.buildOpenClawPatterns()
+        : this.buildClaudeCodePatterns();
+    }
+  }
+
+  /**
    * Process a line of output and emit AG-UI events if patterns match.
    * Also handles initial RUN_STARTED for new sessions.
    */
   processLine(sessionId: string, line: string): void {
-    // Auto-emit RUN_STARTED on first output from a session
+    // Auto-detect agent type on first output
     if (!this.startedSessions.has(sessionId)) {
+      const agentType = this.sessionAgentType.get(sessionId) ?? "auto";
+      const detected = agentType === "auto" ? this.detectAgentType(line) : agentType;
+      this.sessionAgentType.set(sessionId, detected);
+
+      // Switch pattern set based on detected agent
+      this.patterns = detected === "openclaw"
+        ? this.buildOpenClawPatterns()
+        : this.buildClaudeCodePatterns();
+
       this.startedSessions.add(sessionId);
       this.emitEvent(sessionId, "RUN_STARTED", {
-        agent_name: "claude",
+        agent_name: detected,
       } satisfies RunStartedData);
     }
 
@@ -76,6 +102,7 @@ export class ProtocolTranslator extends EventEmitter {
       status: exitCode === 0 ? "success" : "failed",
     } satisfies RunFinishedData);
     this.startedSessions.delete(sessionId);
+    this.sessionAgentType.delete(sessionId);
   }
 
   /**
@@ -87,6 +114,17 @@ export class ProtocolTranslator extends EventEmitter {
         delta: partial,
       } satisfies TextMessageData);
     }
+  }
+
+  /**
+   * Detect agent type based on output content characteristics.
+   */
+  private detectAgentType(line: string): "claude" | "openclaw" {
+    // OpenClaw detection: lobster emoji or "openclaw" keyword
+    if (/🦞|openclaw/i.test(line)) {
+      return "openclaw";
+    }
+    return "claude";
   }
 
   private emitEvent(sessionId: string, type: AGUIEventType, data: AGUIMessage["data"]): void {
@@ -162,6 +200,92 @@ export class ProtocolTranslator extends EventEmitter {
       // Task/run completion
       {
         pattern: /(?:task\s+completed?|finished|done|completed\s+successfully)/i,
+        eventType: "RUN_FINISHED",
+        extract: () => ({ status: "success" }) satisfies RunFinishedData,
+      },
+      // Error / failure
+      {
+        pattern: /(?:error|failed|fatal|panic|exception):\s*(.+)/i,
+        eventType: "TEXT_MESSAGE_CONTENT",
+        extract: (match) =>
+          ({
+            delta: match[0],
+          }) satisfies TextMessageData,
+      },
+    ];
+  }
+
+  /**
+   * Build regex patterns specific to OpenClaw agent CLI output.
+   * Patterns are tried in order — first match wins.
+   */
+  private buildOpenClawPatterns(): TranslationPattern[] {
+    return [
+      // OpenClaw startup marker
+      {
+        pattern: /(?:🦞|openclaw)\s*(?:start|launch|init|ready)/i,
+        eventType: "RUN_STARTED",
+        extract: () =>
+          ({
+            agent_name: "openclaw",
+          }) satisfies RunStartedData,
+      },
+      // OpenClaw tool calls: "Running tool:" or "Calling:"
+      {
+        pattern: /(?:Running\s+tool|Calling|Invoking):\s*(.+)/i,
+        eventType: "STEP_STARTED",
+        extract: (match) =>
+          ({
+            step_type: "tool_call",
+            tool_name: match[1].trim(),
+          }) satisfies StepStartedData,
+      },
+      // OpenClaw thinking/reasoning process
+      {
+        pattern: /^(?:Thinking\.\.\.|Reasoning|Analyzing|Planning)(.*)$/i,
+        eventType: "TEXT_MESSAGE_CONTENT",
+        extract: (match) =>
+          ({
+            delta: match[0],
+          }) satisfies TextMessageData,
+      },
+      // OpenClaw waiting for user / permission prompts
+      {
+        pattern: /(?:Waiting\s+for\s+user|permission\s+required|confirm|proceed\?|y\/n|\[Y\/n\]|\[y\/N\])/i,
+        eventType: "WAITING_FOR_HUMAN",
+        extract: (match) =>
+          ({
+            reason: match[0],
+            a2ui_payload: {
+              component: "ApprovalCard",
+              props: {
+                title: "OpenClaw requires input",
+                description: match.input ?? match[0],
+                actions: ["Approve", "Reject"],
+              },
+            },
+          }) satisfies WaitingForHumanData,
+      },
+      // Dangerous command detection (shared)
+      {
+        pattern: /(?:rm\s+-rf|DROP\s+TABLE|DELETE\s+FROM|force\s+push|--force)/i,
+        eventType: "WAITING_FOR_HUMAN",
+        extract: (match) =>
+          ({
+            reason: `Dangerous operation detected: ${match[0]}`,
+            a2ui_payload: {
+              component: "ApprovalCard",
+              props: {
+                title: "Dangerous Operation Warning",
+                command: match.input ?? match[0],
+                actions: ["Approve", "Reject"],
+              },
+            },
+          }) satisfies WaitingForHumanData,
+      },
+      // OpenClaw session end: "Done" or session ended
+      {
+        pattern: /(?:^Done$|session\s+(?:ended|closed|finished)|task\s+completed?|completed\s+successfully)/i,
         eventType: "RUN_FINISHED",
         extract: () => ({ status: "success" }) satisfies RunFinishedData,
       },

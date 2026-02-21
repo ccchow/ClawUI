@@ -6,3 +6,9 @@ dist/
 .DS_Store
 coverage/
 .turbo/
+.next/
+
+# PWA generated files
+packages/web/public/sw.js
+packages/web/public/workbox-*.js
+.worktrees/

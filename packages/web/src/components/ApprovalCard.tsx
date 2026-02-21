@@ -28,6 +28,7 @@ export function ApprovalCard({ title, command, actions, onAction }: ApprovalCard
               key={action}
               variant={action.toLowerCase() === "approve" ? "default" : "destructive"}
               size="sm"
+              className="min-h-[44px] min-w-[44px] px-4"
               onClick={() => onAction(action)}
             >
               {action}

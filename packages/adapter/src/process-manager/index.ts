@@ -1,7 +1,7 @@
 import * as pty from "node-pty";
 import { EventEmitter } from "events";
 import { v4 as uuidv4 } from "uuid";
-import type { SessionInfo, SessionStatus } from "../types.js";
+import type { AgentType, SessionInfo, SessionStatus } from "../types.js";
 
 export interface SpawnOptions {
   command: string;
@@ -10,6 +10,7 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   cols?: number;
   rows?: number;
+  agent_type?: AgentType;
 }
 
 interface ManagedSession {
@@ -39,10 +40,13 @@ export class ProcessManager extends EventEmitter {
       env: { ...process.env, ...(opts.env ?? {}) } as Record<string, string>,
     });
 
+    const agentType = opts.agent_type ?? this.detectAgentType(opts.command, args);
+
     const session: ManagedSession = {
       info: {
         session_id: sessionId,
         agent_name: opts.command,
+        agent_type: agentType,
         command: [opts.command, ...args].join(" "),
         status: "running",
         created_at: new Date().toISOString(),
@@ -113,6 +117,14 @@ export class ProcessManager extends EventEmitter {
   /** Clean up a finished session from the map. */
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
+  }
+
+  /** Detect agent type from the spawn command. */
+  private detectAgentType(command: string, args: string[]): "claude" | "openclaw" | "auto" {
+    const fullCmd = [command, ...args].join(" ").toLowerCase();
+    if (fullCmd.includes("openclaw")) return "openclaw";
+    if (fullCmd.includes("claude")) return "claude";
+    return "auto";
   }
 
   /** Kill all sessions and clean up. */

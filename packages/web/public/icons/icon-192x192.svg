@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#1a1a2e"/>
+  <circle cx="96" cy="80" r="36" fill="none" stroke="#22c55e" stroke-width="4"/>
+  <path d="M72 80 L96 56 L120 80" fill="none" stroke="#22c55e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="96" cy="80" r="8" fill="#22c55e"/>
+  <rect x="56" y="130" width="80" height="8" rx="4" fill="#3b82f6" opacity="0.8"/>
+  <rect x="68" y="146" width="56" height="6" rx="3" fill="#3b82f6" opacity="0.5"/>
+  <text x="96" y="176" text-anchor="middle" font-family="monospace" font-size="12" fill="#a1a1aa">COCKPIT</text>
+</svg>

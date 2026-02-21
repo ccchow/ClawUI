@@ -55,6 +55,11 @@ export interface HumanAction {
 }
 
 /**
+ * Supported agent types for pattern matching.
+ */
+export type AgentType = "claude" | "openclaw" | "auto";
+
+/**
  * Session state tracked by the process manager.
  */
 export type SessionStatus = "running" | "waiting" | "finished";
@@ -62,6 +67,7 @@ export type SessionStatus = "running" | "waiting" | "finished";
 export interface SessionInfo {
   session_id: string;
   agent_name: string;
+  agent_type: AgentType;
   command: string;
   status: SessionStatus;
   created_at: string;

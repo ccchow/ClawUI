@@ -20,7 +20,7 @@ function broadcast(data: string) {
 wss.on("connection", (ws) => {
   console.log("[MockServer] Client connected, starting mock lifecycle...");
 
-  const mock = new MockGenerator("claude");
+  const mock = new MockGenerator("claude", "claude");
   const { cancel } = mock.streamLifecycle(
     (event) => {
       const payload = JSON.stringify(event);
@@ -32,7 +32,7 @@ wss.on("connection", (ws) => {
 
   // After first lifecycle, start a second agent with delay
   setTimeout(() => {
-    const mock2 = new MockGenerator("openclaw");
+    const mock2 = new MockGenerator("openclaw", "openclaw");
     mock2.streamLifecycle(
       (event) => {
         broadcast(JSON.stringify(event));

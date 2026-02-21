@@ -32,9 +32,9 @@ export function InputCard({ title, placeholder, onSubmit }: InputCardProps) {
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
             placeholder={placeholder ?? "Type your response..."}
-            className="text-sm"
+            className="text-sm min-h-[44px]"
           />
-          <Button size="sm" onClick={handleSubmit}>
+          <Button size="sm" className="min-h-[44px] min-w-[44px] px-4" onClick={handleSubmit}>
             Send
           </Button>
         </div>

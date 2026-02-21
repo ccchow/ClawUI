@@ -4,6 +4,7 @@ import { useStore } from "@/lib/store";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { SessionCard } from "@/components/SessionCard";
 import { ConnectionStatus } from "@/components/ConnectionStatus";
+import { PullToRefresh } from "@/components/PullToRefresh";
 
 export default function Dashboard() {
   useWebSocket();
@@ -17,33 +18,35 @@ export default function Dashboard() {
   });
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-8">
-      <header className="mb-8 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Agent Cockpit</h1>
-          <p className="text-sm text-muted-foreground">
-            Real-time session monitoring dashboard
-          </p>
-        </div>
-        <ConnectionStatus />
-      </header>
+    <PullToRefresh>
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:py-8">
+        <header className="mb-6 sm:mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Agent Cockpit</h1>
+            <p className="text-xs sm:text-sm text-muted-foreground">
+              Real-time session monitoring dashboard
+            </p>
+          </div>
+          <ConnectionStatus />
+        </header>
 
-      {sorted.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-24 text-center">
-          <p className="text-muted-foreground text-sm">
-            No active sessions. Waiting for agent connections...
-          </p>
-          <p className="text-muted-foreground/60 text-xs mt-2">
-            Start an agent through the adapter to see sessions here.
-          </p>
-        </div>
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {sorted.map((session) => (
-            <SessionCard key={session.sessionId} session={session} />
-          ))}
-        </div>
-      )}
-    </main>
+        {sorted.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <p className="text-muted-foreground text-sm">
+              No active sessions. Waiting for agent connections...
+            </p>
+            <p className="text-muted-foreground/60 text-xs mt-2">
+              Start an agent through the adapter to see sessions here.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+            {sorted.map((session) => (
+              <SessionCard key={session.sessionId} session={session} />
+            ))}
+          </div>
+        )}
+      </main>
+    </PullToRefresh>
   );
 }

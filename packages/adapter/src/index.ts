@@ -14,6 +14,7 @@ export { MockGenerator } from "./mock-generator/index.js";
 export type {
   AGUIMessage,
   AGUIEventType,
+  AgentType,
   HumanAction,
   SessionInfo,
   SessionStatus,
@@ -26,6 +27,7 @@ export type {
 } from "./types.js";
 
 import { ProcessManager } from "./process-manager/index.js";
+import type { SpawnOptions } from "./process-manager/index.js";
 import { StreamInterceptor } from "./stream-interceptor/index.js";
 import { ProtocolTranslator } from "./protocol-translator/index.js";
 import { AdapterWSServer } from "./websocket-server/index.js";
@@ -62,6 +64,16 @@ export class Adapter {
       port: config?.wsPort ?? 4800,
       host: config?.wsHost ?? "0.0.0.0",
     });
+  }
+
+  /** Spawn an agent session, wiring agent_type to the translator. */
+  spawn(opts: SpawnOptions): string {
+    const sessionId = this.processManager.spawn(opts);
+    const session = this.processManager.getSession(sessionId);
+    if (session) {
+      this.translator.setAgentType(sessionId, session.agent_type);
+    }
+    return sessionId;
   }
 
   /** Shut down everything. */
