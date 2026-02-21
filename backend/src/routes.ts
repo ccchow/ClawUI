@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { listProjects, listSessions, parseTimeline } from "./jsonl-parser.js";
-import { getSuggestions, runPrompt } from "./cli-runner.js";
+import { runPrompt } from "./cli-runner.js";
 
 const router = Router();
 
@@ -38,17 +38,7 @@ router.get("/api/sessions/:id/timeline", (req, res) => {
   }
 });
 
-// POST /api/sessions/:id/suggest — get 3 AI suggestions
-router.post("/api/sessions/:id/suggest", async (req, res) => {
-  try {
-    const suggestions = await getSuggestions(req.params.id as string);
-    res.json(suggestions);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-// POST /api/sessions/:id/run — execute a custom prompt
+// POST /api/sessions/:id/run — execute a prompt and get suggestions in one call
 router.post("/api/sessions/:id/run", async (req, res) => {
   try {
     const { prompt } = req.body as { prompt?: string };
@@ -60,8 +50,8 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       res.status(400).json({ error: "Prompt too long (max 10000 chars)" });
       return;
     }
-    const result = await runPrompt(req.params.id as string, prompt.trim());
-    res.json({ result });
+    const { output, suggestions } = await runPrompt(req.params.id as string, prompt.trim());
+    res.json({ output, suggestions });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
