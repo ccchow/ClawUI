@@ -7,8 +7,12 @@ dist/
 coverage/
 .turbo/
 .next/
-
-# PWA generated files
-packages/web/public/sw.js
-packages/web/public/workbox-*.js
 .worktrees/
+
+# Tool artifacts
+.firecrawl/
+.playwright-mcp/
+.serena/
+
+# Screenshots
+dashboard-*.png
