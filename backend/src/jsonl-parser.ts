@@ -51,6 +51,22 @@ export function getSessionCwd(sessionId: string): string | undefined {
   return undefined;
 }
 
+const SUGGESTION_MARKER = "---SUGGESTIONS---";
+const SUGGESTION_SUFFIX_PATTERN = /\n\nAfter completing the task above, append a line "---SUGGESTIONS---".*$/s;
+
+/** Strip the appended suggestion suffix from user prompts and suggestion JSON from assistant output */
+function cleanContent(text: string, type: string): string {
+  if (!text) return text;
+  if (type === "user") {
+    return text.replace(SUGGESTION_SUFFIX_PATTERN, "").trim();
+  }
+  if (type === "assistant") {
+    const idx = text.lastIndexOf(SUGGESTION_MARKER);
+    if (idx !== -1) return text.substring(0, idx).trim();
+  }
+  return text;
+}
+
 function summarize(text: string, maxLen = 120): string {
   if (!text) return "";
   const oneLine = text.replace(/\n/g, " ").trim();
@@ -260,17 +276,18 @@ export function parseTimeline(sessionId: string): TimelineNode[] {
           .filter(Boolean)
           .join("\n");
 
-        if (userText.trim()) {
+        const cleanUser = cleanContent(userText, "user");
+        if (cleanUser.trim()) {
           nodes.push({
             id: uuid,
             type: "user",
             timestamp,
-            title: summarize(userText),
-            content: userText,
+            title: summarize(cleanUser),
+            content: cleanUser,
           });
         }
       } else {
-        const text = extractTextContent(content);
+        const text = cleanContent(extractTextContent(content), "user");
         if (text.trim()) {
           nodes.push({
             id: uuid,
@@ -315,17 +332,18 @@ export function parseTimeline(sessionId: string): TimelineNode[] {
           // Skip thinking blocks — they're internal
         }
 
-        if (assistantText.trim()) {
+        const cleanAssistant = cleanContent(assistantText.trim(), "assistant");
+        if (cleanAssistant.trim()) {
           nodes.push({
             id: uuid,
             type: "assistant",
             timestamp,
-            title: summarize(assistantText),
-            content: assistantText.trim(),
+            title: summarize(cleanAssistant),
+            content: cleanAssistant,
           });
         }
       } else {
-        const text = extractTextContent(content);
+        const text = cleanContent(extractTextContent(content), "assistant");
         if (text.trim()) {
           nodes.push({
             id: uuid,
