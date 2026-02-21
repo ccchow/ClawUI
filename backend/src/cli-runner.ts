@@ -32,6 +32,11 @@ function runClaude(
         env: { ...process.env },
       },
       (error, stdout, stderr) => {
+        // Claude CLI sometimes exits with non-zero but still produces valid output
+        if (stdout && stdout.trim().length > 0) {
+          resolve(stdout);
+          return;
+        }
         if (error) {
           reject(new Error(`Claude CLI error: ${error.message}\n${stderr}`));
           return;
