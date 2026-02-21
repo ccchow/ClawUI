@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
+import { exec } from "node:child_process";
 
 const SUGGESTION_SUFFIX = `\n\nAfter completing the task above, append a line "---SUGGESTIONS---" followed by a JSON array of exactly 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. Do not wrap in markdown code blocks.`;
 
-const EXEC_TIMEOUT = 120_000; // 2 minutes
+const EXEC_TIMEOUT = 180_000; // 3 minutes
 
 export interface Suggestion {
   title: string;
@@ -16,19 +16,17 @@ function runClaude(
   cwd?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(
-      "claude",
-      [
-        "--dangerously-skip-permissions",
-        "--resume",
-        sessionId,
-        "-p",
-        prompt,
-      ],
+    // Use shell-escaped single-quoted prompt to handle special characters
+    const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    const cmd = `claude --dangerously-skip-permissions --resume '${sessionId}' -p '${escapedPrompt}'`;
+
+    exec(
+      cmd,
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024, // 10MB
         cwd: cwd || process.cwd(),
+        shell: "/bin/zsh",
         env: { ...process.env },
       },
       (error, stdout, stderr) => {
