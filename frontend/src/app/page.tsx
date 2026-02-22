@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getProjects, getSessions, type ProjectInfo, type SessionMeta } from "@/lib/api";
+import { useEffect, useState, useCallback } from "react";
+import { getProjects, getSessions, type ProjectInfo, type SessionMeta, type SessionFilters } from "@/lib/api";
 import { SessionList } from "@/components/SessionList";
 
 export default function HomePage() {
@@ -10,6 +10,7 @@ export default function HomePage() {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [filters, setFilters] = useState<SessionFilters>({});
 
   useEffect(() => {
     getProjects()
@@ -29,7 +30,7 @@ export default function HomePage() {
   useEffect(() => {
     if (!selectedProject) return;
     setLoading(true);
-    getSessions(selectedProject)
+    getSessions(selectedProject, filters)
       .then((s) => {
         setSessions(s);
         setLoading(false);
@@ -38,7 +39,11 @@ export default function HomePage() {
         setError(e.message);
         setLoading(false);
       });
-  }, [selectedProject]);
+  }, [selectedProject, filters]);
+
+  const handleFiltersChange = useCallback((newFilters: SessionFilters) => {
+    setFilters(newFilters);
+  }, []);
 
   if (error) {
     return (
@@ -83,7 +88,7 @@ export default function HomePage() {
           <div className="animate-spin rounded-full h-8 w-8 border-2 border-accent-blue border-t-transparent" />
         </div>
       ) : (
-        <SessionList sessions={sessions} />
+        <SessionList sessions={sessions} onFiltersChange={handleFiltersChange} />
       )}
     </div>
   );

@@ -14,5 +14,11 @@ coverage/
 .playwright-mcp/
 .serena/
 
+# ClawUI data — enrichments.json is git-tracked (project knowledge)
+.clawui/index.db
+.clawui/index.db-wal
+.clawui/index.db-shm
+.clawui/app-state.json
+
 # Screenshots
 dashboard-*.png

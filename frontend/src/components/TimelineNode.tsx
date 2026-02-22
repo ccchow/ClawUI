@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { TimelineNode } from "@/lib/api";
+import { updateNodeMeta } from "@/lib/api";
 import { MarkdownContent } from "./MarkdownContent";
 
 const ICON_MAP: Record<TimelineNode["type"], string> = {
@@ -157,6 +158,7 @@ export function ToolPairNode({
   toolResult: TimelineNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [bookmarked, setBookmarked] = useState(toolUse.bookmarked ?? false);
   const toolName = toolUse.toolName || "tool";
   const badgeColor = BADGE_COLOR[toolName] || DEFAULT_BADGE;
   const summary = toolInputSummary(toolName, toolUse.toolInput || "{}");
@@ -166,13 +168,24 @@ export function ToolPairNode({
       ? toolResult.content.slice(0, 80).replace(/\n/g, " ") + "..."
       : toolResult.content.replace(/\n/g, " ");
 
+  const handleBookmark = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newVal = !bookmarked;
+    setBookmarked(newVal);
+    updateNodeMeta(toolUse.id, { bookmarked: newVal }).catch(() => setBookmarked(!newVal));
+  };
+
   return (
     <div className="relative pl-12">
       {/* Timeline dot */}
       <div className="absolute left-[14px] top-4 w-3 h-3 rounded-full bg-accent-amber ring-2 ring-bg-primary z-10" />
 
       <div
-        className="rounded-lg border-l-2 border-accent-amber bg-accent-amber/5 p-3 cursor-pointer transition-all hover:bg-bg-hover/30"
+        className={`rounded-lg border-l-2 p-3 cursor-pointer transition-all hover:bg-bg-hover/30 ${
+          bookmarked
+            ? "border-amber-400 bg-amber-400/5"
+            : "border-accent-amber bg-accent-amber/5"
+        }`}
         onClick={() => setExpanded(!expanded)}
       >
         {/* Header */}
@@ -186,6 +199,15 @@ export function ToolPairNode({
           <span className="text-xs text-text-muted ml-auto flex-shrink-0">
             {formatTimestamp(toolUse.timestamp)}
           </span>
+          <button
+            onClick={handleBookmark}
+            className={`text-sm transition-colors ${
+              bookmarked ? "text-amber-400" : "text-text-muted/30 hover:text-amber-400/60"
+            }`}
+            title={bookmarked ? "Remove bookmark" : "Bookmark"}
+          >
+            {bookmarked ? "🔖" : "🔖"}
+          </button>
           <span className="text-xs text-text-muted">
             {expanded ? "▼" : "▶"}
           </span>
@@ -228,6 +250,13 @@ export function ToolPairNode({
             />
           </div>
         )}
+
+        {/* Annotation */}
+        {toolUse.annotation && (
+          <p className="mt-2 text-xs text-accent-purple italic border-t border-border-primary pt-2">
+            {toolUse.annotation}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -235,6 +264,7 @@ export function ToolPairNode({
 
 export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
   const [expanded, setExpanded] = useState(false);
+  const [bookmarked, setBookmarked] = useState(node.bookmarked ?? false);
   const icon = ICON_MAP[node.type] || "❓";
   const colorClass = COLOR_MAP[node.type] || "border-border-primary";
   const dotColor = DOT_COLOR[node.type] || "bg-text-muted";
@@ -243,6 +273,13 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
   const isTool = node.type === "tool_use" || node.type === "tool_result";
   const isLong = node.content.length > 200;
   const showExpand = !isThinking && (isLong || node.toolInput || node.toolResult);
+
+  const handleBookmark = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newVal = !bookmarked;
+    setBookmarked(newVal);
+    updateNodeMeta(node.id, { bookmarked: newVal }).catch(() => setBookmarked(!newVal));
+  };
 
   const summary =
     isTool && node.toolInput
@@ -275,7 +312,9 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
       />
 
       <div
-        className={`rounded-lg border-l-2 ${colorClass} p-3 cursor-pointer transition-all hover:bg-bg-hover/30`}
+        className={`rounded-lg border-l-2 ${
+          bookmarked ? "border-amber-400 bg-amber-400/5" : colorClass
+        } p-3 cursor-pointer transition-all hover:bg-bg-hover/30`}
         onClick={() => showExpand && setExpanded(!expanded)}
       >
         {/* Header */}
@@ -305,6 +344,15 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
           <span className="text-xs text-text-muted ml-auto flex-shrink-0">
             {formatTimestamp(node.timestamp)}
           </span>
+          <button
+            onClick={handleBookmark}
+            className={`text-sm transition-colors ${
+              bookmarked ? "text-amber-400" : "text-text-muted/30 hover:text-amber-400/60"
+            }`}
+            title={bookmarked ? "Remove bookmark" : "Bookmark"}
+          >
+            {bookmarked ? "🔖" : "🔖"}
+          </button>
           {showExpand && (
             <span className="text-xs text-text-muted">
               {expanded ? "▼" : "▶"}
@@ -373,6 +421,13 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
               </pre>
             )}
           </div>
+        )}
+
+        {/* Annotation */}
+        {node.annotation && (
+          <p className="mt-2 text-xs text-accent-purple italic border-t border-border-primary pt-2">
+            {node.annotation}
+          </p>
         )}
       </div>
     </div>

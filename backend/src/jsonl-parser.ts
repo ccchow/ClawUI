@@ -55,7 +55,7 @@ const SUGGESTION_MARKER = "---SUGGESTIONS---";
 const SUGGESTION_SUFFIX_PATTERN = /\n\nAfter completing the task above, append a line "---SUGGESTIONS---".*$/s;
 
 /** Strip the appended suggestion suffix from user prompts and suggestion JSON from assistant output */
-function cleanContent(text: string, type: string): string {
+export function cleanContent(text: string, type: string): string {
   if (!text) return text;
   if (type === "user") {
     return text.replace(SUGGESTION_SUFFIX_PATTERN, "").trim();
@@ -67,7 +67,7 @@ function cleanContent(text: string, type: string): string {
   return text;
 }
 
-function summarize(text: string, maxLen = 120): string {
+export function summarize(text: string, maxLen = 120): string {
   if (!text) return "";
   const oneLine = text.replace(/\n/g, " ").trim();
   return oneLine.length > maxLen
@@ -75,7 +75,7 @@ function summarize(text: string, maxLen = 120): string {
     : oneLine;
 }
 
-function extractTextContent(content: unknown): string {
+export function extractTextContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -361,7 +361,149 @@ export function parseTimeline(sessionId: string): TimelineNode[] {
   return nodes;
 }
 
-function findSessionFile(sessionId: string): string | null {
+/**
+ * Parse a JSONL file directly by path (for db.ts to call without searching).
+ */
+export function parseTimelineRaw(filePath: string): TimelineNode[] {
+  const raw = readFileSync(filePath, "utf-8");
+  const lines = raw.trim().split("\n");
+  const nodes: TimelineNode[] = [];
+  const toolUseMap = new Map<string, { name: string; input: unknown }>();
+
+  for (const line of lines) {
+    let obj: Record<string, unknown>;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const type = obj.type as string;
+    const timestamp = (obj.timestamp as string) || "";
+    const uuid = (obj.uuid as string) || crypto.randomUUID();
+
+    if (type === "user") {
+      const msg = obj.message as { role?: string; content?: unknown } | undefined;
+      if (!msg?.content) continue;
+
+      const content = msg.content;
+
+      if (Array.isArray(content)) {
+        const toolResults = content.filter(
+          (b: { type?: string }) => b.type === "tool_result"
+        );
+        const textBlocks = content.filter(
+          (b: { type?: string }) => b.type !== "tool_result"
+        );
+
+        for (const tr of toolResults) {
+          const toolUseId = tr.tool_use_id as string;
+          const toolInfo = toolUseMap.get(toolUseId);
+          const resultText = extractTextContent(tr.content);
+
+          nodes.push({
+            id: `${uuid}-tr-${toolUseId}`,
+            type: "tool_result",
+            timestamp,
+            title: toolInfo
+              ? `${toolInfo.name} result`
+              : "Tool result",
+            content: resultText,
+            toolName: toolInfo?.name,
+            toolResult: resultText,
+            toolUseId,
+          });
+        }
+
+        const userText = textBlocks
+          .map((b: { type?: string; text?: string }) =>
+            b.type === "text" ? b.text || "" : ""
+          )
+          .filter(Boolean)
+          .join("\n");
+
+        const cleanUser = cleanContent(userText, "user");
+        if (cleanUser.trim()) {
+          nodes.push({
+            id: uuid,
+            type: "user",
+            timestamp,
+            title: summarize(cleanUser),
+            content: cleanUser,
+          });
+        }
+      } else {
+        const text = cleanContent(extractTextContent(content), "user");
+        if (text.trim()) {
+          nodes.push({
+            id: uuid,
+            type: "user",
+            timestamp,
+            title: summarize(text),
+            content: text,
+          });
+        }
+      }
+    } else if (type === "assistant") {
+      const msg = obj.message as { content?: unknown } | undefined;
+      if (!msg?.content) continue;
+
+      const content = msg.content;
+      if (Array.isArray(content)) {
+        let assistantText = "";
+
+        for (const block of content) {
+          if (block.type === "text") {
+            assistantText += (block.text || "") + "\n";
+          } else if (block.type === "tool_use") {
+            toolUseMap.set(block.id, {
+              name: block.name,
+              input: block.input,
+            });
+
+            const inputStr = JSON.stringify(block.input || {}, null, 2);
+            nodes.push({
+              id: block.id || `${uuid}-tool-${block.name}`,
+              type: "tool_use",
+              timestamp,
+              title: `${block.name}`,
+              content: inputStr,
+              toolName: block.name,
+              toolInput: inputStr,
+              toolUseId: block.id,
+            });
+          }
+        }
+
+        const cleanAssistant = cleanContent(assistantText.trim(), "assistant");
+        if (cleanAssistant.trim()) {
+          nodes.push({
+            id: uuid,
+            type: "assistant",
+            timestamp,
+            title: summarize(cleanAssistant),
+            content: cleanAssistant,
+          });
+        }
+      } else {
+        const text = cleanContent(extractTextContent(content), "assistant");
+        if (text.trim()) {
+          nodes.push({
+            id: uuid,
+            type: "assistant",
+            timestamp,
+            title: summarize(text),
+            content: text,
+          });
+        }
+      }
+    }
+  }
+
+  return nodes;
+}
+
+export function findSessionFile(sessionId: string): string | null {
   if (!existsSync(CLAUDE_PROJECTS_DIR)) return null;
 
   const projects = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });

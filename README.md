@@ -1,66 +1,112 @@
-# ClawUI (Agent Cockpit)
+# ClawUI — Claude Code Session Viewer
 
-Real-time monitoring and interaction dashboard for CLI-based AI agents (Claude Code, OpenClaw) via the AG-UI protocol.
+Visualize Claude Code session history as interactive timelines, with continuation via suggestion buttons.
 
 ## Architecture
 
 ```
-┌─────────────────┐    WebSocket     ┌─────────────────┐
-│  Adapter Layer   │◄───────────────►│ Presentation Layer│
-│  (Node.js)       │   AG-UI Events  │  (Next.js PWA)   │
-│                  │                 │                  │
-│ • ProcessManager │                 │ • Dashboard      │
-│ • StreamIntercept│                 │ • Session Detail │
-│ • ProtocolXlate  │                 │ • A2UI Renderer  │
-│ • WS Server      │  HumanAction   │ • Zustand Store  │
-└─────────────────┘◄────────────────└─────────────────┘
+~/.claude/projects/**/*.jsonl     ← Layer 1: Raw Source (read-only)
+        ↓
+.clawui/index.db (SQLite)        ← Layer 2: Index/Cache (incremental sync)
+.clawui/enrichments.json          ← Layer 3: Stars, tags, bookmarks, notes
+.clawui/app-state.json            ← Layer 4: UI preferences
+        ↓
+Backend (Express :3001)           → REST API (12 endpoints)
+        ↓
+Frontend (Next.js :3000)          → Timeline UI + Interactive Controls
 ```
 
-## Tech Stack
+### Four-Layer Data Model
 
-- **Adapter**: Node.js, TypeScript, node-pty, ws
-- **Web**: Next.js 16, React 19, Tailwind CSS 4, Zustand 5, shadcn/ui, next-pwa
-- **Monorepo**: npm workspaces (`packages/adapter`, `packages/web`)
+| Layer | Storage | Purpose |
+|-------|---------|---------|
+| 1 — Raw | `~/.claude/projects/*.jsonl` | Claude Code's native data (read-only) |
+| 2 — Index | `.clawui/index.db` | SQLite cache with incremental mtime+size sync |
+| 3 — Enrichment | `.clawui/enrichments.json` | User annotations: stars, tags, notes, bookmarks |
+| 4 — App State | `.clawui/app-state.json` | UI preferences, recent sessions |
+
+Delete `.clawui/` to reset — Layer 2 rebuilds from JSONL, Layer 3/4 are non-critical.
+
+See [docs/DATA-MODEL.md](docs/DATA-MODEL.md) for full design.
+
+## Features
+
+- **Session List** — Browse all Claude Code projects and sessions
+  - ⭐ Star sessions, 🏷️ tag & filter, 📦 archive
+  - Search by slug, ID, or path
+- **Timeline View** — Vertical timeline of every interaction
+  - 👤 User messages, 🤖 Assistant responses, 🔧 Tool calls with collapsible I/O
+  - 🔖 Bookmark nodes, add annotations
+  - 📝 Session notes and inline tag editor
+- **Interactive Continuation** — Send prompts via `claude --resume`
+  - 3 AI-generated continuation suggestions per response
+  - Free-form prompt input
+- **Incremental Sync** — Background 30s polling, only re-parses changed files
 
 ## Quick Start
 
 ```bash
 # Install dependencies
 npm install
+cd backend && npm install && cd ..
+cd frontend && npm install && cd ..
 
-# Start mock WebSocket server (port 4800)
-npm run mock
+# Start both (backend :3001 + frontend :3000)
+npm run dev
 
-# In another terminal, start the web dashboard
-npm run dev:web
-# Open http://localhost:3000
+# Or separately
+npm run dev:backend    # Express on port 3001
+npm run dev:frontend   # Next.js on port 3000
 ```
 
-## Commands
+Open http://localhost:3000
 
-```bash
-npm run build              # Build adapter (TypeScript → dist/)
-npm run mock               # Build + start mock WS server on port 4800
-npm run dev:web            # Start Next.js dev server
-npm run lint               # Lint adapter (eslint.config.mjs)
-npm run lint --workspace=packages/web  # Lint web package
-npm run build --workspace=packages/web # Production web build
-npm run clean              # Remove all dist/ directories
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/projects` | List all Claude Code projects |
+| GET | `/api/projects/:id/sessions` | List sessions (supports `?starred=true&tag=x&archived=true`) |
+| GET | `/api/sessions/:id/timeline` | Parse session into timeline nodes |
+| POST | `/api/sessions/:id/run` | Execute prompt, returns `{ output, suggestions }` |
+| PATCH | `/api/sessions/:id/meta` | Update star/tags/notes/alias/archived |
+| PATCH | `/api/nodes/:id/meta` | Update bookmark/annotation |
+| GET | `/api/tags` | List all tags |
+| GET | `/api/state` | Get app state |
+| PUT | `/api/state` | Update app state |
+| GET | `/api/sync` | Trigger manual re-sync |
+
+## Tech Stack
+
+- **Backend**: Node.js, TypeScript, Express, better-sqlite3, `expect` (for Claude CLI TTY)
+- **Frontend**: Next.js 14, React 18, Tailwind CSS, shadcn/ui
+- **Data**: SQLite (index), JSON (enrichment + state), JSONL (source)
+
+## Project Structure
+
 ```
-
-## AG-UI Protocol
-
-**Events** (adapter → frontend): `RUN_STARTED`, `TEXT_MESSAGE_CONTENT`, `STEP_STARTED`, `WAITING_FOR_HUMAN`, `RUN_FINISHED`
-
-**Actions** (frontend → adapter): `APPROVE`, `REJECT`, `PROVIDE_INPUT`
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WS_PORT` | `4800` | Adapter WebSocket server port |
-| `NEXT_PUBLIC_WS_URL` | `ws://localhost:4800` | Web app WebSocket endpoint |
+ClawUI/
+├── .clawui/                 # Persistent data (auto-created)
+│   ├── index.db             # SQLite index cache (gitignored)
+│   ├── enrichments.json     # User annotations (git tracked)
+│   └── app-state.json       # UI preferences (gitignored)
+├── backend/src/
+│   ├── index.ts             # Express server entry
+│   ├── routes.ts            # REST API routes
+│   ├── db.ts                # SQLite init + incremental sync
+│   ├── jsonl-parser.ts      # JSONL parsing logic
+│   ├── cli-runner.ts        # Claude CLI via expect
+│   ├── enrichment.ts        # Layer 3 read/write
+│   └── app-state.ts         # Layer 4 read/write
+├── frontend/src/
+│   ├── app/                 # Next.js pages
+│   ├── components/          # React components
+│   └── lib/api.ts           # API client
+└── docs/
+    ├── DATA-MODEL.md        # Four-layer architecture design
+    └── PRD-v2.md            # Product requirements
+```
 
 ## Status
 
-🚧 In Development
+✅ MVP Complete — Session viewing, enrichment, interactive continuation all working.

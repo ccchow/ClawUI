@@ -1,78 +1,70 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-ClawUI ("Claude Code Session Viewer") reads Claude Code session JSONL files from `~/.claude/projects/`, visualizes them as a vertical timeline, and provides interactive continuation via `claude --resume -p`.
-
-The project is evolving toward an "Agent Cockpit" — a real-time AG-UI protocol dashboard (see `docs/PRD-v2.md` and README). The `packages/web/` directory holds early scaffolding for that direction, while `backend/` and `frontend/` contain the working MVP.
+ClawUI reads Claude Code session JSONL files from `~/.claude/projects/`, visualizes them as vertical timelines, and provides interactive continuation via `claude --resume -p`. Uses a four-layer data model (see `docs/DATA-MODEL.md`).
 
 ## Commands
 
 ```bash
-# Run both backend and frontend in dev mode
-npm run dev
-
-# Run just the backend (Express on port 3001)
-npm run dev:backend
-
-# Run just the frontend (Next.js on port 3000)
-npm run dev:frontend
-
-# Build everything
-npm run build
-
-# Build backend only (TypeScript → dist/)
-npm run build:backend
-
-# Build frontend only (Next.js production build)
-npm run build:frontend
-
-# Lint backend only (root eslint.config.mjs targets backend/src/**/*.ts)
-npm run lint
+npm run dev              # Start backend + frontend together
+npm run dev:backend      # Express on port 3001 (tsx watch)
+npm run dev:frontend     # Next.js on port 3000
+npm run build            # Build all
+npm run build:backend    # TypeScript → dist/
+npm run build:frontend   # Next.js production build
+npm run lint             # ESLint (backend only)
 ```
 
-No test framework is set up yet.
+No test framework yet. Verify with `cd backend && npx tsc --noEmit` and `cd frontend && npx tsc --noEmit`.
 
 ## Architecture
 
-**Monorepo** with npm workspaces: `backend` and `frontend`.
+**Monorepo**: `backend/` (Express) + `frontend/` (Next.js). Legacy `packages/` directory exists but is unused.
+
+### Four-Layer Data Model
+
+```
+Layer 1 — Raw:        ~/.claude/projects/**/*.jsonl (read-only source of truth)
+Layer 2 — Index:      .clawui/index.db (SQLite, incremental sync by mtime+size)
+Layer 3 — Enrichment: .clawui/enrichments.json (stars, tags, notes, bookmarks)
+Layer 4 — App State:  .clawui/app-state.json (UI preferences, recent sessions)
+```
 
 ### Backend (`backend/`)
 
-Node.js TypeScript Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
+Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
 
-- **jsonl-parser.ts** — Reads `~/.claude/projects/<project-hash>/<session-uuid>.jsonl`. Parses each JSON line into `TimelineNode[]` with types: user, assistant, tool_use, tool_result. Provides `listProjects()`, `listSessions()`, `parseTimeline()`.
-- **cli-runner.ts** — Wraps `claude --dangerously-skip-permissions --resume <sessionId> -p "prompt"`. Single unified `runPrompt()` function that appends a `---SUGGESTIONS---` suffix to every prompt so Claude returns both the response and 3 continuation suggestions in one call.
-- **routes.ts** — REST endpoints:
-  - `GET /api/projects` — list all Claude Code projects
-  - `GET /api/projects/:id/sessions` — list sessions for a project
-  - `GET /api/sessions/:id/timeline` — parse session into timeline nodes
-  - `POST /api/sessions/:id/run` — execute prompt, returns `{ output, suggestions }`
-- **index.ts** — Express server entry with CORS and JSON body parsing.
+- **db.ts** — SQLite initialization (better-sqlite3), tables: `projects`, `sessions`, `timeline_nodes`. `initDb()`, `syncAll()`, `syncSession()`, `getProjects()`, `getSessions()`, `getTimeline()`.
+- **jsonl-parser.ts** — Parses JSONL into `TimelineNode[]`. Types: user, assistant, tool_use, tool_result. Exports `parseTimeline()`, `parseTimelineRaw()`, `listProjects()`, `listSessions()`, and helpers (`cleanContent`, `summarize`, `extractTextContent`).
+- **cli-runner.ts** — Wraps `claude --dangerously-skip-permissions --resume <id> -p "prompt"` via `/usr/bin/expect` (TTY required). Appends `---SUGGESTIONS---` suffix for inline suggestions.
+- **enrichment.ts** — Reads/writes `.clawui/enrichments.json`. `updateSessionMeta()`, `updateNodeMeta()`, `getAllTags()`.
+- **app-state.ts** — Reads/writes `.clawui/app-state.json`. `getAppState()`, `updateAppState()`, `trackSessionView()`.
+- **routes.ts** — 12 REST endpoints (see README).
+- **index.ts** — Server entry. Calls `initDb()` + `syncAll()` on startup, 30s background sync interval.
 
 ### Frontend (`frontend/`)
 
-Next.js 14 app with React 18, Tailwind CSS 3, dark theme.
+Next.js 14, React 18, Tailwind CSS 3, dark theme.
 
-- **Pages** — Session list (`/`) with project selector, session detail (`/session/[id]`) with timeline view.
-- **Components** — `SessionList`, `Timeline`, `TimelineNode`, `SuggestionButtons`, `PromptInput`.
-- **API Client** — `lib/api.ts` fetches from `/api/*` which Next.js rewrites to `localhost:3001` (see `next.config.mjs`).
-
-### Data Flow
-
-```
-~/.claude/projects/*/*.jsonl → Backend (JSONL Parser) → REST API → Frontend (Timeline)
-                                         ↑
-              claude --resume -p ← CLI Runner ← POST /api/sessions/:id/run
-```
+- **Pages**: Session list (`/`) with project selector + filters; Session detail (`/session/[id]`) with timeline, notes, tag editor.
+- **Components**: `SessionList` (star toggle, tag chips, filter bar), `Timeline`, `TimelineNode` (bookmark, annotation), `ToolPairNode`, `SuggestionButtons`, `PromptInput`, `MarkdownContent`.
+- **API Client**: `lib/api.ts` — direct fetch to `http://localhost:3001` (bypasses Next.js proxy to avoid timeout issues).
 
 ## Conventions
 
-- Backend uses Node16 module resolution with `.js` extensions in imports (e.g., `import { foo } from "./bar.js"`).
-- Frontend uses `@/*` path alias mapping to `./src/*`.
-- Root `eslint.config.mjs` uses `typescript-eslint`, scoped to `backend/src/**/*.ts` only (frontend is excluded).
-- All frontend components are client components (`"use client"`).
-- Dark theme with custom color tokens (bg-primary, accent-blue, etc.) defined in `frontend/tailwind.config.ts`.
-- Next.js config is `.mjs` (not `.ts`) for Next.js 14 compatibility.
+- Backend imports use `.js` extensions: `import { foo } from "./bar.js"`
+- Frontend uses `@/*` path alias → `./src/*`
+- All frontend components are `"use client"`
+- Dark theme with custom Tailwind tokens: `bg-primary`, `accent-blue`, `accent-purple`, etc. (defined in `tailwind.config.ts`)
+- Optimistic UI updates for all mutations (star, bookmark, tag, notes)
+- `next.config.mjs` (not `.ts`) for Next.js 14 compatibility
+- ESLint scoped to `backend/src/**/*.ts` only
+
+## Key Design Decisions
+
+- **expect for TTY**: Claude Code requires a TTY — `node-pty` fails on Node 25, so we use `/usr/bin/expect` with `set stty_init "columns 2000"`
+- **Inline suggestions**: One API call per prompt — suffix asks Claude to append `---SUGGESTIONS---` + JSON
+- **SQLite for index**: `better-sqlite3` sync API, incremental updates via file mtime+size comparison
+- **JSON for small data**: Enrichments and app state are JSON files (small, readable, diffable)
+- **Layer 1 read-only**: Never write to Claude Code's JSONL files

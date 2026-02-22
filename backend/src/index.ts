@@ -1,8 +1,22 @@
 import express from "express";
 import cors from "cors";
 import router from "./routes.js";
+import { initDb, syncAll } from "./db.js";
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
+
+// Initialize SQLite database and run initial sync
+initDb();
+syncAll();
+
+// Background sync every 30 seconds
+setInterval(() => {
+  try {
+    syncAll();
+  } catch {
+    // sync errors are non-fatal
+  }
+}, 30_000);
 
 const app = express();
 

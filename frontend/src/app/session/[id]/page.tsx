@@ -5,9 +5,10 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
   getTimeline,
-  runPrompt,
+  updateSessionMeta,
   type TimelineNode,
   type Suggestion,
+  type SessionMeta,
 } from "@/lib/api";
 import { Timeline } from "@/components/Timeline";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
@@ -24,6 +25,150 @@ function timeAgo(ts: number): string {
   return `${Math.floor(diff / 3600)}h ago`;
 }
 
+function SessionInfoHeader({
+  sessionId,
+  meta,
+  onMetaChange,
+}: {
+  sessionId: string;
+  meta: { alias?: string; tags?: string[]; notes?: string; starred?: boolean };
+  onMetaChange: (patch: Partial<SessionMeta>) => void;
+}) {
+  const [tagInput, setTagInput] = useState("");
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [notesValue, setNotesValue] = useState(meta.notes || "");
+  const notesRef = useRef<HTMLTextAreaElement>(null);
+
+  // Sync notes from parent
+  useEffect(() => {
+    if (!editingNotes) setNotesValue(meta.notes || "");
+  }, [meta.notes, editingNotes]);
+
+  const handleAddTag = () => {
+    const tag = tagInput.trim().toLowerCase();
+    if (!tag) return;
+    const currentTags = meta.tags || [];
+    if (currentTags.includes(tag)) {
+      setTagInput("");
+      return;
+    }
+    const newTags = [...currentTags, tag];
+    onMetaChange({ tags: newTags });
+    updateSessionMeta(sessionId, { tags: newTags }).catch(() => {
+      onMetaChange({ tags: currentTags });
+    });
+    setTagInput("");
+  };
+
+  const handleRemoveTag = (tag: string) => {
+    const currentTags = meta.tags || [];
+    const newTags = currentTags.filter((t) => t !== tag);
+    onMetaChange({ tags: newTags });
+    updateSessionMeta(sessionId, { tags: newTags }).catch(() => {
+      onMetaChange({ tags: currentTags });
+    });
+  };
+
+  const handleNotesSave = () => {
+    setEditingNotes(false);
+    if (notesValue !== (meta.notes || "")) {
+      onMetaChange({ notes: notesValue });
+      updateSessionMeta(sessionId, { notes: notesValue }).catch(() => {
+        onMetaChange({ notes: meta.notes });
+      });
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-border-primary bg-bg-secondary p-4 mb-4 space-y-3">
+      {/* Alias */}
+      {meta.alias && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-text-muted uppercase tracking-wider">Alias</span>
+          <span className="text-sm font-medium text-text-primary">{meta.alias}</span>
+        </div>
+      )}
+
+      {/* Tags */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-text-muted uppercase tracking-wider">Tags</span>
+        {(meta.tags || []).map((tag) => (
+          <span
+            key={tag}
+            className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue"
+          >
+            {tag}
+            <button
+              onClick={() => handleRemoveTag(tag)}
+              className="text-accent-blue/60 hover:text-accent-blue transition-colors"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleAddTag();
+            }
+          }}
+          placeholder="Add tag..."
+          className="text-xs px-2 py-0.5 rounded-lg bg-bg-primary border border-border-primary text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue w-24"
+        />
+      </div>
+
+      {/* Notes */}
+      <div>
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs text-text-muted uppercase tracking-wider">Notes</span>
+          {!editingNotes && (
+            <button
+              onClick={() => {
+                setEditingNotes(true);
+                setTimeout(() => notesRef.current?.focus(), 0);
+              }}
+              className="text-xs text-text-muted hover:text-text-secondary transition-colors"
+            >
+              {meta.notes ? "edit" : "add"}
+            </button>
+          )}
+        </div>
+        {editingNotes ? (
+          <textarea
+            ref={notesRef}
+            value={notesValue}
+            onChange={(e) => setNotesValue(e.target.value)}
+            onBlur={handleNotesSave}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setNotesValue(meta.notes || "");
+                setEditingNotes(false);
+              }
+            }}
+            placeholder="Add session notes..."
+            className="w-full text-sm px-3 py-2 rounded-lg bg-bg-primary border border-accent-blue text-text-primary placeholder:text-text-muted focus:outline-none resize-y min-h-[60px]"
+            rows={3}
+          />
+        ) : meta.notes ? (
+          <p
+            className="text-sm text-text-secondary whitespace-pre-wrap cursor-pointer hover:text-text-primary transition-colors"
+            onClick={() => {
+              setEditingNotes(true);
+              setTimeout(() => notesRef.current?.focus(), 0);
+            }}
+          >
+            {meta.notes}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
 
@@ -36,6 +181,14 @@ export default function SessionPage() {
   const [refreshLabel, setRefreshLabel] = useState("just now");
   const [autoRefresh, setAutoRefresh] = useState(true);
   const nodeCountRef = useRef(0);
+
+  // Session enrichment meta
+  const [sessionMeta, setSessionMeta] = useState<{
+    alias?: string;
+    tags?: string[];
+    notes?: string;
+    starred?: boolean;
+  }>({});
 
   const fetchNodes = useCallback(
     async (showLoader = false) => {
@@ -58,6 +211,22 @@ export default function SessionPage() {
     },
     [id]
   );
+
+  // Fetch session enrichment meta
+  useEffect(() => {
+    async function loadSessionMeta() {
+      try {
+        const res = await fetch(`http://localhost:3001/api/sessions/${id}/meta`);
+        if (res.ok) {
+          const meta = await res.json();
+          setSessionMeta(meta);
+        }
+      } catch {
+        // Meta endpoint may not exist yet, ignore
+      }
+    }
+    loadSessionMeta();
+  }, [id]);
 
   // Initial load
   useEffect(() => {
@@ -97,6 +266,10 @@ export default function SessionPage() {
     }, 1_000);
     return () => clearInterval(tick);
   }, [lastRefresh]);
+
+  const handleMetaChange = (patch: Partial<SessionMeta>) => {
+    setSessionMeta((prev) => ({ ...prev, ...patch }));
+  };
 
   const handleRun = async (prompt: string) => {
     setRunning(true);
@@ -214,11 +387,27 @@ export default function SessionPage() {
           ← Back to sessions
         </Link>
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold">Session</h1>
+          <h1 className="text-xl font-bold">
+            {sessionMeta.alias || "Session"}
+          </h1>
           <span className="text-sm text-text-muted font-mono">{id.slice(0, 8)}</span>
           <span className="text-xs text-text-muted">
             {nodes.length} nodes
           </span>
+
+          {/* Tags in header */}
+          {sessionMeta.tags && sessionMeta.tags.length > 0 && (
+            <div className="flex gap-1">
+              {sessionMeta.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
 
           {/* Refresh indicator */}
           <div className="ml-auto flex items-center gap-2">
@@ -247,6 +436,13 @@ export default function SessionPage() {
         </div>
       ) : (
         <>
+          {/* Session info header with notes and tag editor */}
+          <SessionInfoHeader
+            sessionId={id}
+            meta={sessionMeta}
+            onMetaChange={handleMetaChange}
+          />
+
           {/* Action area — at top since timeline is newest-first */}
           <div className="mb-6 space-y-4">
             <PromptInput
