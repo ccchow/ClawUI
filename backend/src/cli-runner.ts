@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import * as pty from "node-pty";
 
 const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exactly this marker on its own line: ---SUGGESTIONS--- followed by a JSON array of 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. No markdown code blocks around it.`;
 
@@ -10,6 +10,11 @@ export interface Suggestion {
   prompt: string;
 }
 
+export interface RunResult {
+  output: string;
+  suggestions: Suggestion[];
+}
+
 function runClaude(
   sessionId: string,
   prompt: string,
@@ -17,43 +22,49 @@ function runClaude(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const claudePath = process.env.CLAUDE_PATH || "/Users/leizhou/.local/bin/claude";
-    
-    execFile(
-      claudePath,
-      [
-        "--dangerously-skip-permissions",
-        "--resume",
-        sessionId,
-        "--mcp-config", "{}",
-        "--strict-mcp-config",
-        "-p",
-        prompt,
-      ],
-      {
-        timeout: EXEC_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024, // 10MB
-        cwd: cwd || process.cwd(),
-        env: { ...process.env },
-      },
-      (error, stdout, stderr) => {
-        // Claude CLI sometimes exits with non-zero but still produces valid output
-        if (stdout && stdout.trim().length > 0) {
-          resolve(stdout);
-          return;
-        }
-        if (error) {
-          reject(new Error(`Claude CLI error: ${error.message}\n${stderr}`));
-          return;
-        }
-        resolve(stdout);
-      }
-    );
-  });
-}
+    let output = "";
+    let timer: NodeJS.Timeout;
 
-export interface RunResult {
-  output: string;
-  suggestions: Suggestion[];
+    const proc = pty.spawn(claudePath, [
+      "--dangerously-skip-permissions",
+      "--resume",
+      sessionId,
+      "-p",
+      prompt,
+    ], {
+      name: "xterm-256color",
+      cols: 200,
+      rows: 50,
+      cwd: cwd || process.cwd(),
+      env: { ...process.env, TERM: "xterm-256color" } as Record<string, string>,
+    });
+
+    timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error("Claude CLI timed out after 3 minutes"));
+    }, EXEC_TIMEOUT);
+
+    proc.onData((data: string) => {
+      output += data;
+    });
+
+    proc.onExit(({ exitCode }) => {
+      clearTimeout(timer);
+      // Strip ANSI escape codes
+      const clean = output.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
+        .replace(/\x1B\][^\x07]*\x07/g, "")  // OSC sequences
+        .replace(/\r/g, "")
+        .trim();
+      
+      if (clean.length > 0) {
+        resolve(clean);
+      } else if (exitCode !== 0) {
+        reject(new Error(`Claude CLI exited with code ${exitCode}`));
+      } else {
+        resolve(clean);
+      }
+    });
+  });
 }
 
 /**
