@@ -40,6 +40,7 @@ set fp [open "${tmpFile}" r]
 set prompt [read $fp]
 close $fp
 file delete "${tmpFile}"
+set stty_init "columns 2000"
 spawn ${CLAUDE_PATH} --dangerously-skip-permissions --resume ${sessionId} -p $prompt
 expect eof
 `;
