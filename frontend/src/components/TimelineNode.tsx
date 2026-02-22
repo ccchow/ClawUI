@@ -30,6 +30,21 @@ const DOT_COLOR: Record<TimelineNode["type"], string> = {
   system: "bg-text-muted",
 };
 
+const BADGE_COLOR: Record<string, string> = {
+  Read: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  Write: "bg-orange-500/15 text-orange-400 border-orange-500/30",
+  Edit: "bg-sky-500/15 text-sky-400 border-sky-500/30",
+  Bash: "bg-violet-500/15 text-violet-400 border-violet-500/30",
+  Grep: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+  Glob: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
+  WebFetch: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
+  WebSearch: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
+  Task: "bg-pink-500/15 text-pink-400 border-pink-500/30",
+  TodoWrite: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+};
+
+const DEFAULT_BADGE = "bg-text-muted/15 text-text-secondary border-text-muted/30";
+
 function formatTimestamp(ts: string): string {
   if (!ts) return "";
   try {
@@ -43,14 +58,110 @@ function formatTimestamp(ts: string): string {
   }
 }
 
+/** Extract a one-line readable summary from tool input JSON */
+function toolInputSummary(toolName: string, rawInput: string): string | null {
+  try {
+    const input = JSON.parse(rawInput);
+
+    switch (toolName) {
+      case "Read":
+        return input.file_path || input.relative_path || null;
+      case "Write":
+        return input.file_path ? `→ ${input.file_path}` : null;
+      case "Edit":
+        return input.file_path
+          ? `${input.file_path} (${input.old_string ? "replace" : "edit"})`
+          : null;
+      case "Bash":
+        return input.command
+          ? input.command.length > 120
+            ? input.command.slice(0, 120) + "..."
+            : input.command
+          : null;
+      case "Grep":
+        return input.pattern
+          ? `/${input.pattern}/${input.path ? ` in ${input.path}` : ""}`
+          : null;
+      case "Glob":
+        return input.pattern || null;
+      case "WebFetch":
+        return input.url || null;
+      case "WebSearch":
+        return input.query || null;
+      case "Task":
+        return input.description || input.prompt?.slice(0, 80) || null;
+      case "TodoWrite":
+        if (Array.isArray(input.todos)) {
+          const active = input.todos.find(
+            (t: { status?: string }) => t.status === "in_progress"
+          );
+          return active?.content || `${input.todos.length} items`;
+        }
+        return null;
+      default:
+        // Try common field names
+        return (
+          input.file_path ||
+          input.path ||
+          input.command ||
+          input.query ||
+          input.pattern ||
+          input.name ||
+          null
+        );
+    }
+  } catch {
+    return null;
+  }
+}
+
+function CollapsibleSection({
+  label,
+  content,
+  defaultOpen = false,
+}: {
+  label: string;
+  content: string;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <div className="border border-border-primary rounded-md overflow-hidden">
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(!open);
+        }}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:bg-bg-hover/50 transition-colors"
+      >
+        <span>{open ? "▼" : "▶"}</span>
+        <span>{label}</span>
+        <span className="ml-auto opacity-50">{content.length} chars</span>
+      </button>
+      {open && (
+        <pre className="px-3 py-2 text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[500px] overflow-y-auto border-t border-border-primary bg-bg-primary/50">
+          {content}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
   const [expanded, setExpanded] = useState(false);
   const icon = ICON_MAP[node.type] || "❓";
   const colorClass = COLOR_MAP[node.type] || "border-border-primary";
   const dotColor = DOT_COLOR[node.type] || "bg-text-muted";
 
+  const isTool = node.type === "tool_use" || node.type === "tool_result";
   const isLong = node.content.length > 200;
   const showExpand = isLong || node.toolInput || node.toolResult;
+
+  const summary =
+    isTool && node.toolInput
+      ? toolInputSummary(node.toolName || "", node.toolInput)
+      : null;
 
   return (
     <div className="relative pl-12">
@@ -64,14 +175,30 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
         onClick={() => showExpand && setExpanded(!expanded)}
       >
         {/* Header */}
-        <div className="flex items-center gap-2 mb-1">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
           <span className="text-sm">{icon}</span>
-          <span className="text-xs font-medium uppercase text-text-muted tracking-wide">
-            {node.type === "tool_use"
-              ? node.toolName || "tool"
-              : node.type.replace("_", " ")}
-          </span>
-          <span className="text-xs text-text-muted ml-auto">
+
+          {isTool && node.toolName ? (
+            <span
+              className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${
+                BADGE_COLOR[node.toolName] || DEFAULT_BADGE
+              }`}
+            >
+              {node.toolName}
+            </span>
+          ) : (
+            <span className="text-xs font-medium uppercase text-text-muted tracking-wide">
+              {node.type.replace("_", " ")}
+            </span>
+          )}
+
+          {node.type === "tool_result" && (
+            <span className="text-[10px] uppercase tracking-wider text-text-muted">
+              result
+            </span>
+          )}
+
+          <span className="text-xs text-text-muted ml-auto flex-shrink-0">
             {formatTimestamp(node.timestamp)}
           </span>
           {showExpand && (
@@ -81,26 +208,62 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
           )}
         </div>
 
-        {/* Title / collapsed view */}
+        {/* Collapsed: show summary or title */}
         {!expanded && (
-          <p className="text-sm text-text-secondary line-clamp-2 break-words">
-            {node.title}
-          </p>
+          <div>
+            {summary ? (
+              <p className="text-sm text-text-primary font-mono truncate">
+                {summary}
+              </p>
+            ) : (
+              <p className="text-sm text-text-secondary line-clamp-2 break-words">
+                {node.title}
+              </p>
+            )}
+          </div>
         )}
 
         {/* Expanded content */}
         {expanded && (
-          <div className="mt-2 space-y-2">
-            <pre className="text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[600px] overflow-y-auto">
-              {node.content}
-            </pre>
-            {node.toolResult && node.type === "tool_result" && (
-              <div className="mt-2 pt-2 border-t border-border-primary">
-                <span className="text-xs text-text-muted">Result:</span>
-                <pre className="text-sm text-text-secondary whitespace-pre-wrap break-words mt-1 max-h-[400px] overflow-y-auto">
-                  {node.toolResult}
-                </pre>
-              </div>
+          <div className="mt-2 space-y-2" onClick={(e) => e.stopPropagation()}>
+            {/* For tool_use: show summary line + collapsible full input */}
+            {node.type === "tool_use" && (
+              <>
+                {summary && (
+                  <p className="text-sm text-text-primary font-mono bg-bg-primary/50 rounded px-2 py-1 border border-border-primary">
+                    {summary}
+                  </p>
+                )}
+                {node.toolInput && (
+                  <CollapsibleSection
+                    label="Full input"
+                    content={node.toolInput}
+                  />
+                )}
+              </>
+            )}
+
+            {/* For tool_result: show result content */}
+            {node.type === "tool_result" && (
+              <>
+                {summary && (
+                  <p className="text-xs text-text-muted font-mono mb-1">
+                    {node.toolName}: {summary}
+                  </p>
+                )}
+                <CollapsibleSection
+                  label="Output"
+                  content={node.content}
+                  defaultOpen={node.content.length < 2000}
+                />
+              </>
+            )}
+
+            {/* For non-tool types: show content directly */}
+            {!isTool && (
+              <pre className="text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[600px] overflow-y-auto">
+                {node.content}
+              </pre>
             )}
           </div>
         )}

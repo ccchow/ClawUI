@@ -38,7 +38,7 @@ export default function SessionPage() {
   const handleRun = async (prompt: string) => {
     setRunning(true);
     setError(null);
-    console.log("[ClawUI] Starting run:", { sessionId: id, prompt: prompt.slice(0, 50) });
+    console.log("[ClawUI] Starting run:", { sessionId: id, prompt, promptLen: prompt.length });
     const startTime = Date.now();
     try {
       const url = `http://localhost:3001/api/sessions/${id}/run`;

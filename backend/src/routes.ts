@@ -56,7 +56,7 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       return;
     }
     const cwd = getSessionCwd(sessionId);
-    console.log(`[RUN] cwd=${cwd || "default"}, prompt="${prompt.trim().slice(0, 50)}"`);
+    console.log(`[RUN] cwd=${cwd || "default"}, promptLen=${prompt.trim().length}, prompt="${prompt.trim().slice(0, 200)}"`);
     console.log(`[RUN] Executing claude --resume ${sessionId.slice(0, 8)}...`);
     
     const { output, suggestions } = await runPrompt(sessionId, prompt.trim(), cwd);
