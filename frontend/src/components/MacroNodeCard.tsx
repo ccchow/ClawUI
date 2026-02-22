@@ -61,9 +61,19 @@ export function MacroNodeCard({
               <span className="text-xs text-text-muted font-mono">
                 #{index + 1}
               </span>
-              <span className="font-medium text-text-primary truncate">
-                {node.title}
-              </span>
+              {blueprintId ? (
+                <Link
+                  href={`/blueprints/${blueprintId}/nodes/${node.id}`}
+                  className="font-medium text-text-primary truncate hover:text-accent-blue transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {node.title}
+                </Link>
+              ) : (
+                <span className="font-medium text-text-primary truncate">
+                  {node.title}
+                </span>
+              )}
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-tertiary text-text-muted capitalize">
                 {running ? "running" : node.status}
               </span>
@@ -145,7 +155,7 @@ export function MacroNodeCard({
             {node.executions.length > 0 && (
               <div>
                 <h4 className="text-xs text-text-muted mb-1">Executions</h4>
-                <div className="space-y-1">
+                <div className="space-y-1.5">
                   {node.executions.map((exec) => (
                     <div key={exec.id} className="flex items-center gap-2 text-xs">
                       <StatusIndicator status={exec.status} size="sm" />
@@ -155,10 +165,14 @@ export function MacroNodeCard({
                       {exec.sessionId && (
                         <Link
                           href={`/session/${exec.sessionId}`}
-                          className="text-accent-blue hover:underline ml-auto"
+                          className="ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors font-medium"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          session {exec.sessionId.slice(0, 8)}
+                          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M1.5 3A1.5 1.5 0 0 1 3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3zM3 2.5a.5.5 0 0 0-.5.5v10a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V3a.5.5 0 0 0-.5-.5H3z"/>
+                            <path d="M4 5.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm0 2.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7A.5.5 0 0 1 4 8zm0 2.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5z"/>
+                          </svg>
+                          {exec.sessionId.slice(0, 8)}
                         </Link>
                       )}
                     </div>

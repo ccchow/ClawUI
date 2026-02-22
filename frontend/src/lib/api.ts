@@ -298,6 +298,14 @@ export function generatePlan(blueprintId: string, description?: string): Promise
 
 // --- Execution APIs ---
 
+export function getSessionExecution(
+  sessionId: string
+): Promise<NodeExecution | null> {
+  return fetch(`${API_BASE}/sessions/${sessionId}/execution`)
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
+}
+
 export function runNode(
   blueprintId: string,
   nodeId: string
@@ -305,6 +313,15 @@ export function runNode(
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/run`,
     { method: "POST" }
+  );
+}
+
+export function getNodeExecutions(
+  blueprintId: string,
+  nodeId: string
+): Promise<NodeExecution[]> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/executions`
   );
 }
 

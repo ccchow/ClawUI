@@ -6,9 +6,13 @@ import Link from "next/link";
 import {
   getTimeline,
   updateSessionMeta,
+  getSessionExecution,
+  getBlueprint,
   type TimelineNode,
   type Suggestion,
   type SessionMeta,
+  type Blueprint,
+  type MacroNode,
 } from "@/lib/api";
 import { Timeline } from "@/components/Timeline";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
@@ -190,6 +194,13 @@ export default function SessionPage() {
     starred?: boolean;
   }>({});
 
+  // Blueprint context (if this session was created by a plan execution)
+  const [blueprintContext, setBlueprintContext] = useState<{
+    blueprint: Blueprint;
+    node: MacroNode;
+    nodeIndex: number;
+  } | null>(null);
+
   const fetchNodes = useCallback(
     async (showLoader = false) => {
       if (showLoader) setLoading(true);
@@ -211,6 +222,24 @@ export default function SessionPage() {
     },
     [id]
   );
+
+  // Fetch blueprint context (reverse lookup: session → execution → blueprint)
+  useEffect(() => {
+    async function loadBlueprintContext() {
+      try {
+        const execution = await getSessionExecution(id);
+        if (!execution) return;
+        const bp = await getBlueprint(execution.blueprintId);
+        const node = bp.nodes.find((n) => n.id === execution.nodeId);
+        if (!node) return;
+        const nodeIndex = bp.nodes.findIndex((n) => n.id === execution.nodeId);
+        setBlueprintContext({ blueprint: bp, node, nodeIndex });
+      } catch {
+        // No blueprint linked — that's fine
+      }
+    }
+    loadBlueprintContext();
+  }, [id]);
 
   // Fetch session enrichment meta
   useEffect(() => {
@@ -436,6 +465,26 @@ export default function SessionPage() {
         </div>
       ) : (
         <>
+          {/* Blueprint context banner */}
+          {blueprintContext && (
+            <div className="rounded-xl border border-accent-purple/30 bg-accent-purple/10 p-3 mb-4 flex items-center gap-2 text-sm">
+              <span className="text-accent-purple font-medium">Blueprint</span>
+              <Link
+                href={`/blueprints/${blueprintContext.blueprint.id}`}
+                className="text-accent-blue hover:underline font-medium truncate"
+              >
+                {blueprintContext.blueprint.title}
+              </Link>
+              <span className="text-text-muted">&rarr;</span>
+              <span className="text-text-secondary">
+                Node #{blueprintContext.nodeIndex + 1}:
+              </span>
+              <span className="text-text-primary font-medium truncate">
+                {blueprintContext.node.title}
+              </span>
+            </div>
+          )}
+
           {/* Session info header with notes and tag editor */}
           <SessionInfoHeader
             sessionId={id}
