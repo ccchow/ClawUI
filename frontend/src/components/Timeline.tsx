@@ -5,12 +5,15 @@ import type { TimelineNode } from "@/lib/api";
 import { TimelineNodeComponent, ToolPairNode } from "./TimelineNode";
 
 export interface DisplayItem {
-  kind: "single" | "tool_pair";
+  kind: "single" | "tool_pair" | "merged_group";
   key: string;
   node?: TimelineNode;
   toolUse?: TimelineNode;
   toolResult?: TimelineNode;
   timestamp: string;
+  // For merged_group
+  items?: DisplayItem[];
+  mergedType?: string;
 }
 
 /** Group consecutive tool_use + tool_result into pairs */
@@ -201,6 +204,103 @@ function countByFilter(grouped: DisplayItem[]): Record<FilterKey, number> {
   return counts;
 }
 
+// --- Merge consecutive same-type items ---
+
+function getDisplayType(item: DisplayItem): string {
+  if (item.kind === "tool_pair") return "tool";
+  const type = item.node?.type || "unknown";
+  if (type === "tool_use" || type === "tool_result") return "tool";
+  return type;
+}
+
+function mergeConsecutive(items: DisplayItem[]): DisplayItem[] {
+  if (items.length <= 1) return items;
+
+  const result: DisplayItem[] = [];
+  let runStart = 0;
+
+  for (let i = 1; i <= items.length; i++) {
+    const prevType = getDisplayType(items[i - 1]);
+    const currType = i < items.length ? getDisplayType(items[i]) : null;
+
+    if (currType !== prevType) {
+      const run = items.slice(runStart, i);
+      if (run.length >= 3) {
+        // Merge into a group
+        result.push({
+          kind: "merged_group",
+          key: `merged-${run[0].key}`,
+          timestamp: run[0].timestamp,
+          items: run,
+          mergedType: prevType,
+        });
+      } else {
+        // Keep individual items
+        result.push(...run);
+      }
+      runStart = i;
+    }
+  }
+
+  return result;
+}
+
+// --- MergedGroupNode ---
+
+const MERGE_ICONS: Record<string, string> = {
+  user: "👤",
+  assistant: "🤖",
+  tool: "🔧",
+  system: "⚙️",
+  error: "⚠️",
+};
+
+const MERGE_COLORS: Record<string, string> = {
+  user: "border-accent-blue text-accent-blue",
+  assistant: "border-accent-purple text-accent-purple",
+  tool: "border-accent-amber text-accent-amber",
+  system: "border-text-muted text-text-muted",
+  error: "border-accent-red text-accent-red",
+};
+
+function MergedGroupNode({ items, type }: { items: DisplayItem[]; type: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const icon = MERGE_ICONS[type] || "❓";
+  const colorClass = MERGE_COLORS[type] || "border-border-primary text-text-muted";
+
+  return (
+    <div className="relative pl-12">
+      <div className="absolute left-[14px] top-3 w-3 h-3 rounded-full bg-bg-tertiary ring-2 ring-bg-primary z-10" />
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className={`w-full text-left rounded-lg border-l-2 ${colorClass} bg-bg-secondary/50 px-3 py-2 hover:bg-bg-hover/30 transition-all`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono">{expanded ? "▼" : "▶"}</span>
+          <span>{icon}</span>
+          <span className="text-xs font-medium">{items.length} {type} messages</span>
+          {!expanded && items[0].node && (
+            <span className="text-xs text-text-muted truncate ml-2">
+              {items[0].node.title}
+            </span>
+          )}
+        </div>
+      </button>
+      {expanded && (
+        <div className="space-y-1 mt-1">
+          {items.map((item) =>
+            item.kind === "tool_pair" ? (
+              <ToolPairNode key={item.key} toolUse={item.toolUse!} toolResult={item.toolResult!} />
+            ) : (
+              <TimelineNodeComponent key={item.key} node={item.node!} />
+            )
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- TimeGroupComponent ---
 
 function TimeGroupSection({
@@ -215,6 +315,11 @@ function TimeGroupSection({
   const filteredItems = useMemo(
     () => group.items.filter((item) => filters[getItemFilterKey(item)]),
     [group.items, filters]
+  );
+
+  const mergedItems = useMemo(
+    () => mergeConsecutive([...filteredItems].reverse()),
+    [filteredItems]
   );
 
   if (filteredItems.length === 0) return null;
@@ -247,15 +352,17 @@ function TimeGroupSection({
       {/* Group content */}
       {!collapsed && (
         <div className="space-y-1 mt-1">
-          {[...filteredItems].reverse().map((item) =>
-            item.kind === "tool_pair" ? (
+          {mergedItems.map((merged) =>
+            merged.kind === "merged_group" ? (
+              <MergedGroupNode key={merged.key} items={merged.items!} type={merged.mergedType!} />
+            ) : merged.kind === "tool_pair" ? (
               <ToolPairNode
-                key={item.key}
-                toolUse={item.toolUse!}
-                toolResult={item.toolResult!}
+                key={merged.key}
+                toolUse={merged.toolUse!}
+                toolResult={merged.toolResult!}
               />
             ) : (
-              <TimelineNodeComponent key={item.key} node={item.node!} />
+              <TimelineNodeComponent key={merged.key} node={merged.node!} />
             )
           )}
         </div>
