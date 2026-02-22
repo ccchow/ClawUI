@@ -69,11 +69,23 @@ function getTimeGroups(items: DisplayItem[]): TimeGroup[] {
   let currentItems: DisplayItem[] = [items[0]];
   let currentStart = new Date(items[0].timestamp);
 
+  // Adaptive gap threshold:
+  // - Messages within last hour: split every 10 min gap
+  // - Messages 1-24h old: split every 30 min gap
+  // - Older: split every 1 hour gap
+  function getGapThreshold(timestamp: Date): number {
+    const ageMs = now.getTime() - timestamp.getTime();
+    const ageHours = ageMs / (1000 * 60 * 60);
+    if (ageHours < 1) return 10 * 60 * 1000;   // 10 min
+    if (ageHours < 24) return 30 * 60 * 1000;  // 30 min
+    return 60 * 60 * 1000;                       // 1 hour
+  }
+
   for (let i = 1; i < items.length; i++) {
     const prevTime = new Date(items[i - 1].timestamp);
     const currTime = new Date(items[i].timestamp);
     const gapMs = Math.abs(currTime.getTime() - prevTime.getTime());
-    const GAP_THRESHOLD = 60 * 60 * 1000; // 1 hour
+    const GAP_THRESHOLD = getGapThreshold(currTime);
 
     if (gapMs > GAP_THRESHOLD) {
       // Finalize current group
@@ -89,6 +101,13 @@ function getTimeGroups(items: DisplayItem[]): TimeGroup[] {
   // Finalize last group
   const endTime = new Date(items[items.length - 1].timestamp);
   groups.push(makeGroup(currentItems, currentStart, endTime, now));
+
+  // Collapse all groups except the most recent one
+  if (groups.length > 1) {
+    for (let i = 0; i < groups.length - 1; i++) {
+      groups[i].defaultCollapsed = true;
+    }
+  }
 
   return groups;
 }
@@ -106,8 +125,9 @@ function makeGroup(
   const timeStr = formatTimeRange(startTime, endTime);
   const relLabel = formatRelative(endTime, now);
 
-  // Collapse logic: >2 hours old → collapsed
-  const defaultCollapsed = ageHours > 2;
+  // Collapse logic: not the most recent group → collapsed
+  // (will be overridden after all groups are created)
+  const defaultCollapsed = false;
 
   // Summary of node types
   const typeCounts: Record<string, number> = {};
@@ -305,7 +325,7 @@ export function Timeline({ nodes }: { nodes: TimelineNode[] }) {
         {/* Vertical line */}
         <div className="absolute left-5 top-0 bottom-0 w-px bg-border-primary" />
 
-        {timeGroups.map((group) => (
+        {[...timeGroups].reverse().map((group) => (
           <TimeGroupSection
             key={group.id}
             group={group}
