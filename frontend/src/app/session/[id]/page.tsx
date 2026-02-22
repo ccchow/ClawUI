@@ -37,8 +37,33 @@ export default function SessionPage() {
 
   const handleRun = async (prompt: string) => {
     setRunning(true);
+    setError(null);
+    console.log("[ClawUI] Starting run:", { sessionId: id, prompt: prompt.slice(0, 50) });
+    const startTime = Date.now();
     try {
-      const { output, suggestions: newSuggestions } = await runPrompt(id, prompt);
+      const url = `http://localhost:3001/api/sessions/${id}/run`;
+      console.log("[ClawUI] POST", url);
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      const elapsed = Date.now() - startTime;
+      console.log("[ClawUI] Response received:", { status: res.status, elapsed: `${elapsed}ms` });
+      
+      if (!res.ok) {
+        const body = await res.text();
+        console.error("[ClawUI] API error:", body);
+        throw new Error(`API error ${res.status}: ${body}`);
+      }
+
+      const data = await res.json();
+      console.log("[ClawUI] Parsed response:", { 
+        outputLen: data.output?.length, 
+        suggestionsCount: data.suggestions?.length,
+        outputPreview: data.output?.slice(0, 100),
+      });
+
       // Append prompt + result as new timeline nodes
       setNodes((prev) => [
         ...prev,
@@ -53,15 +78,18 @@ export default function SessionPage() {
           id: `result-${Date.now()}`,
           type: "assistant" as const,
           timestamp: new Date().toISOString(),
-          title: output.slice(0, 120),
-          content: output,
+          title: (data.output || "").slice(0, 120),
+          content: data.output || "(empty response)",
         },
       ]);
       // Update suggestions from the same response
-      setSuggestions(newSuggestions);
+      setSuggestions(data.suggestions || []);
     } catch (e) {
+      const elapsed = Date.now() - startTime;
+      console.error("[ClawUI] Run failed:", { elapsed: `${elapsed}ms`, error: e });
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      console.log("[ClawUI] Run complete, setting running=false");
       setRunning(false);
     }
   };
