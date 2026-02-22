@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   type Blueprint,
@@ -9,6 +9,7 @@ import {
   approveBlueprint,
   updateBlueprint,
   createMacroNode,
+  generatePlan,
   runAllNodes,
 } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
@@ -16,11 +17,14 @@ import { MacroNodeCard } from "@/components/MacroNodeCard";
 
 export default function BlueprintDetailPage() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const id = params.id as string;
 
   const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const autoGenerateTriggered = useRef(false);
 
   // Add node form
   const [showAddNode, setShowAddNode] = useState(false);
@@ -53,6 +57,34 @@ export default function BlueprintDetailPage() {
   useEffect(() => {
     loadBlueprint();
   }, [loadBlueprint]);
+
+  // Auto-generate nodes if ?generate=true
+  useEffect(() => {
+    if (
+      searchParams.get("generate") === "true" &&
+      !autoGenerateTriggered.current &&
+      blueprint &&
+      blueprint.nodes.length === 0 &&
+      !generating
+    ) {
+      autoGenerateTriggered.current = true;
+      handleGenerate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blueprint, searchParams]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    setError(null);
+    try {
+      await generatePlan(id);
+      await loadBlueprint();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   // Auto-poll when blueprint is running
   useEffect(() => {
@@ -239,6 +271,24 @@ export default function BlueprintDetailPage() {
               {approving ? "Approving..." : "Approve Plan"}
             </button>
           )}
+          <button
+            onClick={handleGenerate}
+            disabled={generating || isRunning}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${
+              blueprint.nodes.length === 0
+                ? "bg-accent-purple text-white hover:bg-accent-purple/90"
+                : "border border-accent-purple text-accent-purple hover:bg-accent-purple/10"
+            }`}
+          >
+            {generating ? (
+              <>
+                <span className="inline-block w-3 h-3 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+                Generating...
+              </>
+            ) : (
+              "Generate Nodes"
+            )}
+          </button>
           {canRunAll && (
             <button
               onClick={handleRunAll}

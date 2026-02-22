@@ -13,7 +13,7 @@ export default function NewBlueprintPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent, autoGenerate = false) => {
     e.preventDefault();
     if (!title.trim()) return;
 
@@ -25,7 +25,7 @@ export default function NewBlueprintPage() {
         description: description.trim() || undefined,
         projectCwd: projectCwd.trim() || undefined,
       });
-      router.push(`/blueprints/${bp.id}`);
+      router.push(autoGenerate ? `/blueprints/${bp.id}?generate=true` : `/blueprints/${bp.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
@@ -101,6 +101,14 @@ export default function NewBlueprintPage() {
             className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? "Creating..." : "Create Blueprint"}
+          </button>
+          <button
+            type="button"
+            disabled={!title.trim() || submitting}
+            onClick={(e) => handleSubmit(e as unknown as React.FormEvent, true)}
+            className="px-4 py-2 rounded-lg bg-accent-purple text-white text-sm font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {submitting ? "Creating..." : "Create & Generate"}
           </button>
           <Link
             href="/blueprints"

@@ -364,6 +364,21 @@ planRouter.get("/api/sessions/:sessionId/execution", (req, res) => {
   }
 });
 
+// ─── AI Plan Generation ──────────────────────────────────────
+
+// POST /api/blueprints/:id/generate — generate nodes via Claude
+planRouter.post("/api/blueprints/:id/generate", async (req, res) => {
+  res.setTimeout(180_000);
+  try {
+    const { description } = req.body as { description?: string };
+    const { generatePlan } = await import("./plan-generator.js");
+    const nodes = await generatePlan(req.params.id, description);
+    res.json(nodes);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ─── Backward-compat: /api/plans/* → same handlers ──────────
 
 // POST /api/plans — create (accepts both cwd and projectCwd)
@@ -587,6 +602,19 @@ planRouter.post("/api/plans/:id/run-all", (req, res) => {
       console.error(`[plan-executor] run-all failed for ${req.params.id}:`, err);
     });
     res.json({ message: "execution started", blueprintId: req.params.id });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/plans/:id/generate
+planRouter.post("/api/plans/:id/generate", async (req, res) => {
+  res.setTimeout(180_000);
+  try {
+    const { description } = req.body as { description?: string };
+    const { generatePlan } = await import("./plan-generator.js");
+    const nodes = await generatePlan(req.params.id, description);
+    res.json(nodes);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

@@ -286,6 +286,16 @@ export function deleteMacroNode(
   );
 }
 
+// --- AI Generation APIs ---
+
+export function generatePlan(blueprintId: string, description?: string): Promise<MacroNode[]> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description }),
+  });
+}
+
 // --- Execution APIs ---
 
 export function runNode(
