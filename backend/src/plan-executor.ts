@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { writeFileSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { writeFileSync, unlinkSync, existsSync, readdirSync, statSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
+import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   getBlueprint,
@@ -12,10 +12,46 @@ import {
   createArtifact,
   getArtifactsForNode,
 } from "./plan-db.js";
+import { syncSession } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact } from "./plan-db.js";
 
 const EXEC_TIMEOUT = 300_000; // 5 minutes per node
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "/Users/leizhou/.local/bin/claude";
+const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+
+// ─── Session detection ─────────────────────────────────────
+
+/**
+ * Find the newest JSONL session file created after `beforeTimestamp`
+ * in the Claude projects directory matching `projectCwd`.
+ * Returns the session ID (filename minus .jsonl) or null.
+ */
+export function detectNewSession(
+  projectCwd: string,
+  beforeTimestamp: Date,
+): string | null {
+  // Claude encodes CWD as path with / replaced by -
+  // e.g. /Users/leizhou/Git/ClawUI → -Users-leizhou-Git-ClawUI
+  const encodedDir = projectCwd.replace(/\//g, "-");
+  const projDir = join(CLAUDE_PROJECTS_DIR, encodedDir);
+
+  if (!existsSync(projDir)) return null;
+
+  let newestId: string | null = null;
+  let newestMtime = beforeTimestamp.getTime();
+
+  for (const file of readdirSync(projDir)) {
+    if (!file.endsWith(".jsonl")) continue;
+    const filePath = join(projDir, file);
+    const stat = statSync(filePath);
+    if (stat.mtime.getTime() > newestMtime) {
+      newestMtime = stat.mtime.getTime();
+      newestId = basename(file, ".jsonl");
+    }
+  }
+
+  return newestId;
+}
 
 // ─── Low-level Claude runner (no --resume) ─────────────────
 
@@ -192,17 +228,30 @@ export async function executeNode(
   );
 
   const startTime = Date.now();
+  const beforeTimestamp = new Date();
 
   try {
     const output = await runClaude(prompt, blueprint.projectCwd);
 
     const elapsed = (Date.now() - startTime) / 60_000;
 
+    // Detect the session created by claude -p
+    let sessionId: string | undefined;
+    if (blueprint.projectCwd) {
+      const detected = detectNewSession(blueprint.projectCwd, beforeTimestamp);
+      if (detected) {
+        sessionId = detected;
+        // Sync session into the index so it appears immediately
+        syncSession(detected);
+      }
+    }
+
     // Success
     updateExecution(execution.id, {
       status: "done",
       outputSummary: output.slice(0, 2000),
       completedAt: new Date().toISOString(),
+      ...(sessionId ? { sessionId } : {}),
     });
     updateMacroNode(blueprintId, nodeId, {
       status: "done",

@@ -27,14 +27,16 @@ export function MacroNodeCard({
     e.stopPropagation();
     if (!blueprintId || running) return;
     setRunning(true);
-    try {
-      await runNode(blueprintId, node.id);
-    } catch {
-      // Error will be visible after refresh (stored in node.error)
-    } finally {
-      setRunning(false);
-      onRefresh?.();
-    }
+    // Fire and forget — don't await the long-running execution
+    // The parent page polls for status updates
+    runNode(blueprintId, node.id)
+      .catch(() => {})
+      .finally(() => {
+        setRunning(false);
+        onRefresh?.();
+      });
+    // Trigger immediate refresh so parent starts polling
+    setTimeout(() => onRefresh?.(), 1000);
   };
 
   return (

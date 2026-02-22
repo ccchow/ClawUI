@@ -86,15 +86,16 @@ export default function BlueprintDetailPage() {
     }
   };
 
-  // Auto-poll when blueprint is running
+  // Auto-poll when blueprint or any node is running
+  const anyNodeRunning = blueprint?.nodes.some(n => n.status === "running") ?? false;
   useEffect(() => {
-    if (blueprint?.status === "running") {
+    if (blueprint?.status === "running" || anyNodeRunning) {
       pollRef.current = setInterval(() => {
         getBlueprint(id)
           .then((bp) => {
             setBlueprint(bp);
-            if (bp.status !== "running") {
-              // Stop polling when done/failed
+            const stillRunning = bp.status === "running" || bp.nodes.some(n => n.status === "running");
+            if (!stillRunning) {
               if (pollRef.current) clearInterval(pollRef.current);
               pollRef.current = null;
               setRunningAll(false);
