@@ -107,7 +107,7 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="pb-48">
+    <div className="pb-12">
       {/* Header */}
       <div className="mb-6">
         <Link
@@ -131,28 +131,28 @@ export default function SessionPage() {
         </div>
       ) : (
         <>
-          <Timeline nodes={nodes} />
+          {/* Action area — at top since timeline is newest-first */}
+          <div className="mb-6 space-y-4">
+            <PromptInput
+              disabled={running}
+              loading={running}
+              onSubmit={handleRun}
+            />
 
-          {/* Action area */}
-          <div className="mt-8 space-y-4">
             <SuggestionButtons
               suggestions={suggestions}
               disabled={running}
               onSelect={handleRun}
             />
 
-            <PromptInput
-              disabled={running}
-              loading={running}
-              onSubmit={handleRun}
-            />
+            {error && (
+              <div className="p-3 rounded-lg bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm">
+                {error}
+              </div>
+            )}
           </div>
 
-          {error && (
-            <div className="mt-4 p-3 rounded-lg bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm">
-              {error}
-            </div>
-          )}
+          <Timeline nodes={nodes} />
         </>
       )}
     </div>

@@ -97,11 +97,17 @@ function parseSuggestions(output: string): { cleanOutput: string; suggestions: S
   try {
     const jsonMatch = suggestionsRaw.match(/\[[\s\S]*\]/);
     if (jsonMatch) {
+      console.log("[SUGGESTIONS] Raw JSON length:", jsonMatch[0].length);
+      console.log("[SUGGESTIONS] Raw JSON:", jsonMatch[0].slice(0, 500));
       const suggestions: Suggestion[] = JSON.parse(jsonMatch[0]);
+      console.log("[SUGGESTIONS] Parsed prompts:", suggestions.map(s => `${s.title}: ${s.prompt.length} chars`));
       return { cleanOutput, suggestions: suggestions.slice(0, 3) };
+    } else {
+      console.log("[SUGGESTIONS] No JSON match found in:", suggestionsRaw.slice(0, 200));
     }
-  } catch {
-    // Failed to parse, return empty suggestions
+  } catch (e) {
+    console.error("[SUGGESTIONS] JSON parse error:", e);
+    console.log("[SUGGESTIONS] Raw text:", suggestionsRaw.slice(0, 500));
   }
 
   return { cleanOutput, suggestions: [] };
