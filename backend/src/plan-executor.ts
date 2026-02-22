@@ -148,7 +148,15 @@ function buildNodePrompt(
     prompt += `## Working Directory: ${blueprint.projectCwd}\n\n`;
   }
 
-  prompt += `Complete this step thoroughly. Focus only on THIS step.`;
+  prompt += `## Instructions
+- Complete this step thoroughly. Focus only on THIS step.
+- DO NOT ask for confirmation or clarification. Just write the code directly.
+- If you encounter a blocker you cannot resolve, output a section at the end:
+  ---BLOCKER---
+  {"type": "missing_dependency" | "unclear_requirement" | "access_issue" | "technical_limitation",
+   "description": "What is blocking you",
+   "suggestion": "What the human could do to unblock"}
+- After completing, verify your changes compile (run tsc --noEmit if applicable).`;
   return prompt;
 }
 
@@ -245,12 +253,39 @@ export async function executeNode(
       const detected = detectNewSession(blueprint.projectCwd, beforeTimestamp);
       if (detected) {
         sessionId = detected;
-        // Sync session into the index so it appears immediately
         syncSession(detected);
       }
     }
 
-    // Success
+    // Check for blocker in output
+    const blockerMatch = output.match(/---BLOCKER---\s*([\s\S]*?)$/);
+    if (blockerMatch) {
+      const blockerText = blockerMatch[1].trim();
+      let blockerInfo: string;
+      try {
+        const parsed = JSON.parse(blockerText);
+        blockerInfo = `[${parsed.type}] ${parsed.description}. Suggestion: ${parsed.suggestion}`;
+      } catch {
+        blockerInfo = blockerText;
+      }
+
+      updateExecution(execution.id, {
+        status: "done",
+        outputSummary: `BLOCKER: ${blockerInfo}\n\n${output.slice(0, 1500)}`,
+        completedAt: new Date().toISOString(),
+        ...(sessionId ? { sessionId } : {}),
+      });
+      updateMacroNode(blueprintId, nodeId, {
+        status: "blocked",
+        error: `Blocker: ${blockerInfo}`,
+        actualMinutes: Math.round(elapsed * 10) / 10,
+      });
+
+      await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+      return updateExecution(execution.id, {})!;
+    }
+
+    // Success — no blocker
     updateExecution(execution.id, {
       status: "done",
       outputSummary: output.slice(0, 2000),
