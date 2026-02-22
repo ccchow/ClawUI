@@ -24,6 +24,8 @@ function runClaude(
         "--dangerously-skip-permissions",
         "--resume",
         sessionId,
+        "--mcp-config", "{}",
+        "--strict-mcp-config",
         "-p",
         prompt,
       ],
