@@ -78,13 +78,23 @@ export async function generatePlan(blueprintId: string, taskDescription?: string
   if (!desc) throw new Error("No task description provided");
 
   const existingCount = blueprint.nodes.length;
+
+  // Build context of existing nodes so AI doesn't generate duplicates
+  let existingNodesContext = "";
+  if (blueprint.nodes.length > 0) {
+    const nodeList = blueprint.nodes.map(n =>
+      `  #${n.order}. [${n.status}] ${n.title}`
+    ).join("\n");
+    existingNodesContext = `\n\nAlready completed/existing nodes in this blueprint:\n${nodeList}\n\nDo NOT regenerate these. Only generate NEW nodes for remaining work.`;
+  }
+
   const prompt = `You are a senior software architect planning a development task.
 
 Task: ${desc}
 Working directory: ${blueprint.projectCwd || "not specified"}
-Project context: This is ClawUI, a Claude Code session viewer built with Express (backend) + Next.js (frontend), using SQLite for data, expect for Claude CLI TTY. See CLAUDE.md and docs/ for architecture details.
+Project context: This is ClawUI, a Claude Code session viewer built with Express (backend) + Next.js (frontend), using SQLite for data, expect for Claude CLI TTY. See CLAUDE.md and docs/ for architecture details.${existingNodesContext}
 
-Decompose this task into 2-6 concrete, independently executable steps.
+Generate the NEXT 2-6 concrete steps that still need to be done.
 Each step will be executed by a separate Claude Code session.
 
 Output ONLY a JSON array (no markdown, no explanation):
