@@ -148,20 +148,123 @@ function CollapsibleSection({
   );
 }
 
+export function ToolPairNode({
+  toolUse,
+  toolResult,
+}: {
+  toolUse: TimelineNode;
+  toolResult: TimelineNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const toolName = toolUse.toolName || "tool";
+  const badgeColor = BADGE_COLOR[toolName] || DEFAULT_BADGE;
+  const summary = toolInputSummary(toolName, toolUse.toolInput || "{}");
+
+  const resultPreview =
+    toolResult.content.length > 80
+      ? toolResult.content.slice(0, 80).replace(/\n/g, " ") + "..."
+      : toolResult.content.replace(/\n/g, " ");
+
+  return (
+    <div className="relative pl-12">
+      {/* Timeline dot */}
+      <div className="absolute left-[14px] top-4 w-3 h-3 rounded-full bg-accent-amber ring-2 ring-bg-primary z-10" />
+
+      <div
+        className="rounded-lg border-l-2 border-accent-amber bg-accent-amber/5 p-3 cursor-pointer transition-all hover:bg-bg-hover/30"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {/* Header */}
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <span className="text-sm">🔧</span>
+          <span
+            className={`text-xs font-semibold px-2 py-0.5 rounded-md border ${badgeColor}`}
+          >
+            {toolName}
+          </span>
+          <span className="text-xs text-text-muted ml-auto flex-shrink-0">
+            {formatTimestamp(toolUse.timestamp)}
+          </span>
+          <span className="text-xs text-text-muted">
+            {expanded ? "▼" : "▶"}
+          </span>
+        </div>
+
+        {/* Collapsed: summary + short result preview */}
+        {!expanded && (
+          <div className="space-y-0.5">
+            {summary && (
+              <p className="text-sm text-text-primary font-mono truncate">
+                {summary}
+              </p>
+            )}
+            <p className="text-xs text-text-muted truncate">
+              → {resultPreview}
+            </p>
+          </div>
+        )}
+
+        {/* Expanded: input + output sections */}
+        {expanded && (
+          <div className="mt-2 space-y-2" onClick={(e) => e.stopPropagation()}>
+            {summary && (
+              <p className="text-sm text-text-primary font-mono bg-bg-primary/50 rounded px-2 py-1 border border-border-primary">
+                {summary}
+              </p>
+            )}
+
+            {toolUse.toolInput && (
+              <CollapsibleSection
+                label="Input"
+                content={toolUse.toolInput}
+              />
+            )}
+
+            <CollapsibleSection
+              label="Output"
+              content={toolResult.content}
+              defaultOpen={toolResult.content.length < 2000}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
   const [expanded, setExpanded] = useState(false);
   const icon = ICON_MAP[node.type] || "❓";
   const colorClass = COLOR_MAP[node.type] || "border-border-primary";
   const dotColor = DOT_COLOR[node.type] || "bg-text-muted";
 
+  const isThinking = node.type === "system" && node.title.includes("⏳");
   const isTool = node.type === "tool_use" || node.type === "tool_result";
   const isLong = node.content.length > 200;
-  const showExpand = isLong || node.toolInput || node.toolResult;
+  const showExpand = !isThinking && (isLong || node.toolInput || node.toolResult);
 
   const summary =
     isTool && node.toolInput
       ? toolInputSummary(node.toolName || "", node.toolInput)
       : null;
+
+  // Special rendering for thinking/running state
+  if (isThinking) {
+    return (
+      <div className="relative pl-12">
+        <div className="absolute left-[14px] top-4 w-3 h-3 rounded-full bg-accent-amber ring-2 ring-bg-primary z-10 animate-pulse" />
+        <div className="rounded-lg border-l-2 border-accent-amber bg-accent-amber/5 p-4">
+          <div className="flex items-center gap-3">
+            <div className="animate-spin h-5 w-5 border-2 border-accent-amber border-t-transparent rounded-full" />
+            <div>
+              <p className="text-sm font-medium text-accent-amber">Claude Code is working...</p>
+              <p className="text-xs text-text-muted mt-1 font-mono">{node.content.slice(0, 150)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative pl-12">

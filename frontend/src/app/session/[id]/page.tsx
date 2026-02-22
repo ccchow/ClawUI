@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -13,6 +13,16 @@ import { Timeline } from "@/components/Timeline";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
 
+const POLL_INTERVAL = 5_000;
+
+function timeAgo(ts: number): string {
+  const diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 5) return "just now";
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
+}
+
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
 
@@ -21,28 +31,98 @@ export default function SessionPage() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<number>(0);
+  const [refreshLabel, setRefreshLabel] = useState("just now");
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const nodeCountRef = useRef(0);
 
+  const fetchNodes = useCallback(
+    async (showLoader = false) => {
+      if (showLoader) setLoading(true);
+      try {
+        const n = await getTimeline(id);
+        // Only update state if node count changed (avoids re-render churn)
+        if (n.length !== nodeCountRef.current) {
+          setNodes(n);
+          nodeCountRef.current = n.length;
+        }
+        setLastRefresh(Date.now());
+        if (showLoader) setLoading(false);
+      } catch (e) {
+        if (showLoader) {
+          setError(e instanceof Error ? e.message : String(e));
+          setLoading(false);
+        }
+      }
+    },
+    [id]
+  );
+
+  // Initial load
   useEffect(() => {
-    setLoading(true);
-    getTimeline(id)
-      .then((n) => {
-        setNodes(n);
-        setLoading(false);
-      })
-      .catch((e) => {
-        setError(e.message);
-        setLoading(false);
-      });
-  }, [id]);
+    nodeCountRef.current = 0;
+    fetchNodes(true);
+  }, [fetchNodes]);
+
+  // Auto-refresh poll
+  useEffect(() => {
+    if (!autoRefresh || loading) return;
+
+    const interval = setInterval(() => {
+      // Only poll when tab is visible and not running a prompt
+      if (!document.hidden && !running) {
+        fetchNodes(false);
+      }
+    }, POLL_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [autoRefresh, loading, running, fetchNodes]);
+
+  // Update the "Xm ago" label every second
+  useEffect(() => {
+    if (!lastRefresh) return;
+    const tick = setInterval(() => {
+      setRefreshLabel(timeAgo(lastRefresh));
+    }, 1_000);
+    return () => clearInterval(tick);
+  }, [lastRefresh]);
 
   const handleRun = async (prompt: string) => {
     setRunning(true);
     setError(null);
-    console.log("[ClawUI] Starting run:", { sessionId: id, prompt, promptLen: prompt.length });
+    setSuggestions([]);
+
+    const userNodeId = `run-${Date.now()}`;
+    const thinkingNodeId = `thinking-${Date.now()}`;
+    const now = new Date().toISOString();
+
+    // Optimistic UI: immediately show user message + thinking indicator
+    setNodes((prev) => {
+      const updated = [
+        ...prev,
+        {
+          id: userNodeId,
+          type: "user" as const,
+          timestamp: now,
+          title: prompt.slice(0, 120),
+          content: prompt,
+        },
+        {
+          id: thinkingNodeId,
+          type: "system" as const,
+          timestamp: now,
+          title: "⏳ Claude Code is working...",
+          content: prompt,
+        },
+      ];
+      nodeCountRef.current = updated.length;
+      return updated;
+    });
+
+    console.log("[ClawUI] Starting run:", { sessionId: id, promptLen: prompt.length });
     const startTime = Date.now();
     try {
       const url = `http://localhost:3001/api/sessions/${id}/run`;
-      console.log("[ClawUI] POST", url);
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -50,46 +130,52 @@ export default function SessionPage() {
       });
       const elapsed = Date.now() - startTime;
       console.log("[ClawUI] Response received:", { status: res.status, elapsed: `${elapsed}ms` });
-      
+
       if (!res.ok) {
         const body = await res.text();
-        console.error("[ClawUI] API error:", body);
         throw new Error(`API error ${res.status}: ${body}`);
       }
 
       const data = await res.json();
-      console.log("[ClawUI] Parsed response:", { 
-        outputLen: data.output?.length, 
-        suggestionsCount: data.suggestions?.length,
-        outputPreview: data.output?.slice(0, 100),
-      });
+      console.log("[ClawUI] Parsed:", { outputLen: data.output?.length, suggestions: data.suggestions?.length });
 
-      // Append prompt + result as new timeline nodes
-      setNodes((prev) => [
-        ...prev,
-        {
-          id: `run-${Date.now()}`,
-          type: "user" as const,
-          timestamp: new Date().toISOString(),
-          title: prompt.slice(0, 120),
-          content: prompt,
-        },
-        {
-          id: `result-${Date.now()}`,
-          type: "assistant" as const,
-          timestamp: new Date().toISOString(),
-          title: (data.output || "").slice(0, 120),
-          content: data.output || "(empty response)",
-        },
-      ]);
-      // Update suggestions from the same response
+      // Replace thinking node with actual response
+      setNodes((prev) => {
+        const updated = prev.map((n) =>
+          n.id === thinkingNodeId
+            ? {
+                id: `result-${Date.now()}`,
+                type: "assistant" as const,
+                timestamp: new Date().toISOString(),
+                title: (data.output || "").slice(0, 120),
+                content: data.output || "(empty response)",
+              }
+            : n
+        );
+        nodeCountRef.current = updated.length;
+        return updated;
+      });
+      setLastRefresh(Date.now());
       setSuggestions(data.suggestions || []);
     } catch (e) {
       const elapsed = Date.now() - startTime;
       console.error("[ClawUI] Run failed:", { elapsed: `${elapsed}ms`, error: e });
+      // Replace thinking node with error
+      setNodes((prev) =>
+        prev.map((n) =>
+          n.id === thinkingNodeId
+            ? {
+                id: `error-${Date.now()}`,
+                type: "error" as const,
+                timestamp: new Date().toISOString(),
+                title: "❌ Failed",
+                content: e instanceof Error ? e.message : String(e),
+              }
+            : n
+        )
+      );
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      console.log("[ClawUI] Run complete, setting running=false");
       setRunning(false);
     }
   };
@@ -122,6 +208,25 @@ export default function SessionPage() {
           <span className="text-xs text-text-muted">
             {nodes.length} nodes
           </span>
+
+          {/* Refresh indicator */}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => setAutoRefresh((v) => !v)}
+              title={autoRefresh ? "Auto-refresh on (click to disable)" : "Auto-refresh off (click to enable)"}
+              className={`w-2 h-2 rounded-full transition-colors ${
+                autoRefresh ? "bg-accent-green animate-pulse" : "bg-text-muted"
+              }`}
+            />
+            <span className="text-xs text-text-muted">{refreshLabel}</span>
+            <button
+              onClick={() => fetchNodes(false)}
+              title="Refresh now"
+              className="text-xs text-text-muted hover:text-text-primary transition-colors px-1.5 py-0.5 rounded hover:bg-bg-tertiary"
+            >
+              ↻
+            </button>
+          </div>
         </div>
       </div>
 
