@@ -60,14 +60,18 @@ function runClaude(prompt: string, cwd?: string): Promise<string> {
     const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
     writeFileSync(tmpFile, prompt, "utf-8");
 
+    // Read prompt via Tcl file read, pass to claude via sh -c with single quotes
+    // Single quotes in prompt are escaped as: '\''
     const expectScript = `
 set timeout 300
+set stty_init "columns 2000"
 set fp [open "${tmpFile}" r]
-set prompt [read $fp]
+set prompt [read -nonewline $fp]
 close $fp
 file delete "${tmpFile}"
-set stty_init "columns 2000"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions -p $prompt
+# Escape single quotes for shell: replace ' with '\''
+regsub -all {(')} $prompt {'\\'\\''} escaped_prompt
+spawn /bin/sh -c "exec ${CLAUDE_PATH} --dangerously-skip-permissions -p '$escaped_prompt'"
 expect eof
 `;
 

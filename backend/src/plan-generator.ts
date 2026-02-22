@@ -15,11 +15,12 @@ function runClaude(prompt: string, cwd?: string): Promise<string> {
     const expectScript = `
 set timeout 120
 set fp [open "${tmpFile}" r]
-set prompt [read $fp]
+set prompt [read -nonewline $fp]
 close $fp
 file delete "${tmpFile}"
 set stty_init "columns 2000"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions -p $prompt
+regsub -all {(')} $prompt {'\\'\\''} escaped_prompt
+spawn /bin/sh -c "exec ${CLAUDE_PATH} --dangerously-skip-permissions -p '$escaped_prompt'"
 expect eof
 `;
     const tmpExpect = join(tmpdir(), `clawui-gen-${randomUUID()}.exp`);
