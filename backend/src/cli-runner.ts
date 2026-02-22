@@ -1,6 +1,6 @@
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 
-const SUGGESTION_SUFFIX = `\n\nAfter completing the task above, append a line "---SUGGESTIONS---" followed by a JSON array of exactly 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. Do not wrap in markdown code blocks.`;
+const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exactly this marker on its own line: ---SUGGESTIONS--- followed by a JSON array of 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. No markdown code blocks around it.`;
 
 const EXEC_TIMEOUT = 180_000; // 3 minutes
 
@@ -16,17 +16,21 @@ function runClaude(
   cwd?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    // Use shell-escaped single-quoted prompt to handle special characters
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
-    const cmd = `claude --dangerously-skip-permissions --resume '${sessionId}' -p '${escapedPrompt}'`;
-
-    exec(
-      cmd,
+    const claudePath = process.env.CLAUDE_PATH || "/Users/leizhou/.local/bin/claude";
+    
+    execFile(
+      claudePath,
+      [
+        "--dangerously-skip-permissions",
+        "--resume",
+        sessionId,
+        "-p",
+        prompt,
+      ],
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024, // 10MB
         cwd: cwd || process.cwd(),
-        shell: "/bin/zsh",
         env: { ...process.env },
       },
       (error, stdout, stderr) => {
