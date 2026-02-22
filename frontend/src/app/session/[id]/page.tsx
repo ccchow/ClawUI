@@ -12,6 +12,7 @@ import {
 import { Timeline } from "@/components/Timeline";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
+import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
 
 const POLL_INTERVAL = 5_000;
 
@@ -62,7 +63,17 @@ export default function SessionPage() {
   useEffect(() => {
     nodeCountRef.current = 0;
     fetchNodes(true);
-  }, [fetchNodes]);
+    // Restore suggestions from cookie for this session
+    const saved = loadSuggestions(id);
+    if (saved.length > 0) setSuggestions(saved);
+  }, [fetchNodes, id]);
+
+  // Persist suggestions to cookie whenever they change
+  useEffect(() => {
+    if (suggestions.length > 0) {
+      saveSuggestions(id, suggestions);
+    }
+  }, [id, suggestions]);
 
   // Auto-refresh poll
   useEffect(() => {

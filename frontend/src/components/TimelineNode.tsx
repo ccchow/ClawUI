@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { TimelineNode } from "@/lib/api";
+import { MarkdownContent } from "./MarkdownContent";
 
 const ICON_MAP: Record<TimelineNode["type"], string> = {
   user: "👤",
@@ -362,8 +363,11 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
               </>
             )}
 
-            {/* For non-tool types: show content directly */}
-            {!isTool && (
+            {/* For non-tool types: render markdown for assistant/user, plain for others */}
+            {!isTool && (node.type === "assistant" || node.type === "user") && (
+              <MarkdownContent content={node.content} />
+            )}
+            {!isTool && node.type !== "assistant" && node.type !== "user" && (
               <pre className="text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[600px] overflow-y-auto">
                 {node.content}
               </pre>
