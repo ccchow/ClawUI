@@ -12,8 +12,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.0",
-    "glob": "^11.0.0",
-    "node-pty": "^1.1.0"
+    "glob": "^11.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
