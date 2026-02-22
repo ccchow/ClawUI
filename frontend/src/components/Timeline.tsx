@@ -247,7 +247,7 @@ function TimeGroupSection({
       {/* Group content */}
       {!collapsed && (
         <div className="space-y-1 mt-1">
-          {filteredItems.map((item) =>
+          {[...filteredItems].reverse().map((item) =>
             item.kind === "tool_pair" ? (
               <ToolPairNode
                 key={item.key}
