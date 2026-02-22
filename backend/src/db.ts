@@ -13,6 +13,11 @@ const DB_PATH = join(DB_DIR, "index.db");
 
 let db: Database.Database;
 
+export function getDb(): Database.Database {
+  if (!db) throw new Error("Database not initialized — call initDb() first");
+  return db;
+}
+
 export function initDb(): void {
   if (!existsSync(DB_DIR)) {
     mkdirSync(DB_DIR, { recursive: true });

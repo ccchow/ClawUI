@@ -1,0 +1,747 @@
+import { randomUUID } from "node:crypto";
+import { getDb } from "./db.js";
+
+// ─── PRD v3 Types ────────────────────────────────────────────
+
+export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
+export type MacroNodeStatus = "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
+export type ArtifactType = "handoff_summary" | "file_diff" | "test_report" | "custom";
+export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
+export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
+
+// Layer 1: Blueprint (was "Plan")
+export interface Blueprint {
+  id: string;
+  title: string;
+  description: string;
+  projectCwd?: string;
+  status: BlueprintStatus;
+  nodes: MacroNode[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Layer 2: MacroNode (was "PlanNode")
+export interface MacroNode {
+  id: string;
+  blueprintId: string;
+  order: number;
+  title: string;
+  description: string;
+  status: MacroNodeStatus;
+  dependencies: string[];
+  parallelGroup?: string;
+  prompt?: string;
+  estimatedMinutes?: number;
+  actualMinutes?: number;
+  inputArtifacts: Artifact[];
+  outputArtifacts: Artifact[];
+  executions: NodeExecution[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Artifact: cross-node state transfer
+export interface Artifact {
+  id: string;
+  type: ArtifactType;
+  content: string;
+  sourceNodeId: string;
+  targetNodeId?: string;
+  blueprintId: string;
+  createdAt: string;
+}
+
+// Layer 3: NodeExecution
+export interface NodeExecution {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  sessionId?: string;
+  type: ExecutionType;
+  status: ExecutionStatus;
+  inputContext?: string;
+  outputSummary?: string;
+  contextTokensUsed?: number;
+  parentExecutionId?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+// Backward-compat aliases
+export type Plan = Blueprint;
+export type PlanNode = MacroNode;
+export type PlanStatus = BlueprintStatus;
+export type NodeStatus = MacroNodeStatus;
+
+// ─── Schema version & migration ──────────────────────────────
+
+const CURRENT_SCHEMA_VERSION = 2;
+
+export function initPlanTables(): void {
+  const db = getDb();
+
+  // Schema version tracking
+  db.exec("CREATE TABLE IF NOT EXISTS schema_version (key TEXT PRIMARY KEY, version INTEGER NOT NULL)");
+
+  const row = db.prepare("SELECT version FROM schema_version WHERE key = ?").get("plan_schema") as
+    | { version: number }
+    | undefined;
+  const currentVersion = row?.version ?? 0;
+
+  if (currentVersion < CURRENT_SCHEMA_VERSION) {
+    // Drop old v1 tables if they exist
+    db.exec("DROP TABLE IF EXISTS plan_nodes");
+    db.exec("DROP TABLE IF EXISTS plans");
+
+    // Create v2 tables
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS blueprints (
+        id           TEXT PRIMARY KEY,
+        title        TEXT NOT NULL,
+        description  TEXT,
+        status       TEXT DEFAULT 'draft',
+        project_cwd  TEXT,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS macro_nodes (
+        id                TEXT PRIMARY KEY,
+        blueprint_id      TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        "order"           INTEGER NOT NULL,
+        title             TEXT NOT NULL,
+        description       TEXT,
+        status            TEXT DEFAULT 'pending',
+        dependencies      TEXT,
+        parallel_group    TEXT,
+        prompt            TEXT,
+        estimated_minutes REAL,
+        actual_minutes    REAL,
+        error             TEXT,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id              TEXT PRIMARY KEY,
+        blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        source_node_id  TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        target_node_id  TEXT REFERENCES macro_nodes(id) ON DELETE SET NULL,
+        type            TEXT NOT NULL DEFAULT 'handoff_summary',
+        content         TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS node_executions (
+        id                   TEXT PRIMARY KEY,
+        node_id              TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        blueprint_id         TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        session_id           TEXT,
+        type                 TEXT NOT NULL DEFAULT 'primary',
+        status               TEXT NOT NULL DEFAULT 'running',
+        input_context        TEXT,
+        output_summary       TEXT,
+        context_tokens_used  INTEGER,
+        parent_execution_id  TEXT,
+        started_at           TEXT NOT NULL,
+        completed_at         TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_macro_nodes_blueprint ON macro_nodes(blueprint_id, "order");
+      CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source_node_id);
+      CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_node_id);
+      CREATE INDEX IF NOT EXISTS idx_executions_node ON node_executions(node_id);
+      CREATE INDEX IF NOT EXISTS idx_executions_session ON node_executions(session_id);
+    `);
+
+    db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
+      "plan_schema",
+      CURRENT_SCHEMA_VERSION,
+    );
+  }
+}
+
+// ─── Row types ───────────────────────────────────────────────
+
+interface BlueprintRow {
+  id: string;
+  title: string;
+  description: string | null;
+  status: string;
+  project_cwd: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MacroNodeRow {
+  id: string;
+  blueprint_id: string;
+  order: number;
+  title: string;
+  description: string | null;
+  status: string;
+  dependencies: string | null;
+  parallel_group: string | null;
+  prompt: string | null;
+  estimated_minutes: number | null;
+  actual_minutes: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ArtifactRow {
+  id: string;
+  blueprint_id: string;
+  source_node_id: string;
+  target_node_id: string | null;
+  type: string;
+  content: string;
+  created_at: string;
+}
+
+interface ExecutionRow {
+  id: string;
+  node_id: string;
+  blueprint_id: string;
+  session_id: string | null;
+  type: string;
+  status: string;
+  input_context: string | null;
+  output_summary: string | null;
+  context_tokens_used: number | null;
+  parent_execution_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+// ─── Row → object helpers ────────────────────────────────────
+
+function rowToArtifact(row: ArtifactRow): Artifact {
+  return {
+    id: row.id,
+    type: row.type as ArtifactType,
+    content: row.content,
+    sourceNodeId: row.source_node_id,
+    ...(row.target_node_id ? { targetNodeId: row.target_node_id } : {}),
+    blueprintId: row.blueprint_id,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToExecution(row: ExecutionRow): NodeExecution {
+  return {
+    id: row.id,
+    nodeId: row.node_id,
+    blueprintId: row.blueprint_id,
+    ...(row.session_id ? { sessionId: row.session_id } : {}),
+    type: row.type as ExecutionType,
+    status: row.status as ExecutionStatus,
+    ...(row.input_context ? { inputContext: row.input_context } : {}),
+    ...(row.output_summary ? { outputSummary: row.output_summary } : {}),
+    ...(row.context_tokens_used != null ? { contextTokensUsed: row.context_tokens_used } : {}),
+    ...(row.parent_execution_id ? { parentExecutionId: row.parent_execution_id } : {}),
+    startedAt: row.started_at,
+    ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+  };
+}
+
+function rowToMacroNode(
+  row: MacroNodeRow,
+  inputArtifacts: Artifact[] = [],
+  outputArtifacts: Artifact[] = [],
+  executions: NodeExecution[] = [],
+): MacroNode {
+  let dependencies: string[] = [];
+  if (row.dependencies) {
+    try {
+      dependencies = JSON.parse(row.dependencies);
+    } catch {
+      dependencies = [];
+    }
+  }
+  return {
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    order: row.order,
+    title: row.title,
+    description: row.description ?? "",
+    status: row.status as MacroNodeStatus,
+    dependencies,
+    ...(row.parallel_group ? { parallelGroup: row.parallel_group } : {}),
+    ...(row.prompt ? { prompt: row.prompt } : {}),
+    ...(row.estimated_minutes != null ? { estimatedMinutes: row.estimated_minutes } : {}),
+    ...(row.actual_minutes != null ? { actualMinutes: row.actual_minutes } : {}),
+    inputArtifacts,
+    outputArtifacts,
+    executions,
+    ...(row.error ? { error: row.error } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? "",
+    status: row.status as BlueprintStatus,
+    ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
+    nodes,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// ─── Eager loading helpers ───────────────────────────────────
+
+function getArtifactsForNodeInternal(nodeId: string): { input: Artifact[]; output: Artifact[] } {
+  const db = getDb();
+  const inputRows = db
+    .prepare("SELECT * FROM artifacts WHERE target_node_id = ? ORDER BY created_at ASC")
+    .all(nodeId) as ArtifactRow[];
+  const outputRows = db
+    .prepare("SELECT * FROM artifacts WHERE source_node_id = ? ORDER BY created_at ASC")
+    .all(nodeId) as ArtifactRow[];
+  return {
+    input: inputRows.map(rowToArtifact),
+    output: outputRows.map(rowToArtifact),
+  };
+}
+
+function getExecutionsForNodeInternal(nodeId: string): NodeExecution[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM node_executions WHERE node_id = ? ORDER BY started_at ASC")
+    .all(nodeId) as ExecutionRow[];
+  return rows.map(rowToExecution);
+}
+
+function getNodesForBlueprint(blueprintId: string): MacroNode[] {
+  const db = getDb();
+  const rows = db
+    .prepare('SELECT * FROM macro_nodes WHERE blueprint_id = ? ORDER BY "order" ASC')
+    .all(blueprintId) as MacroNodeRow[];
+
+  return rows.map((row) => {
+    const arts = getArtifactsForNodeInternal(row.id);
+    const execs = getExecutionsForNodeInternal(row.id);
+    return rowToMacroNode(row, arts.input, arts.output, execs);
+  });
+}
+
+// ─── Blueprint CRUD ──────────────────────────────────────────
+
+export function createBlueprint(
+  title: string,
+  description?: string,
+  projectCwd?: string,
+): Blueprint {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO blueprints (id, title, description, status, project_cwd, created_at, updated_at)
+    VALUES (?, ?, ?, 'draft', ?, ?, ?)
+  `).run(id, title, description ?? null, projectCwd ?? null, now, now);
+
+  return {
+    id,
+    title,
+    description: description ?? "",
+    status: "draft",
+    ...(projectCwd ? { projectCwd } : {}),
+    nodes: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getBlueprint(id: string): Blueprint | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!row) return null;
+  return rowToBlueprint(row, getNodesForBlueprint(id));
+}
+
+export function listBlueprints(filters?: { status?: string; projectCwd?: string }): Blueprint[] {
+  const db = getDb();
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (filters?.status) {
+    conditions.push("status = ?");
+    params.push(filters.status);
+  }
+  if (filters?.projectCwd) {
+    conditions.push("project_cwd = ?");
+    params.push(filters.projectCwd);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = db
+    .prepare(`SELECT * FROM blueprints ${where} ORDER BY updated_at DESC`)
+    .all(...params) as BlueprintRow[];
+
+  return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id)));
+}
+
+export function updateBlueprint(
+  id: string,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd">>,
+): Blueprint | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const sets: string[] = ["updated_at = ?"];
+  const params: unknown[] = [now];
+
+  if (patch.title !== undefined) {
+    sets.push("title = ?");
+    params.push(patch.title);
+  }
+  if (patch.description !== undefined) {
+    sets.push("description = ?");
+    params.push(patch.description);
+  }
+  if (patch.status !== undefined) {
+    sets.push("status = ?");
+    params.push(patch.status);
+  }
+  if (patch.projectCwd !== undefined) {
+    sets.push("project_cwd = ?");
+    params.push(patch.projectCwd);
+  }
+
+  params.push(id);
+  db.prepare(`UPDATE blueprints SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+
+  return getBlueprint(id);
+}
+
+export function deleteBlueprint(id: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM blueprints WHERE id = ?").run(id);
+}
+
+// ─── MacroNode CRUD ──────────────────────────────────────────
+
+export function createMacroNode(
+  blueprintId: string,
+  data: {
+    title: string;
+    description?: string;
+    order: number;
+    dependencies?: string[];
+    parallelGroup?: string;
+    prompt?: string;
+    estimatedMinutes?: number;
+  },
+): MacroNode {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const depsJson = data.dependencies?.length ? JSON.stringify(data.dependencies) : null;
+
+  db.prepare(`
+    INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    blueprintId,
+    data.order,
+    data.title,
+    data.description ?? null,
+    depsJson,
+    data.parallelGroup ?? null,
+    data.prompt ?? null,
+    data.estimatedMinutes ?? null,
+    now,
+    now,
+  );
+
+  // Touch parent blueprint
+  db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+
+  return {
+    id,
+    blueprintId,
+    order: data.order,
+    title: data.title,
+    description: data.description ?? "",
+    status: "pending",
+    dependencies: data.dependencies ?? [],
+    ...(data.parallelGroup ? { parallelGroup: data.parallelGroup } : {}),
+    ...(data.prompt ? { prompt: data.prompt } : {}),
+    ...(data.estimatedMinutes != null ? { estimatedMinutes: data.estimatedMinutes } : {}),
+    inputArtifacts: [],
+    outputArtifacts: [],
+    executions: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function updateMacroNode(
+  blueprintId: string,
+  nodeId: string,
+  patch: Partial<
+    Pick<
+      MacroNode,
+      | "title"
+      | "description"
+      | "status"
+      | "dependencies"
+      | "parallelGroup"
+      | "prompt"
+      | "estimatedMinutes"
+      | "actualMinutes"
+      | "error"
+      | "order"
+    >
+  >,
+): MacroNode | null {
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM macro_nodes WHERE id = ? AND blueprint_id = ?")
+    .get(nodeId, blueprintId) as MacroNodeRow | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const sets: string[] = ["updated_at = ?"];
+  const params: unknown[] = [now];
+
+  if (patch.title !== undefined) { sets.push("title = ?"); params.push(patch.title); }
+  if (patch.description !== undefined) { sets.push("description = ?"); params.push(patch.description); }
+  if (patch.status !== undefined) { sets.push("status = ?"); params.push(patch.status); }
+  if (patch.dependencies !== undefined) { sets.push("dependencies = ?"); params.push(JSON.stringify(patch.dependencies)); }
+  if (patch.parallelGroup !== undefined) { sets.push("parallel_group = ?"); params.push(patch.parallelGroup); }
+  if (patch.prompt !== undefined) { sets.push("prompt = ?"); params.push(patch.prompt); }
+  if (patch.estimatedMinutes !== undefined) { sets.push("estimated_minutes = ?"); params.push(patch.estimatedMinutes); }
+  if (patch.actualMinutes !== undefined) { sets.push("actual_minutes = ?"); params.push(patch.actualMinutes); }
+  if (patch.error !== undefined) { sets.push("error = ?"); params.push(patch.error); }
+  if (patch.order !== undefined) { sets.push('"order" = ?'); params.push(patch.order); }
+
+  params.push(nodeId, blueprintId);
+  db.prepare(`UPDATE macro_nodes SET ${sets.join(", ")} WHERE id = ? AND blueprint_id = ?`).run(...params);
+
+  // Touch parent blueprint
+  db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+
+  // Return fully-loaded node
+  const row = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get(nodeId) as MacroNodeRow;
+  const arts = getArtifactsForNodeInternal(nodeId);
+  const execs = getExecutionsForNodeInternal(nodeId);
+  return rowToMacroNode(row, arts.input, arts.output, execs);
+}
+
+export function deleteMacroNode(blueprintId: string, nodeId: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.prepare("DELETE FROM macro_nodes WHERE id = ? AND blueprint_id = ?").run(nodeId, blueprintId);
+  db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+}
+
+export function reorderMacroNodes(blueprintId: string, ordering: { id: string; order: number }[]): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  const update = db.prepare('UPDATE macro_nodes SET "order" = ?, updated_at = ? WHERE id = ? AND blueprint_id = ?');
+  const reorder = db.transaction(() => {
+    for (const item of ordering) {
+      update.run(item.order, now, item.id, blueprintId);
+    }
+    db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+  });
+  reorder();
+}
+
+// ─── Artifact CRUD ───────────────────────────────────────────
+
+export function createArtifact(
+  blueprintId: string,
+  sourceNodeId: string,
+  type: ArtifactType,
+  content: string,
+  targetNodeId?: string,
+): Artifact {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO artifacts (id, blueprint_id, source_node_id, target_node_id, type, content, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, blueprintId, sourceNodeId, targetNodeId ?? null, type, content, now);
+
+  return {
+    id,
+    type,
+    content,
+    sourceNodeId,
+    ...(targetNodeId ? { targetNodeId } : {}),
+    blueprintId,
+    createdAt: now,
+  };
+}
+
+export function getArtifactsForNode(
+  nodeId: string,
+  direction: "input" | "output",
+): Artifact[] {
+  const db = getDb();
+  const col = direction === "input" ? "target_node_id" : "source_node_id";
+  const rows = db
+    .prepare(`SELECT * FROM artifacts WHERE ${col} = ? ORDER BY created_at ASC`)
+    .all(nodeId) as ArtifactRow[];
+  return rows.map(rowToArtifact);
+}
+
+export function deleteArtifact(id: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM artifacts WHERE id = ?").run(id);
+}
+
+// ─── NodeExecution CRUD ──────────────────────────────────────
+
+export function createExecution(
+  nodeId: string,
+  blueprintId: string,
+  sessionId: string | undefined,
+  type: ExecutionType,
+  inputContext?: string,
+  parentExecutionId?: string,
+  status?: ExecutionStatus,
+  outputSummary?: string,
+  completedAt?: string,
+): NodeExecution {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const effectiveStatus = status ?? "running";
+
+  db.prepare(`
+    INSERT INTO node_executions (id, node_id, blueprint_id, session_id, type, status, input_context, output_summary, parent_execution_id, started_at, completed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, nodeId, blueprintId, sessionId ?? null, type, effectiveStatus, inputContext ?? null, outputSummary ?? null, parentExecutionId ?? null, now, completedAt ?? null);
+
+  return {
+    id,
+    nodeId,
+    blueprintId,
+    ...(sessionId ? { sessionId } : {}),
+    type,
+    status: effectiveStatus,
+    ...(inputContext ? { inputContext } : {}),
+    ...(outputSummary ? { outputSummary } : {}),
+    ...(parentExecutionId ? { parentExecutionId } : {}),
+    startedAt: now,
+    ...(completedAt ? { completedAt } : {}),
+  };
+}
+
+export function updateExecution(
+  id: string,
+  patch: Partial<Pick<NodeExecution, "status" | "outputSummary" | "contextTokensUsed" | "completedAt" | "sessionId">>,
+): NodeExecution | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(id) as ExecutionRow | undefined;
+  if (!existing) return null;
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (patch.status !== undefined) { sets.push("status = ?"); params.push(patch.status); }
+  if (patch.outputSummary !== undefined) { sets.push("output_summary = ?"); params.push(patch.outputSummary); }
+  if (patch.contextTokensUsed !== undefined) { sets.push("context_tokens_used = ?"); params.push(patch.contextTokensUsed); }
+  if (patch.completedAt !== undefined) { sets.push("completed_at = ?"); params.push(patch.completedAt); }
+  if (patch.sessionId !== undefined) { sets.push("session_id = ?"); params.push(patch.sessionId); }
+
+  if (sets.length === 0) return rowToExecution(existing);
+
+  params.push(id);
+  db.prepare(`UPDATE node_executions SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+
+  const row = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(id) as ExecutionRow;
+  return rowToExecution(row);
+}
+
+export function getExecutionsForNode(nodeId: string): NodeExecution[] {
+  return getExecutionsForNodeInternal(nodeId);
+}
+
+export function getExecutionBySession(sessionId: string): NodeExecution | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM node_executions WHERE session_id = ?")
+    .get(sessionId) as ExecutionRow | undefined;
+  return row ? rowToExecution(row) : null;
+}
+
+// ─── Backward-compat aliases ─────────────────────────────────
+
+export const createPlan = createBlueprint;
+export const getPlan = getBlueprint;
+export const listPlans = listBlueprints;
+export const updatePlan = updateBlueprint;
+export const deletePlan = deleteBlueprint;
+
+export function createNode(
+  blueprintId: string,
+  data: { title: string; description?: string; seq: number; dependsOn?: string[]; prompt?: string },
+): MacroNode {
+  return createMacroNode(blueprintId, {
+    title: data.title,
+    description: data.description,
+    order: data.seq,
+    dependencies: data.dependsOn,
+    prompt: data.prompt,
+  });
+}
+
+export function updateNode(
+  blueprintId: string,
+  nodeId: string,
+  patch: Record<string, unknown>,
+): MacroNode | null {
+  const mapped: Record<string, unknown> = {};
+  if (patch.title !== undefined) mapped.title = patch.title;
+  if (patch.description !== undefined) mapped.description = patch.description;
+  if (patch.status !== undefined) mapped.status = patch.status;
+  if (patch.dependsOn !== undefined) mapped.dependencies = patch.dependsOn;
+  if (patch.dependencies !== undefined) mapped.dependencies = patch.dependencies;
+  if (patch.prompt !== undefined) mapped.prompt = patch.prompt;
+  if (patch.error !== undefined) mapped.error = patch.error;
+  if (patch.parallelGroup !== undefined) mapped.parallelGroup = patch.parallelGroup;
+  if (patch.estimatedMinutes !== undefined) mapped.estimatedMinutes = patch.estimatedMinutes;
+  if (patch.actualMinutes !== undefined) mapped.actualMinutes = patch.actualMinutes;
+  if (patch.seq !== undefined) mapped.order = patch.seq;
+  if (patch.order !== undefined) mapped.order = patch.order;
+  return updateMacroNode(blueprintId, nodeId, mapped as Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "parallelGroup" | "prompt" | "estimatedMinutes" | "actualMinutes" | "error" | "order">>);
+}
+
+export const deleteNode = deleteMacroNode;
+
+export function reorderNodes(blueprintId: string, ordering: { id: string; seq: number }[]): void {
+  reorderMacroNodes(
+    blueprintId,
+    ordering.map((o) => ({ id: o.id, order: o.seq })),
+  );
+}
+
+export function getNodeBySession(sessionId: string): MacroNode | null {
+  const execution = getExecutionBySession(sessionId);
+  if (!execution) return null;
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get(execution.nodeId) as MacroNodeRow | undefined;
+  if (!row) return null;
+  const arts = getArtifactsForNodeInternal(row.id);
+  const execs = getExecutionsForNodeInternal(row.id);
+  return rowToMacroNode(row, arts.input, arts.output, execs);
+}

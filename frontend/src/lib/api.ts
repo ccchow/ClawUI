@@ -131,3 +131,187 @@ export function updateAppState(patch: Record<string, unknown>): Promise<void> {
     body: JSON.stringify(patch),
   });
 }
+
+// --- Blueprint / Plan types ---
+
+export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
+export type MacroNodeStatus = "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
+
+export interface Artifact {
+  id: string;
+  type: "handoff_summary" | "file_diff" | "test_report" | "custom";
+  content: string;
+  sourceNodeId: string;
+  targetNodeId?: string;
+  blueprintId: string;
+  createdAt: string;
+}
+
+export interface NodeExecution {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  sessionId?: string;
+  type: "primary" | "retry" | "continuation" | "subtask";
+  status: "running" | "done" | "failed" | "cancelled";
+  inputContext?: string;
+  outputSummary?: string;
+  contextTokensUsed?: number;
+  parentExecutionId?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export interface MacroNode {
+  id: string;
+  blueprintId: string;
+  order: number;
+  title: string;
+  description: string;
+  status: MacroNodeStatus;
+  dependencies: string[];
+  parallelGroup?: string;
+  prompt?: string;
+  estimatedMinutes?: number;
+  actualMinutes?: number;
+  inputArtifacts: Artifact[];
+  outputArtifacts: Artifact[];
+  executions: NodeExecution[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Blueprint {
+  id: string;
+  title: string;
+  description: string;
+  projectCwd?: string;
+  status: BlueprintStatus;
+  nodes: MacroNode[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Blueprint APIs ---
+
+export function listBlueprints(filters?: { status?: string; projectCwd?: string }): Promise<Blueprint[]> {
+  const params = new URLSearchParams();
+  if (filters?.status) params.set("status", filters.status);
+  if (filters?.projectCwd) params.set("projectCwd", filters.projectCwd);
+  const qs = params.toString();
+  return fetchJSON(`${API_BASE}/blueprints${qs ? `?${qs}` : ""}`);
+}
+
+export function getBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`);
+}
+
+export function createBlueprint(data: {
+  title: string;
+  description?: string;
+  projectCwd?: string;
+}): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateBlueprint(
+  id: string,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd">>
+): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteBlueprint(id: string): Promise<{ ok: boolean }> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function approveBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+  });
+}
+
+export function createMacroNode(
+  blueprintId: string,
+  data: {
+    title: string;
+    description?: string;
+    order?: number;
+    dependencies?: string[];
+    parallelGroup?: string;
+    prompt?: string;
+    estimatedMinutes?: number;
+  }
+): Promise<MacroNode> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateMacroNode(
+  blueprintId: string,
+  nodeId: string,
+  patch: Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "order" | "prompt">>
+): Promise<MacroNode> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }
+  );
+}
+
+export function deleteMacroNode(
+  blueprintId: string,
+  nodeId: string
+): Promise<{ ok: boolean }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}`,
+    { method: "DELETE" }
+  );
+}
+
+// --- Execution APIs ---
+
+export function runNode(
+  blueprintId: string,
+  nodeId: string
+): Promise<NodeExecution> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/run`,
+    { method: "POST" }
+  );
+}
+
+export function runNextNode(
+  blueprintId: string
+): Promise<NodeExecution | { message: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/run`,
+    { method: "POST" }
+  );
+}
+
+export function runAllNodes(
+  blueprintId: string
+): Promise<{ message: string; blueprintId: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/run-all`,
+    { method: "POST" }
+  );
+}
