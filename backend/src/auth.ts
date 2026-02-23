@@ -14,7 +14,7 @@ export const LOCAL_AUTH_TOKEN = crypto.randomBytes(16).toString("hex");
 const tokenDir = join(process.cwd(), CLAWUI_DB_DIR);
 try {
   mkdirSync(tokenDir, { recursive: true });
-  writeFileSync(join(tokenDir, "auth-token"), LOCAL_AUTH_TOKEN, "utf-8");
+  writeFileSync(join(tokenDir, "auth-token"), LOCAL_AUTH_TOKEN, { encoding: "utf-8", mode: 0o600 });
 } catch (err) {
   log.warn(`Failed to write auth token file: ${err}`);
 }
@@ -29,9 +29,14 @@ export const requireLocalAuth = (req: Request, res: Response, next: NextFunction
     return next();
   }
 
-  const clientToken = req.headers["x-clawui-token"] || req.query.auth;
+  const raw = req.headers["x-clawui-token"] || req.query.auth;
+  const clientToken = typeof raw === "string" ? raw : undefined;
 
-  if (!clientToken || clientToken !== LOCAL_AUTH_TOKEN) {
+  if (
+    !clientToken ||
+    clientToken.length !== LOCAL_AUTH_TOKEN.length ||
+    !crypto.timingSafeEqual(Buffer.from(clientToken), Buffer.from(LOCAL_AUTH_TOKEN))
+  ) {
     return res.status(403).json({
       error: "Forbidden",
       message: "Missing or invalid Local Auth Token.",
