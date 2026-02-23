@@ -4,12 +4,18 @@ import router from "./routes.js";
 import planRouter from "./plan-routes.js";
 import { initDb, syncAll } from "./db.js";
 import { initPlanTables } from "./plan-db.js";
+import { requeueOrphanedNodes, smartRecoverStaleExecutions } from "./plan-executor.js";
+import { PORT } from "./config.js";
+import { createLogger } from "./logger.js";
+import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
 
-const PORT = parseInt(process.env.PORT || "3001", 10);
+const log = createLogger("server");
 
 // Initialize SQLite database and run initial sync
 initDb();
 initPlanTables();
+smartRecoverStaleExecutions();
+requeueOrphanedNodes();
 syncAll();
 
 // Background sync every 30 seconds
@@ -23,8 +29,8 @@ setInterval(() => {
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+app.use(cors({ origin: "http://127.0.0.1:3000" }));
+app.use(express.json({ limit: "10mb" }));
 
 // Increase timeout for long-running Claude CLI calls
 app.use((_req, res, next) => {
@@ -32,9 +38,21 @@ app.use((_req, res, next) => {
   next();
 });
 
+// Auth middleware — must be before route handlers
+app.use(requireLocalAuth);
+
 app.use(router);
 app.use(planRouter);
 
-app.listen(PORT, () => {
-  console.log(`ClawUI backend running on http://localhost:${PORT}`);
+const HOST = "127.0.0.1";
+
+app.listen(PORT, HOST, () => {
+  log.info(`ClawUI backend locked to http://${HOST}:${PORT}`);
+  log.info("");
+  log.info("========================================================");
+  log.info("  ClawUI Secure Dashboard Ready");
+  log.info("  Local:     http://localhost:3000");
+  log.info(`  Tailscale: http://<your-tailscale-ip>:3000/?auth=${LOCAL_AUTH_TOKEN}`);
+  log.info("========================================================");
+  log.info("");
 });
