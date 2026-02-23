@@ -1,4 +1,14 @@
-const API_BASE = typeof window !== "undefined" ? "http://localhost:3001/api" : "/api";
+const API_BASE = "/api";
+
+function getAuthToken(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("clawui_token") || "";
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { "x-clawui-token": token } : {};
+}
 
 export interface ProjectInfo {
   id: string;
@@ -51,7 +61,11 @@ export interface SessionFilters {
 }
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  const headers: Record<string, string> = {
+    ...authHeaders(),
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  const res = await fetch(url, { ...init, headers });
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`API error ${res.status}: ${body}`);
@@ -90,6 +104,16 @@ export function runPrompt(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt }),
   });
+}
+
+export function getSessionMeta(
+  sessionId: string
+): Promise<Partial<SessionMeta> | null> {
+  return fetch(`${API_BASE}/sessions/${sessionId}/meta`, {
+    headers: authHeaders(),
+  })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
 }
 
 // --- Enrichment APIs ---
@@ -135,7 +159,7 @@ export function updateAppState(patch: Record<string, unknown>): Promise<void> {
 // --- Blueprint / Plan types ---
 
 export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
-export type MacroNodeStatus = "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
+export type MacroNodeStatus = "pending" | "queued" | "running" | "done" | "failed" | "blocked" | "skipped";
 
 export interface Artifact {
   id: string;
@@ -242,6 +266,35 @@ export function approveBlueprint(id: string): Promise<Blueprint> {
   });
 }
 
+export function enrichNode(
+  blueprintId: string,
+  data: { title: string; description?: string }
+): Promise<{ title: string; description: string }> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/enrich-node`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function reevaluateNode(
+  blueprintId: string,
+  nodeId: string
+): Promise<{ status: string; nodeId: string }> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/reevaluate`, {
+    method: "POST",
+  });
+}
+
+export function reevaluateAllNodes(
+  blueprintId: string
+): Promise<{ message: string; blueprintId: string; nodeCount: number }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/reevaluate-all`,
+    { method: "POST" }
+  );
+}
+
 export function createMacroNode(
   blueprintId: string,
   data: {
@@ -301,7 +354,9 @@ export function generatePlan(blueprintId: string, description?: string): Promise
 export function getSessionExecution(
   sessionId: string
 ): Promise<NodeExecution | null> {
-  return fetch(`${API_BASE}/sessions/${sessionId}/execution`)
+  return fetch(`${API_BASE}/sessions/${sessionId}/execution`, {
+    headers: authHeaders(),
+  })
     .then((res) => (res.ok ? res.json() : null))
     .catch(() => null);
 }
@@ -312,6 +367,16 @@ export function runNode(
 ): Promise<NodeExecution> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/run`,
+    { method: "POST" }
+  );
+}
+
+export function recoverNodeSession(
+  blueprintId: string,
+  nodeId: string
+): Promise<{ recovered: boolean; recoveredCount?: number; reason?: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/recover-session`,
     { method: "POST" }
   );
 }
@@ -341,4 +406,32 @@ export function runAllNodes(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/run-all`,
     { method: "POST" }
   );
+}
+
+// --- Queue Status API ---
+
+export interface PendingTask {
+  type: "run" | "reevaluate" | "enrich" | "generate";
+  nodeId?: string;
+  queuedAt: string;
+}
+
+export interface QueueInfo {
+  running: boolean;
+  queueLength: number;
+  pendingTasks: PendingTask[];
+}
+
+export function getQueueStatus(blueprintId: string): Promise<QueueInfo> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/queue`);
+}
+
+// ─── Image upload ─────────────────────────────────────────────
+
+export function uploadImage(dataUrl: string, filename?: string): Promise<{ url: string }> {
+  return fetchJSON(`${API_BASE}/uploads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: dataUrl, filename }),
+  });
 }
