@@ -1,4 +1,24 @@
-# PRD v3 — ClauOS: Agent Task Orchestrator
+# PRD v3 — ClawUI: Agent Task Orchestrator
+
+> **Internal Reference Document** — This is the original product requirements document written during ClawUI's design phase. It is kept for historical reference. For the current architecture, see [DATA-MODEL.md](DATA-MODEL.md) and [PLAN-SYSTEM.md](PLAN-SYSTEM.md).
+
+## Summary (English)
+
+ClawUI's architecture decouples **business logic nodes** from **physical execution sessions**. Sessions are disposable compute resources, while nodes forming a DAG (directed acyclic graph) represent the project's core structure.
+
+The system uses a four-layer model:
+- **Layer 1 — Blueprint**: The top-level business unit (e.g., "Build a Next.js full-stack app"), represented as a DAG defining node order and parallelism rules.
+- **Layer 2 — Macro-Node / Task**: Independent steps within a blueprint, each with defined inputs (prerequisites) and outputs (deliverables). States: pending → running → done / failed / blocked.
+- **Layer 3 — Session / Worker**: Claude Code physical processes. Relationship is Node:Session = 1:N (for isolation/retry/parallelism).
+- **Layer 4 — Micro-Event / Trace**: Individual tool calls (Bash, Edit, Read, Think, etc.) — the execution trace within a session.
+
+Key mechanisms include **artifact-based state handoff** between nodes (auto-generated summaries passed as context to downstream nodes), **fan-out/fan-in concurrency** for parallel node groups, and a **dual UI view** (map view for the DAG overview, session view for micro-level tool traces).
+
+---
+
+*The remainder of this document is in Chinese (original design language).*
+
+---
 
 ## 核心理念
 **将"业务逻辑的节点 (Node)"与"物理执行的会话 (Session)"解耦。Session 只是随用随弃的计算资源，而 Node 构成的 DAG 才是项目的灵魂。**

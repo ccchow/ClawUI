@@ -1,20 +1,34 @@
 import crypto from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Request, Response, NextFunction } from "express";
-import { CLAWUI_DB_DIR } from "./config.js";
+import { CLAWUI_DB_DIR, CLAWUI_DEV } from "./config.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("auth");
 
-// Generate a fresh 32-char hex token each process start
-export const LOCAL_AUTH_TOKEN = crypto.randomBytes(16).toString("hex");
+const DEV_MODE = CLAWUI_DEV;
+const tokenDir = join(process.cwd(), CLAWUI_DB_DIR);
+const tokenPath = join(tokenDir, "auth-token");
+
+function resolveToken(): string {
+  // In dev mode, reuse existing token file if present
+  if (DEV_MODE && existsSync(tokenPath)) {
+    const existing = readFileSync(tokenPath, "utf-8").trim();
+    if (existing) {
+      log.info("Dev mode: reusing existing auth token");
+      return existing;
+    }
+  }
+  return crypto.randomBytes(16).toString("hex");
+}
+
+export const LOCAL_AUTH_TOKEN = resolveToken();
 
 // Write token to shared file so Next.js proxy can read it
-const tokenDir = join(process.cwd(), CLAWUI_DB_DIR);
 try {
   mkdirSync(tokenDir, { recursive: true });
-  writeFileSync(join(tokenDir, "auth-token"), LOCAL_AUTH_TOKEN, { encoding: "utf-8", mode: 0o600 });
+  writeFileSync(tokenPath, LOCAL_AUTH_TOKEN, { encoding: "utf-8", mode: 0o600 });
 } catch (err) {
   log.warn(`Failed to write auth token file: ${err}`);
 }

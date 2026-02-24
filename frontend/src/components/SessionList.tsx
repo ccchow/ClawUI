@@ -3,23 +3,9 @@
 import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
 import { type SessionMeta, type SessionFilters, updateSessionMeta, getTags } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/format-time";
 
 type SortMode = "newest" | "most-messages";
-
-function formatTime(ts: string): string {
-  const d = new Date(ts);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-
-  if (diffMins < 1) return "just now";
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHrs = Math.floor(diffMins / 60);
-  if (diffHrs < 24) return `${diffHrs}h ago`;
-  const diffDays = Math.floor(diffHrs / 24);
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return d.toLocaleDateString();
-}
 
 export function SessionList({
   sessions,
@@ -34,16 +20,25 @@ export function SessionList({
   const [tagFilter, setTagFilter] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [allTags, setAllTags] = useState<string[]>([]);
-  const [localSessions, setLocalSessions] = useState<SessionMeta[]>(sessions);
+  // Optimistic star overrides: sessionId -> starred value
+  const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
 
-  // Sync prop changes
+  // Derive effective sessions from props + optimistic star overrides
+  const effectiveSessions = useMemo(() => {
+    if (Object.keys(starOverrides).length === 0) return sessions;
+    return sessions.map((s) =>
+      s.sessionId in starOverrides ? { ...s, starred: starOverrides[s.sessionId] } : s
+    );
+  }, [sessions, starOverrides]);
+
+  // Clear overrides when sessions prop updates (server caught up)
   useEffect(() => {
-    setLocalSessions(sessions);
+    setStarOverrides({});
   }, [sessions]);
 
   // Load available tags
   useEffect(() => {
-    getTags().then(setAllTags).catch(() => {});
+    getTags().then(setAllTags).catch(() => { /* non-critical: stale data cleared on next poll */ });
   }, []);
 
   // Notify parent of filter changes (for server-side filtering)
@@ -58,7 +53,7 @@ export function SessionList({
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
 
-    let result = localSessions;
+    let result = effectiveSessions;
 
     // Client-side text search
     if (q) {
@@ -67,7 +62,9 @@ export function SessionList({
           (s.slug && s.slug.toLowerCase().includes(q)) ||
           (s.alias && s.alias.toLowerCase().includes(q)) ||
           s.sessionId.toLowerCase().includes(q) ||
-          (s.cwd && s.cwd.toLowerCase().includes(q))
+          (s.cwd && s.cwd.toLowerCase().includes(q)) ||
+          (s.macroNodeTitle && s.macroNodeTitle.toLowerCase().includes(q)) ||
+          (s.macroNodeDescription && s.macroNodeDescription.toLowerCase().includes(q))
       );
     }
 
@@ -92,40 +89,32 @@ export function SessionList({
     return [...result].sort(
       (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
     );
-  }, [localSessions, query, sort, starredFilter, tagFilter, showArchived]);
+  }, [effectiveSessions, query, sort, starredFilter, tagFilter, showArchived]);
 
   const handleToggleStar = async (e: React.MouseEvent, session: SessionMeta) => {
     e.preventDefault();
     e.stopPropagation();
     const newStarred = !session.starred;
-    // Optimistic update
-    setLocalSessions((prev) =>
-      prev.map((s) =>
-        s.sessionId === session.sessionId ? { ...s, starred: newStarred } : s
-      )
-    );
+    // Optimistic update via overrides
+    setStarOverrides((prev) => ({ ...prev, [session.sessionId]: newStarred }));
     try {
       await updateSessionMeta(session.sessionId, { starred: newStarred });
     } catch {
       // Revert on error
-      setLocalSessions((prev) =>
-        prev.map((s) =>
-          s.sessionId === session.sessionId ? { ...s, starred: !newStarred } : s
-        )
-      );
+      setStarOverrides((prev) => ({ ...prev, [session.sessionId]: !newStarred }));
     }
   };
 
   // Collect tags visible in current sessions for the dropdown
   const visibleTags = useMemo(() => {
     const tagSet = new Set<string>();
-    for (const s of localSessions) {
+    for (const s of effectiveSessions) {
       s.tags?.forEach((t) => tagSet.add(t));
     }
     // Merge with all tags from API
     for (const t of allTags) tagSet.add(t);
     return [...tagSet].sort();
-  }, [localSessions, allTags]);
+  }, [effectiveSessions, allTags]);
 
   return (
     <div>
@@ -205,7 +194,7 @@ export function SessionList({
       {/* Results count when filtering */}
       {(query || starredFilter || tagFilter) && (
         <p className="text-xs text-text-muted mb-2">
-          {filtered.length} of {localSessions.length} sessions
+          {filtered.length} of {effectiveSessions.length} sessions
         </p>
       )}
 
@@ -225,7 +214,7 @@ export function SessionList({
                 s.archived ? "opacity-60" : ""
               }`}
             >
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start justify-between gap-2 sm:gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     {/* Star button */}
@@ -253,7 +242,7 @@ export function SessionList({
 
                     {/* Tags */}
                     {s.tags && s.tags.length > 0 && (
-                      <div className="flex gap-1 flex-shrink-0">
+                      <div className="flex gap-1 flex-wrap hidden sm:flex">
                         {s.tags.map((tag) => (
                           <span
                             key={tag}
@@ -265,13 +254,18 @@ export function SessionList({
                       </div>
                     )}
                   </div>
+                  {s.macroNodeTitle && (
+                    <p className="text-xs text-accent-purple truncate" title={s.macroNodeDescription || s.macroNodeTitle}>
+                      {s.macroNodeTitle}{s.macroNodeDescription ? ` — ${s.macroNodeDescription}` : ""}
+                    </p>
+                  )}
                   {s.cwd && (
                     <p className="text-xs text-text-muted truncate">{s.cwd}</p>
                   )}
                 </div>
                 <div className="text-right flex-shrink-0">
                   <div className="text-sm text-text-secondary">
-                    {formatTime(s.timestamp)}
+                    {formatTimeAgo(s.timestamp)}
                   </div>
                   <div className="text-xs text-text-muted mt-0.5">
                     {s.nodeCount} messages

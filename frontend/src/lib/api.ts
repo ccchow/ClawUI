@@ -31,6 +31,10 @@ export interface SessionMeta {
   alias?: string;
   notes?: string;
   archived?: boolean;
+  // Macro node association (if session is linked to a blueprint node)
+  macroNodeTitle?: string;
+  macroNodeDescription?: string;
+  macroNodeBlueprintId?: string;
 }
 
 export interface TimelineNode {
@@ -171,6 +175,8 @@ export interface Artifact {
   createdAt: string;
 }
 
+export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
+
 export interface NodeExecution {
   id: string;
   nodeId: string;
@@ -182,8 +188,18 @@ export interface NodeExecution {
   outputSummary?: string;
   contextTokensUsed?: number;
   parentExecutionId?: string;
+  failureReason?: FailureReason;
   startedAt: string;
   completedAt?: string;
+}
+
+export interface SessionHealth {
+  failureReason: FailureReason;
+  detail: string;
+  compactCount: number;
+  peakTokens: number;
+  lastApiError: string | null;
+  messageCount: number;
 }
 
 export interface MacroNode {
@@ -341,7 +357,7 @@ export function deleteMacroNode(
 
 // --- AI Generation APIs ---
 
-export function generatePlan(blueprintId: string, description?: string): Promise<MacroNode[]> {
+export function generatePlan(blueprintId: string, description?: string): Promise<{ status: string; blueprintId: string }> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -378,6 +394,21 @@ export function recoverNodeSession(
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/recover-session`,
     { method: "POST" }
+  );
+}
+
+export function resumeNodeSession(
+  blueprintId: string,
+  nodeId: string,
+  executionId: string
+): Promise<{ status: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/resume-session`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ executionId }),
+    }
   );
 }
 
@@ -424,6 +455,22 @@ export interface QueueInfo {
 
 export function getQueueStatus(blueprintId: string): Promise<QueueInfo> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/queue`);
+}
+
+// ─── Dev Tools ────────────────────────────────────────────────
+
+export function getDevStatus(): Promise<{ devMode: boolean }> {
+  return fetchJSON(`${API_BASE}/dev/status`);
+}
+
+export function redeployStable(): Promise<{ ok: boolean; message: string }> {
+  return fetchJSON(`${API_BASE}/dev/redeploy`, { method: "POST" });
+}
+
+// ─── Session health ───────────────────────────────────────────
+
+export function getSessionHealth(sessionId: string): Promise<SessionHealth> {
+  return fetchJSON(`${API_BASE}/sessions/${sessionId}/health`);
 }
 
 // ─── Image upload ─────────────────────────────────────────────

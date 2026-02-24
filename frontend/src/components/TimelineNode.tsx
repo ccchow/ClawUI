@@ -206,7 +206,7 @@ export function ToolPairNode({
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
-            {bookmarked ? "🔖" : "🔖"}
+            {bookmarked ? "🔖" : "📑"}
           </button>
           <span className="text-xs text-text-muted">
             {expanded ? "▼" : "▶"}
@@ -351,7 +351,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
-            {bookmarked ? "🔖" : "🔖"}
+            {bookmarked ? "🔖" : "📑"}
           </button>
           {showExpand && (
             <span className="text-xs text-text-muted">

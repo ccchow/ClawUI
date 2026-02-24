@@ -1,10 +1,17 @@
 import { Router } from "express";
-import { getSessionCwd } from "./jsonl-parser.js";
+import { execFile } from "node:child_process";
+import { join } from "node:path";
+import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
 import { runPrompt } from "./cli-runner.js";
 import { getProjects, getSessions, getTimeline, syncAll, syncSession } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
 import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
+import { createLogger } from "./logger.js";
+import { CLAWUI_DEV } from "./config.js";
+import { getNodeInfoForSessions } from "./plan-db.js";
+
+const log = createLogger("routes");
 
 const router = Router();
 
@@ -31,9 +38,14 @@ router.get("/api/projects/:id/sessions", (req, res) => {
     // Default: hide archived unless explicitly requested
     const showArchived = archivedParam === "true";
 
+    // Batch lookup macro node info for all sessions
+    const sessionIds = sessions.map((s) => s.sessionId);
+    const nodeInfoMap = getNodeInfoForSessions(sessionIds);
+
     const enriched = sessions
       .map((s) => {
         const meta = enrichments.sessions[s.sessionId] as SessionEnrichment | undefined;
+        const nodeInfo = nodeInfoMap.get(s.sessionId);
         return {
           ...s,
           starred: meta?.starred ?? false,
@@ -41,6 +53,11 @@ router.get("/api/projects/:id/sessions", (req, res) => {
           alias: meta?.alias,
           notes: meta?.notes,
           archived: meta?.archived ?? false,
+          ...(nodeInfo ? {
+            macroNodeTitle: nodeInfo.nodeTitle,
+            macroNodeDescription: nodeInfo.nodeDescription,
+            macroNodeBlueprintId: nodeInfo.blueprintId,
+          } : {}),
         };
       })
       .filter((s) => {
@@ -112,7 +129,7 @@ router.post("/api/sessions/:id/run", async (req, res) => {
 
     res.json({ output, suggestions });
   } catch (err) {
-    console.error("POST /api/sessions/:id/run failed:", String(err));
+    log.error(`POST /api/sessions/:id/run failed: ${String(err)}`);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -169,6 +186,57 @@ router.put("/api/state", (req, res) => {
     const patch = req.body as Record<string, unknown>;
     const state = updateAppState(patch);
     res.json(state);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── Dev Tools ──────────────────────────────────────────────
+
+// GET /api/dev/status — returns dev mode flag
+router.get("/api/dev/status", (_req, res) => {
+  res.json({ devMode: CLAWUI_DEV });
+});
+
+// POST /api/dev/redeploy — build and restart stable environment (dev mode only)
+router.post("/api/dev/redeploy", (_req, res) => {
+  const projectRoot = join(process.cwd(), "..");
+  const deployScript = join(projectRoot, "scripts", "deploy-stable.sh");
+  const startScript = join(projectRoot, "scripts", "start-stable.sh");
+
+  log.info("Dev redeploy: starting deploy-stable.sh + start-stable.sh");
+
+  // Run deploy first, then start
+  execFile("/bin/bash", [deployScript], { cwd: projectRoot, timeout: 120_000 }, (deployErr, deployStdout, deployStderr) => {
+    if (deployErr) {
+      log.error(`Deploy failed: ${deployErr.message}`);
+      res.status(500).json({ error: "Deploy failed", details: deployStderr || deployErr.message });
+      return;
+    }
+    log.info(`Deploy output: ${deployStdout.trim()}`);
+
+    // Start stable in detached mode (nohup + disown so it survives this process)
+    execFile("/bin/bash", ["-c", `nohup ${startScript} > /tmp/clawui-stable.log 2>&1 &`], { cwd: projectRoot }, (startErr) => {
+      if (startErr) {
+        log.error(`Start failed: ${startErr.message}`);
+        res.status(500).json({ error: "Start failed", details: startErr.message });
+        return;
+      }
+      log.info("Stable environment restarted");
+      res.json({ ok: true, message: "Stable environment deployed and restarted" });
+    });
+  });
+});
+
+// GET /api/sessions/:id/health — analyze session context health
+router.get("/api/sessions/:id/health", (req, res) => {
+  try {
+    const analysis = analyzeSessionHealth(req.params.id as string);
+    if (!analysis) {
+      res.status(404).json({ error: "Session file not found" });
+      return;
+    }
+    res.json(analysis);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

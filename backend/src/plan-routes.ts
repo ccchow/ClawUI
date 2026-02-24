@@ -1,4 +1,9 @@
 import { Router } from "express";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import express from "express";
 import {
   createBlueprint,
   getBlueprint,
@@ -13,12 +18,23 @@ import {
   getArtifactsForNode,
   deleteArtifact,
   createExecution,
+  updateExecution,
+  getExecution,
   getExecutionsForNode,
   getExecutionBySession,
   getNodeBySession,
+  setExecutionBlocker,
+  setExecutionTaskSummary,
 } from "./plan-db.js";
-import type { ArtifactType, ExecutionType } from "./plan-db.js";
-import { executeNode, executeNextNode, executeAllNodes } from "./plan-executor.js";
+import type { ArtifactType, ExecutionType, MacroNode } from "./plan-db.js";
+import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, addPendingTask, removePendingTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession } from "./plan-executor.js";
+import type { CompletionEvaluation } from "./plan-executor.js";
+import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
+import { createLogger } from "./logger.js";
+import { CLAWUI_DB_DIR, PORT } from "./config.js";
+import { LOCAL_AUTH_TOKEN } from "./auth.js";
+
+const log = createLogger("plan-routes");
 
 const planRouter = Router();
 
@@ -100,6 +116,376 @@ planRouter.delete("/api/blueprints/:id", (req, res) => {
 });
 
 // ─── MacroNode operations ────────────────────────────────────
+
+// POST /api/blueprints/:blueprintId/enrich-node — AI-enrich title & description
+planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const { title, description } = req.body as { title?: string; description?: string };
+    if (!title || typeof title !== "string" || title.trim().length === 0) {
+      res.status(400).json({ error: "Missing or empty 'title'" });
+      return;
+    }
+
+    // Build context about the blueprint
+    const existingNodes = blueprint.nodes
+      .map((n, i) => `  ${i + 1}. [${n.status}] ${n.title}${n.description ? ` — ${n.description}` : ""}`)
+      .join("\n");
+
+    const resultFile = join(tmpdir(), `clawui-enrich-${randomUUID()}.json`);
+
+    const prompt = `You are helping a developer write a clear, actionable task node for a coding blueprint.
+
+Blueprint: "${blueprint.title}"
+${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
+${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
+${existingNodes ? `\nExisting nodes:\n${existingNodes}` : "\nNo existing nodes yet."}
+
+The user wants to add a new node with:
+- Title: "${title.trim()}"
+${description ? `- Description: "${description.trim()}"` : "- Description: (none provided)"}
+
+Your task: Enrich and improve the title and description to make them clear and actionable for an AI coding agent. The enriched description should:
+1. Be specific about what needs to be done
+2. Reference relevant files/components if the project context suggests them
+3. Include acceptance criteria or expected behavior when helpful
+4. Stay concise — no fluff
+
+IMPORTANT: Write the result as a JSON file using bash. Do NOT output JSON in chat. Instead, run this bash command with your enriched values:
+cat > '${resultFile}' << 'ENRICH_EOF'
+{"title": "your improved title here", "description": "your improved description here"}
+ENRICH_EOF
+
+Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid. Use escaped quotes inside string values if needed.`;
+
+    await enqueueBlueprintTask(req.params.blueprintId, async () => {
+      await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+    });
+
+    // Read enriched result from temp file
+    let result: { title: string; description: string };
+    try {
+      const raw = readFileSync(resultFile, "utf-8").trim();
+      result = JSON.parse(raw);
+      if (!result.title || !result.description) {
+        throw new Error("Missing title or description in enrichment result");
+      }
+    } catch (parseErr) {
+      throw new Error(`Enrichment failed: could not read result — ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+    } finally {
+      try { unlinkSync(resultFile); } catch { /* ignore */ }
+    }
+
+    res.json({ title: result.title, description: result.description });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/reevaluate — AI re-evaluate node title & description
+// Fire-and-forget: returns immediately with {status:"queued"}, applies results in background
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const node = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!node) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+
+    const blueprintId = req.params.blueprintId;
+    const nodeId = req.params.nodeId;
+
+    // Track in pending tasks for queue status API
+    addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
+
+    // Build full context about all nodes and their statuses
+    const nodesContext = blueprint.nodes
+      .map((n, i) => {
+        let line = `  ${i + 1}. [${n.status}] ${n.title}`;
+        if (n.description) line += ` — ${n.description}`;
+        if (n.error) line += ` (ERROR: ${n.error})`;
+        if (n.id === node.id) line += " ← THIS NODE";
+        return line;
+      })
+      .join("\n");
+
+    // Collect output artifacts from completed nodes as project progress context
+    const completedSummaries = blueprint.nodes
+      .filter((n) => n.status === "done" && n.outputArtifacts.length > 0)
+      .map((n) => `Step "${n.title}": ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 300)}`)
+      .join("\n");
+
+    const apiBase = getApiBase();
+    const authParam = getAuthParam();
+
+    // Build update payload instructions — include status reset for failed nodes
+    const capturedStatus = node.status;
+    const statusResetNote = capturedStatus === "failed"
+      ? `\nIMPORTANT: Because this node's current status is "failed", you MUST also include "status": "pending" in your curl payload to reset it so it can be re-run.`
+      : "";
+
+    const prompt = `You are a project manager reviewing a development task node in the context of its parent blueprint/plan.
+
+Blueprint: "${blueprint.title}"
+${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
+${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
+
+All nodes in the plan:
+${nodesContext}
+
+${completedSummaries ? `Progress from completed steps:\n${completedSummaries}\n` : ""}
+The node to re-evaluate:
+- Node ID: ${nodeId}
+- Title: "${node.title}"
+- Description: "${node.description || "(none)"}"
+- Current status: ${node.status}
+${node.error ? `- Error: ${node.error}` : ""}
+
+Your task: Re-evaluate this node considering the current state of the project. Based on what has already been completed, what is still pending, and whether this node's task is still relevant and accurately described:
+
+1. Update the title to be clear and accurate given the current project state.
+2. Update the description to reflect what actually needs to be done (or has been done).
+3. If this node's task is ALREADY COMPLETED by another node, is REDUNDANT, OUT OF DATE, or NO LONGER NEEDED, add a warning paragraph at the end of the description starting with "⚠️ WARNING:" explaining why this node should be skipped or deleted.
+
+IMPORTANT: Do NOT output JSON in chat. Instead, update the node directly by calling the ClawUI API using curl:
+
+curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"title": "your updated title", "description": "your updated description", "error": ""${capturedStatus === "failed" ? ', "status": "pending"' : ""}}'
+
+Replace the placeholder values with your actual updated title and description. Make sure the JSON is valid — escape any special characters in string values.${statusResetNote}`;
+
+    // Fire and forget — enqueue and apply results when done
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+      } finally {
+        removePendingTask(blueprintId, nodeId, "reevaluate");
+      }
+    }).catch(err => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      updateMacroNode(blueprintId, nodeId, {
+        error: `Re-evaluate failed: ${errMsg.slice(0, 200)}`,
+      });
+      log.error(`Reevaluate node ${nodeId} failed: ${errMsg}`);
+    });
+
+    res.json({ status: "queued", nodeId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// PUT /api/blueprints/:blueprintId/nodes/batch — batch update multiple nodes
+planRouter.put("/api/blueprints/:blueprintId/nodes/batch", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const updates = req.body as Array<{
+      id: string;
+      title?: string;
+      description?: string;
+      status?: string;
+      dependencies?: string[];
+      error?: string;
+    }>;
+    if (!Array.isArray(updates)) {
+      res.status(400).json({ error: "Body must be a JSON array" });
+      return;
+    }
+
+    const validIds = new Set(blueprint.nodes.map((n) => n.id));
+    const results: { id: string; updated: boolean; error?: string }[] = [];
+
+    for (const update of updates) {
+      if (!update.id || !validIds.has(update.id)) {
+        results.push({ id: update.id, updated: false, error: "Node not found" });
+        continue;
+      }
+      const { id, ...patch } = update;
+      // Filter dependencies to valid IDs only
+      if (Array.isArray(patch.dependencies)) {
+        patch.dependencies = patch.dependencies.filter((d) => validIds.has(d));
+      }
+      try {
+        updateMacroNode(req.params.blueprintId, id, patch as Record<string, unknown>);
+        results.push({ id, updated: true });
+      } catch (err) {
+        results.push({ id, updated: false, error: String(err) });
+      }
+    }
+
+    res.json({ updated: results.filter((r) => r.updated).length, total: updates.length, results });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/batch-create — create multiple nodes at once
+// Returns created node IDs so callers can reference them for inter-batch dependencies.
+planRouter.post("/api/blueprints/:blueprintId/nodes/batch-create", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const nodes = req.body as Array<{
+      title: string;
+      description?: string;
+      order?: number;
+      dependencies?: (string | number)[];
+    }>;
+    if (!Array.isArray(nodes)) {
+      res.status(400).json({ error: "Body must be a JSON array of nodes" });
+      return;
+    }
+
+    const existingNodeIds = new Set(blueprint.nodes.map((n) => n.id));
+    const maxOrder = Math.max(0, ...blueprint.nodes.map((n) => n.order));
+    const createdNodes: MacroNode[] = [];
+
+    for (let i = 0; i < nodes.length; i++) {
+      const step = nodes[i];
+      if (!step.title || typeof step.title !== "string") {
+        continue; // skip invalid entries
+      }
+      // Resolve dependencies: string = existing node ID, number = index into this batch
+      const depIds = (step.dependencies || [])
+        .map((dep) => {
+          if (typeof dep === "number") {
+            return dep >= 0 && dep < createdNodes.length ? createdNodes[dep].id : null;
+          }
+          if (typeof dep === "string") {
+            // Accept both existing node IDs and already-created batch IDs
+            return existingNodeIds.has(dep) || createdNodes.some((n) => n.id === dep) ? dep : null;
+          }
+          return null;
+        })
+        .filter((id): id is string => id !== null);
+
+      const node = createMacroNode(req.params.blueprintId, {
+        title: step.title,
+        description: step.description,
+        order: step.order ?? maxOrder + i + 1,
+        dependencies: depIds.length > 0 ? depIds : undefined,
+      });
+      createdNodes.push(node);
+    }
+
+    res.status(201).json({ created: createdNodes.length, nodes: createdNodes });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/insert-between — INSERT_BETWEEN graph mutation
+// Creates a refinement node between a completed node and its downstream dependents.
+// Rewires all dependents of :nodeId to depend on the new node instead.
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/insert-between", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const completedNode = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!completedNode) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+
+    const { title, description } = req.body as { title?: string; description?: string };
+    if (!title || typeof title !== "string") {
+      res.status(400).json({ error: "Missing or empty 'title'" });
+      return;
+    }
+
+    // Create new node depending on completedNode
+    const newNode = createMacroNode(req.params.blueprintId, {
+      title,
+      description,
+      order: completedNode.order + 1,
+      dependencies: [req.params.nodeId],
+    });
+
+    // Rewire: each dependent that depended on completedNode now depends on newNode instead
+    const dependents = blueprint.nodes.filter((n) => n.dependencies.includes(req.params.nodeId));
+    const rewired: { nodeId: string; oldDeps: string[]; newDeps: string[] }[] = [];
+    for (const dep of dependents) {
+      const oldDeps = [...dep.dependencies];
+      const newDeps = dep.dependencies.map((d) => (d === req.params.nodeId ? newNode.id : d));
+      updateMacroNode(req.params.blueprintId, dep.id, { dependencies: newDeps });
+      rewired.push({ nodeId: dep.id, oldDeps, newDeps });
+    }
+
+    log.info(`INSERT_BETWEEN: Created node "${newNode.title}" (${newNode.id.slice(0, 8)}) between ${req.params.nodeId.slice(0, 8)} and ${dependents.length} dependent(s)`);
+    res.status(201).json({ node: newNode, rewired });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/add-sibling — ADD_SIBLING graph mutation
+// Creates a blocked sibling node inheriting the target node's dependencies,
+// and adds it as a dependency for all downstream nodes.
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/add-sibling", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const targetNode = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!targetNode) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+
+    const { title, description } = req.body as { title?: string; description?: string };
+    if (!title || typeof title !== "string") {
+      res.status(400).json({ error: "Missing or empty 'title'" });
+      return;
+    }
+
+    // Create sibling node inheriting target's dependencies
+    const newNode = createMacroNode(req.params.blueprintId, {
+      title,
+      description,
+      order: targetNode.order + 1,
+      dependencies: [...targetNode.dependencies],
+    });
+    // Mark as blocked (needs human intervention)
+    updateMacroNode(req.params.blueprintId, newNode.id, { status: "blocked" });
+
+    // Add newNode as a dependency for all downstream dependents
+    const dependents = blueprint.nodes.filter((n) => n.dependencies.includes(req.params.nodeId));
+    const rewired: { nodeId: string; oldDeps: string[]; newDeps: string[] }[] = [];
+    for (const dep of dependents) {
+      if (!dep.dependencies.includes(newNode.id)) {
+        const oldDeps = [...dep.dependencies];
+        const newDeps = [...dep.dependencies, newNode.id];
+        updateMacroNode(req.params.blueprintId, dep.id, { dependencies: newDeps });
+        rewired.push({ nodeId: dep.id, oldDeps, newDeps });
+      }
+    }
+
+    log.info(`ADD_SIBLING: Created blocker node "${newNode.title}" (${newNode.id.slice(0, 8)}) as sibling of ${req.params.nodeId.slice(0, 8)}`);
+    res.status(201).json({ node: newNode, rewired });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // POST /api/blueprints/:blueprintId/nodes — add node
 planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
@@ -272,6 +658,18 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, r
   }
 });
 
+// ─── Queue status ─────────────────────────────────────────────
+
+// GET /api/blueprints/:id/queue — get queue info for a blueprint
+planRouter.get("/api/blueprints/:id/queue", (req, res) => {
+  try {
+    const info = getQueueInfo(req.params.id);
+    res.json(info);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ─── Blueprint lifecycle ─────────────────────────────────────
 
 // POST /api/blueprints/:id/approve — set status to approved
@@ -288,29 +686,413 @@ planRouter.post("/api/blueprints/:id/approve", (req, res) => {
   }
 });
 
-// POST /api/blueprints/:id/nodes/:nodeId/run — run a single node
-planRouter.post("/api/blueprints/:id/nodes/:nodeId/run", async (req, res) => {
+// POST /api/blueprints/:id/nodes/:nodeId/run — run a single node (async: returns immediately)
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/run", (req, res) => {
   try {
-    req.setTimeout(300_000); // 5 minute timeout
-    const execution = await executeNode(req.params.id, req.params.nodeId);
-    res.json(execution);
+    // Validate preconditions synchronously before fire-and-forget
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+    if (nd.status !== "pending" && nd.status !== "failed") {
+      res.status(400).json({ error: `Node status is "${nd.status}", must be "pending" or "failed" to run` }); return;
+    }
+    // Only block queueing when dependencies are in terminal-failure states.
+    // Running/queued/pending deps are fine — the actual execution will re-check
+    // and fail if deps aren't done/skipped by the time this node runs.
+    const blockedStatuses = new Set(["failed", "blocked"]);
+    for (const depId of nd.dependencies) {
+      const dep = bp.nodes.find((n) => n.id === depId);
+      if (!dep || blockedStatuses.has(dep.status)) {
+        res.status(400).json({ error: `Dependency "${dep?.title ?? depId}" is ${dep?.status ?? "missing"} — cannot queue` }); return;
+      }
+    }
+
+    // Fire and forget — executeNode sets "queued" immediately, frontend polls
+    executeNode(req.params.id, req.params.nodeId)
+      .catch(err => log.error(`Node ${req.params.nodeId} execution failed: ${err.message}`));
+    res.json({ status: "queued", nodeId: req.params.nodeId });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    const status = msg.includes("not found") ? 404 : msg.includes("must be") || msg.includes("not done") ? 400 : 500;
-    res.status(status).json({ error: msg });
+    res.status(500).json({ error: msg });
   }
 });
 
-// POST /api/blueprints/:id/run — run next pending node
-planRouter.post("/api/blueprints/:id/run", async (req, res) => {
+// POST /api/blueprints/:id/nodes/:nodeId/resume-session — resume a failed session
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/resume-session", (req, res) => {
   try {
-    req.setTimeout(300_000);
-    const execution = await executeNextNode(req.params.id);
-    if (!execution) {
-      res.json({ message: "no pending nodes" });
+    const { executionId } = req.body as { executionId?: string };
+    if (!executionId) { res.status(400).json({ error: "executionId is required" }); return; }
+
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+    if (nd.status !== "failed") {
+      res.status(400).json({ error: `Node status is "${nd.status}", must be "failed" to resume` }); return;
+    }
+
+    const exec = getExecution(executionId);
+    if (!exec) { res.status(404).json({ error: "Execution not found" }); return; }
+    if (!exec.sessionId) { res.status(400).json({ error: "Execution has no session to resume" }); return; }
+
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+
+    addPendingTask(blueprintId, { type: "run", nodeId, queuedAt: new Date().toISOString() });
+    updateMacroNode(blueprintId, nodeId, { status: "queued" });
+
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        return await resumeNodeSession(blueprintId, nodeId, executionId);
+      } finally {
+        removePendingTask(blueprintId, nodeId, "run");
+      }
+    }).catch(err => {
+      log.error(`Resume session for node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued" });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/nodes/:nodeId/recover-session — try to find a lost session for a failed node
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/recover-session", (req, res) => {
+  try {
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+
+    // Find failed executions without a sessionId that have the server restart error
+    const executions = getExecutionsForNode(req.params.nodeId);
+    const recoverable = executions.filter(
+      (e) => e.status === "failed" && !e.sessionId &&
+        e.outputSummary?.includes("Server restarted"),
+    );
+    if (recoverable.length === 0) {
+      res.json({ recovered: false, reason: "No recoverable executions found" });
       return;
     }
-    res.json(execution);
+
+    if (!bp.projectCwd) {
+      res.json({ recovered: false, reason: "Blueprint has no projectCwd" });
+      return;
+    }
+
+    let recoveredCount = 0;
+    for (const exec of recoverable) {
+      // Look for sessions created after this execution started
+      const beforeTimestamp = new Date(exec.startedAt);
+      const sessionId = detectNewSession(bp.projectCwd, beforeTimestamp);
+      if (sessionId) {
+        // Check this session isn't already claimed by another execution
+        const existing = getExecutionBySession(sessionId);
+        if (!existing) {
+          // Link session and mark execution as done (it completed before the restart)
+          updateExecution(exec.id, {
+            sessionId,
+            status: "done",
+            completedAt: new Date().toISOString(),
+            outputSummary: "Recovered after server restart",
+          });
+          recoveredCount++;
+        }
+      }
+    }
+
+    // If any executions were recovered, mark the node as done too
+    if (recoveredCount > 0) {
+      updateMacroNode(req.params.id, req.params.nodeId, {
+        status: "done",
+        error: "",
+      });
+    }
+
+    res.json({ recovered: recoveredCount > 0, recoveredCount });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/nodes/:nodeId/evaluation-callback — callback endpoint for interactive evaluation
+// Called by Claude during evaluateNodeCompletion() to apply graph mutations directly
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluation-callback", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const node = blueprint.nodes.find((n) => n.id === nodeId);
+    if (!node) { res.status(404).json({ error: "Node not found" }); return; }
+
+    const { status, evaluation: evalText, mutations } = req.body as {
+      status?: string;
+      evaluation?: string;
+      mutations?: Array<{ action: string; new_node: { title: string; description: string } }>;
+    };
+
+    if (!status || !["COMPLETE", "NEEDS_REFINEMENT", "HAS_BLOCKER"].includes(status)) {
+      res.status(400).json({ error: `Invalid status: "${status}". Must be COMPLETE, NEEDS_REFINEMENT, or HAS_BLOCKER` });
+      return;
+    }
+
+    const completionEval: CompletionEvaluation = {
+      evaluation: evalText || "",
+      status: status as CompletionEvaluation["status"],
+      mutations: Array.isArray(mutations)
+        ? mutations.filter(m => m.action && m.new_node?.title).map(m => ({
+            action: m.action as "INSERT_BETWEEN" | "ADD_SIBLING",
+            new_node: { title: m.new_node.title, description: m.new_node.description || "" },
+          }))
+        : [],
+    };
+
+    log.info(`Evaluation callback for node ${nodeId.slice(0, 8)} "${node.title}": ${completionEval.status} — ${completionEval.evaluation}`);
+
+    let createdNodes: MacroNode[] = [];
+    if (completionEval.status !== "COMPLETE" && completionEval.mutations.length > 0) {
+      const result = applyGraphMutations(blueprintId, nodeId, completionEval, blueprint);
+      createdNodes = result.createdNodes;
+    }
+
+    res.json({ success: true, status: completionEval.status, createdNodes });
+  } catch (err) {
+    log.error(`Evaluation callback failed: ${err instanceof Error ? err.message : err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/executions/:execId/report-blocker — callback for execution blocker reporting
+// Called by Claude during node execution to report blockers via API instead of output markers
+planRouter.post("/api/blueprints/:id/executions/:execId/report-blocker", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const execId = req.params.execId;
+
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const execution = getExecution(execId);
+    if (!execution || execution.blueprintId !== blueprintId) {
+      res.status(404).json({ error: "Execution not found" }); return;
+    }
+
+    const { type, description, suggestion } = req.body as {
+      type?: string;
+      description?: string;
+      suggestion?: string;
+    };
+
+    if (!type || !description) {
+      res.status(400).json({ error: "Missing required fields: type, description" }); return;
+    }
+
+    const blockerJson = JSON.stringify({ type, description, suggestion: suggestion || "" });
+    setExecutionBlocker(execId, blockerJson);
+
+    log.info(`Blocker reported for execution ${execId.slice(0, 8)}: [${type}] ${description}`);
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Report blocker failed: ${err instanceof Error ? err.message : err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/executions/:execId/task-summary — callback for task completion summary
+// Called by Claude during node execution to report task summary via API instead of output markers
+planRouter.post("/api/blueprints/:id/executions/:execId/task-summary", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const execId = req.params.execId;
+
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const execution = getExecution(execId);
+    if (!execution || execution.blueprintId !== blueprintId) {
+      res.status(404).json({ error: "Execution not found" }); return;
+    }
+
+    const { summary } = req.body as { summary?: string };
+
+    if (!summary) {
+      res.status(400).json({ error: "Missing required field: summary" }); return;
+    }
+
+    setExecutionTaskSummary(execId, summary);
+
+    log.info(`Task summary reported for execution ${execId.slice(0, 8)}: ${summary.slice(0, 100)}...`);
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Task summary callback failed: ${err instanceof Error ? err.message : err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/nodes/:nodeId/evaluate — evaluate completed node and apply graph mutations
+// Fire-and-forget: returns immediately with {status:"queued"}, applies mutations in background
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluate", (req, res) => {
+  try {
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+    if (nd.status !== "done") {
+      res.status(400).json({ error: `Node status is "${nd.status}", must be "done" to evaluate` }); return;
+    }
+
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+
+    addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
+
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        const result = await evaluateNodeCompletion(blueprintId, nodeId, bp.projectCwd);
+        return result;
+      } finally {
+        removePendingTask(blueprintId, nodeId, "reevaluate");
+      }
+    }).catch(err => {
+      log.error(`Evaluate node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued", nodeId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/run — run next pending node (async)
+planRouter.post("/api/blueprints/:id/run", (req, res) => {
+  try {
+    executeNextNode(req.params.id)
+      .then(exec => { if (!exec) log.info("No pending nodes for run-next"); })
+      .catch(err => log.error(`Run-next failed: ${err.message}`));
+    res.json({ status: "started" });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/reevaluate-all — AI re-evaluate all non-done nodes (status, deps, description)
+// Fire-and-forget: returns immediately, applies results in background
+planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+
+    const blueprintId = req.params.id;
+    const nonDoneNodes = blueprint.nodes.filter(
+      (n) => n.status !== "done" && n.status !== "running" && n.status !== "queued",
+    );
+    if (nonDoneNodes.length === 0) {
+      res.json({ message: "No nodes to reevaluate", blueprintId });
+      return;
+    }
+
+    // Track all nodes as pending reevaluate tasks
+    for (const n of nonDoneNodes) {
+      addPendingTask(blueprintId, { type: "reevaluate", nodeId: n.id, queuedAt: new Date().toISOString() });
+    }
+
+    // Build full context about all nodes and their statuses
+    const nodeIdMap = Object.fromEntries(blueprint.nodes.map((n) => [n.id, n]));
+    const nodesContext = blueprint.nodes
+      .map((n, i) => {
+        const depsStr = n.dependencies.length > 0
+          ? ` [depends on: ${n.dependencies.map((d) => nodeIdMap[d]?.title ?? d).join(", ")}]`
+          : "";
+        let line = `  ${i + 1}. (id: ${n.id}) [${n.status}] ${n.title}${depsStr}`;
+        if (n.description) line += ` — ${n.description}`;
+        if (n.error) line += ` (ERROR: ${n.error})`;
+        return line;
+      })
+      .join("\n");
+
+    // Collect output artifacts from completed nodes
+    const completedSummaries = blueprint.nodes
+      .filter((n) => n.status === "done" && n.outputArtifacts.length > 0)
+      .map((n) => `Step "${n.title}": ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 300)}`)
+      .join("\n");
+
+    // Build list of nodes to reevaluate with IDs
+    const targetNodesList = nonDoneNodes
+      .map((n) => `  - id: "${n.id}", title: "${n.title}", status: "${n.status}", dependencies: [${n.dependencies.map((d) => `"${d}"`).join(", ")}]`)
+      .join("\n");
+
+    // Valid node IDs for dependency reference
+    const validNodeIds = blueprint.nodes.map((n) => `"${n.id}" (${n.title})`).join(", ");
+
+    const prompt = `You are a project manager reviewing a development blueprint/plan and reevaluating all incomplete nodes.
+
+Blueprint: "${blueprint.title}"
+${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
+${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
+
+All nodes in the plan:
+${nodesContext}
+
+${completedSummaries ? `Progress from completed steps:\n${completedSummaries}\n` : ""}
+Nodes to reevaluate:
+${targetNodesList}
+
+Valid node IDs for dependencies: ${validNodeIds}
+
+For EACH node listed above, reevaluate it by examining the actual codebase:
+
+1. Read the relevant source files to verify implementation status.
+2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.
+
+Batch API endpoint: PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch
+Content-Type: application/json
+
+The body is a JSON ARRAY of node updates. Each element has:
+- "id": (REQUIRED) the node ID
+- "title": updated title string
+- "description": updated description string
+- "status": one of "pending", "done", "skipped" (set "done" if fully implemented, "skipped" if redundant)
+- "dependencies": array of node ID strings (only use valid IDs from the list above)
+- "error": error message string (set to "" to clear)
+
+Guidelines:
+1. Read actual source code — do NOT guess implementation status.
+2. If fully implemented → set status to "done".
+3. If partially implemented → keep "pending", describe what remains.
+4. If redundant/obsolete → set to "skipped", explain why in description.
+5. Update dependencies if needed (remove invalid, add missing).
+6. You MUST make ONE batch API call with ALL node updates — do NOT call individual endpoints.
+
+Example (updates all nodes in one call):
+curl -X PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch -H "Content-Type: application/json" -d '[{"id":"node-id-1", "title":"...", "description":"...", "status":"done"}, {"id":"node-id-2", "title":"...", "status":"skipped"}]'`;
+
+    // Fire and forget via blueprint queue — Claude Code will directly update DB via API
+    // withTimeout prevents indefinite hangs if the CLI process never exits
+    const REEVALUATE_TIMEOUT = 32 * 60 * 1000; // 32 min (30 min exec + 2 min grace)
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await withTimeout(
+          runClaudeInteractive(prompt, blueprint.projectCwd || undefined),
+          REEVALUATE_TIMEOUT,
+          "Reevaluate-all timed out after 32 minutes",
+        );
+      } finally {
+        // Always clean up pending tasks, whether success, error, or timeout
+        for (const n of nonDoneNodes) {
+          removePendingTask(blueprintId, n.id, "reevaluate");
+        }
+      }
+    }).catch((err) => {
+      log.error(`Reevaluate-all blueprint ${blueprintId} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ message: "reevaluation started", blueprintId, nodeCount: nonDoneNodes.length });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -326,7 +1108,7 @@ planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
     }
     // Fire and forget — execution continues in background
     executeAllNodes(req.params.id).catch((err) => {
-      console.error(`[plan-executor] run-all failed for ${req.params.id}:`, err);
+      log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
     });
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
@@ -366,14 +1148,83 @@ planRouter.get("/api/sessions/:sessionId/execution", (req, res) => {
 
 // ─── AI Plan Generation ──────────────────────────────────────
 
-// POST /api/blueprints/:id/generate — generate nodes via Claude
-planRouter.post("/api/blueprints/:id/generate", async (req, res) => {
-  res.setTimeout(180_000);
+// POST /api/blueprints/:id/generate — generate nodes via Claude (fire-and-forget)
+// Claude Code calls the batch-create endpoint directly in interactive mode.
+planRouter.post("/api/blueprints/:id/generate", (req, res) => {
   try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+
+    const blueprintId = req.params.id;
     const { description } = req.body as { description?: string };
-    const { generatePlan } = await import("./plan-generator.js");
-    const nodes = await generatePlan(req.params.id, description);
-    res.json(nodes);
+
+    // Track as a pending generate task for queue status API
+    addPendingTask(blueprintId, { type: "generate", queuedAt: new Date().toISOString() });
+
+    const GENERATE_TIMEOUT = 10 * 60 * 1000; // 10 min
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        const { generatePlan } = await import("./plan-generator.js");
+        await withTimeout(
+          generatePlan(blueprintId, description),
+          GENERATE_TIMEOUT,
+          "Generate nodes timed out after 10 minutes",
+        );
+      } finally {
+        removePendingTask(blueprintId, undefined, "generate");
+      }
+    }).catch((err) => {
+      log.error(`Generate nodes for blueprint ${blueprintId} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued", blueprintId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── Image upload for node descriptions ──────────────────────
+
+const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
+const UPLOADS_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR, "uploads");
+
+// Serve uploaded images statically
+planRouter.use("/api/uploads", express.static(UPLOADS_DIR));
+
+// POST /api/uploads — accepts base64-encoded image, stores to disk
+planRouter.post("/api/uploads", (req, res) => {
+  try {
+    const { data, filename } = req.body as { data?: string; filename?: string };
+    if (!data || typeof data !== "string") {
+      res.status(400).json({ error: "Missing 'data' (base64-encoded image)" });
+      return;
+    }
+
+    // Extract mime type and raw base64 from data URL
+    const match = data.match(/^data:(image\/\w+);base64,(.+)$/);
+    if (!match) {
+      res.status(400).json({ error: "Invalid data URL format. Expected data:image/*;base64,..." });
+      return;
+    }
+
+    const mimeType = match[1];
+    const base64Data = match[2];
+    const ext = mimeType.split("/")[1] || "png";
+    const safeName = filename
+      ? filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 50)
+      : `image-${Date.now()}`;
+    const finalName = `${randomUUID().slice(0, 8)}-${safeName}.${ext}`;
+
+    if (!existsSync(UPLOADS_DIR)) {
+      mkdirSync(UPLOADS_DIR, { recursive: true });
+    }
+
+    writeFileSync(join(UPLOADS_DIR, finalName), Buffer.from(base64Data, "base64"));
+
+    res.json({ url: `/api/uploads/${finalName}` });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -562,10 +1413,42 @@ planRouter.post("/api/plans/:id/approve", (req, res) => {
   }
 });
 
+// POST /api/plans/:id/nodes/:nodeId/evaluate
+planRouter.post("/api/plans/:id/nodes/:nodeId/evaluate", (req, res) => {
+  try {
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Plan not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+    if (nd.status !== "done") {
+      res.status(400).json({ error: `Node status is "${nd.status}", must be "done" to evaluate` }); return;
+    }
+
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+
+    addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
+
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        return await evaluateNodeCompletion(blueprintId, nodeId, bp.projectCwd);
+      } finally {
+        removePendingTask(blueprintId, nodeId, "reevaluate");
+      }
+    }).catch(err => {
+      log.error(`Evaluate node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued", nodeId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // POST /api/plans/:id/nodes/:nodeId/run
 planRouter.post("/api/plans/:id/nodes/:nodeId/run", async (req, res) => {
   try {
-    req.setTimeout(300_000);
+    req.setTimeout(30 * 60 * 1000);
     const execution = await executeNode(req.params.id, req.params.nodeId);
     res.json(execution);
   } catch (err) {
@@ -578,7 +1461,7 @@ planRouter.post("/api/plans/:id/nodes/:nodeId/run", async (req, res) => {
 // POST /api/plans/:id/run
 planRouter.post("/api/plans/:id/run", async (req, res) => {
   try {
-    req.setTimeout(300_000);
+    req.setTimeout(30 * 60 * 1000);
     const execution = await executeNextNode(req.params.id);
     if (!execution) {
       res.json({ message: "no pending nodes" });
@@ -599,7 +1482,7 @@ planRouter.post("/api/plans/:id/run-all", (req, res) => {
       return;
     }
     executeAllNodes(req.params.id).catch((err) => {
-      console.error(`[plan-executor] run-all failed for ${req.params.id}:`, err);
+      log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
     });
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
@@ -612,8 +1495,10 @@ planRouter.post("/api/plans/:id/generate", async (req, res) => {
   res.setTimeout(180_000);
   try {
     const { description } = req.body as { description?: string };
-    const { generatePlan } = await import("./plan-generator.js");
-    const nodes = await generatePlan(req.params.id, description);
+    const nodes = await enqueueBlueprintTask(req.params.id, async () => {
+      const { generatePlan } = await import("./plan-generator.js");
+      return generatePlan(req.params.id, description);
+    });
     res.json(nodes);
   } catch (err) {
     res.status(500).json({ error: String(err) });

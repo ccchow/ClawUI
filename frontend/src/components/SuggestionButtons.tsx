@@ -13,7 +13,10 @@ export function SuggestionButtons({
   disabled,
   onSelect,
 }: SuggestionButtonsProps) {
-  if (suggestions.length === 0) return null;
+  if (suggestions.length === 0) {
+    // Return empty placeholder with same min-height to prevent layout shift
+    return <div className="min-h-[2rem]" />;
+  }
 
   return (
     <div className="space-y-2">
@@ -28,7 +31,7 @@ export function SuggestionButtons({
             disabled={disabled}
             className="text-left px-4 py-3 rounded-xl border border-border-primary bg-bg-secondary hover:bg-bg-tertiary hover:border-accent-purple/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <p className="text-sm font-medium text-text-primary mb-1">
+            <p className="text-sm font-medium text-text-primary mb-1 line-clamp-1">
               {s.title}
             </p>
             <p className="text-xs text-text-muted line-clamp-2">

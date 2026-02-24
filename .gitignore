@@ -14,11 +14,20 @@ coverage/
 .playwright-mcp/
 .serena/
 
-# ClawUI data — enrichments.json is git-tracked (project knowledge)
-.clawui/index.db
-.clawui/index.db-wal
-.clawui/index.db-shm
-.clawui/app-state.json
+# ClawUI runtime data (local to each installation)
+.clawui/
 
 # Screenshots
 dashboard-*.png
+.clawui-dev/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local environment overrides
+.env.local
+.env.*.local

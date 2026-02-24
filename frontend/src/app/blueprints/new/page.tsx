@@ -13,8 +13,7 @@ export default function NewBlueprintPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent, autoGenerate = false) => {
-    e.preventDefault();
+  const handleCreate = async (autoGenerate = false) => {
     if (!title.trim()) return;
 
     setSubmitting(true);
@@ -43,7 +42,7 @@ export default function NewBlueprintPage() {
 
       <h1 className="text-xl font-semibold mb-6">New Blueprint</h1>
 
-      <form onSubmit={handleSubmit} className="space-y-4 max-w-lg">
+      <form onSubmit={(e) => { e.preventDefault(); handleCreate(false); }} className="space-y-4 max-w-lg">
         <div>
           <label htmlFor="title" className="block text-sm text-text-secondary mb-1">
             Title <span className="text-accent-red">*</span>
@@ -105,7 +104,7 @@ export default function NewBlueprintPage() {
           <button
             type="button"
             disabled={!title.trim() || submitting}
-            onClick={(e) => handleSubmit(e as unknown as React.FormEvent, true)}
+            onClick={() => handleCreate(true)}
             className="px-4 py-2 rounded-lg bg-accent-purple text-white text-sm font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? "Creating..." : "Create & Generate"}

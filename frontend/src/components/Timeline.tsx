@@ -121,9 +121,6 @@ function makeGroup(
   endTime: Date,
   now: Date
 ): TimeGroup {
-  const ageMs = now.getTime() - endTime.getTime();
-  const ageHours = ageMs / (1000 * 60 * 60);
-
   // Format time label
   const timeStr = formatTimeRange(startTime, endTime);
   const relLabel = formatRelative(endTime, now);
@@ -180,24 +177,34 @@ function formatRelative(date: Date, now: Date): string {
 
 // --- Filters ---
 
-type FilterKey = "user" | "assistant" | "tool";
+type FilterKey = "user" | "assistant" | "tool" | "mcp_tool";
 
 const FILTER_CONFIG: { key: FilterKey; label: string; icon: string; color: string; activeColor: string }[] = [
   { key: "user", label: "User", icon: "👤", color: "text-text-muted border-border-primary", activeColor: "text-accent-blue border-accent-blue bg-accent-blue/10" },
   { key: "assistant", label: "Assistant", icon: "🤖", color: "text-text-muted border-border-primary", activeColor: "text-accent-purple border-accent-purple bg-accent-purple/10" },
   { key: "tool", label: "Tool", icon: "🔧", color: "text-text-muted border-border-primary", activeColor: "text-accent-amber border-accent-amber bg-accent-amber/10" },
+  { key: "mcp_tool", label: "MCP Tool", icon: "🔌", color: "text-text-muted border-border-primary", activeColor: "text-cyan-400 border-cyan-400 bg-cyan-400/10" },
 ];
 
+/** Check if a tool name belongs to an MCP server (mcp__serverName__toolName) */
+function isMcpTool(toolName?: string): boolean {
+  return !!toolName && toolName.startsWith("mcp__");
+}
+
 function getItemFilterKey(item: DisplayItem): FilterKey {
-  if (item.kind === "tool_pair") return "tool";
-  const type = item.node!.type;
-  if (type === "tool_use" || type === "tool_result") return "tool";
-  if (type === "assistant") return "assistant";
+  if (item.kind === "tool_pair") {
+    return isMcpTool(item.toolUse?.toolName) ? "mcp_tool" : "tool";
+  }
+  const node = item.node!;
+  if (node.type === "tool_use" || node.type === "tool_result") {
+    return isMcpTool(node.toolName) ? "mcp_tool" : "tool";
+  }
+  if (node.type === "assistant") return "assistant";
   return "user";
 }
 
 function countByFilter(grouped: DisplayItem[]): Record<FilterKey, number> {
-  const counts: Record<FilterKey, number> = { user: 0, assistant: 0, tool: 0 };
+  const counts: Record<FilterKey, number> = { user: 0, assistant: 0, tool: 0, mcp_tool: 0 };
   for (const item of grouped) {
     counts[getItemFilterKey(item)]++;
   }
@@ -207,9 +214,14 @@ function countByFilter(grouped: DisplayItem[]): Record<FilterKey, number> {
 // --- Merge consecutive same-type items ---
 
 function getDisplayType(item: DisplayItem): string {
-  if (item.kind === "tool_pair") return "tool";
-  const type = item.node?.type || "unknown";
-  if (type === "tool_use" || type === "tool_result") return "tool";
+  if (item.kind === "tool_pair") {
+    return isMcpTool(item.toolUse?.toolName) ? "mcp_tool" : "tool";
+  }
+  const node = item.node;
+  const type = node?.type || "unknown";
+  if (type === "tool_use" || type === "tool_result") {
+    return isMcpTool(node?.toolName) ? "mcp_tool" : "tool";
+  }
   return type;
 }
 
@@ -251,6 +263,7 @@ const MERGE_ICONS: Record<string, string> = {
   user: "👤",
   assistant: "🤖",
   tool: "🔧",
+  mcp_tool: "🔌",
   system: "⚙️",
   error: "⚠️",
 };
@@ -259,6 +272,7 @@ const MERGE_COLORS: Record<string, string> = {
   user: "border-accent-blue text-accent-blue",
   assistant: "border-accent-purple text-accent-purple",
   tool: "border-accent-amber text-accent-amber",
+  mcp_tool: "border-cyan-400 text-cyan-400",
   system: "border-text-muted text-text-muted",
   error: "border-accent-red text-accent-red",
 };
@@ -378,6 +392,7 @@ export function Timeline({ nodes }: { nodes: TimelineNode[] }) {
     user: true,
     assistant: true,
     tool: true,
+    mcp_tool: true,
   });
 
   const grouped = useMemo(() => groupNodes(nodes), [nodes]);
@@ -402,7 +417,7 @@ export function Timeline({ nodes }: { nodes: TimelineNode[] }) {
     <div>
       {/* Filter buttons */}
       <div className="flex items-center gap-2 mb-3">
-        {FILTER_CONFIG.map((f) => (
+        {FILTER_CONFIG.filter((f) => f.key !== "mcp_tool" || counts.mcp_tool > 0).map((f) => (
           <button
             key={f.key}
             onClick={() => toggleFilter(f.key)}

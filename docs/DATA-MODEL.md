@@ -1,78 +1,78 @@
-# ClawUI 四层数据模型
+# ClawUI Four-Layer Data Model
 
-## 概览
+## Overview
 
 ```
-Layer 4 — App State        .clawui/app-state.json        UI 偏好、当前视图状态
-Layer 3 — Enrichment       .clawui/enrichments.json      用户标注、标签、收藏、笔记
-Layer 2 — Index/Cache      .clawui/index.db (SQLite)     解析后的结构化索引+缓存
-Layer 1 — Raw Source       ~/.claude/projects/**/*.jsonl  Claude Code 原始数据（只读）
+Layer 4 — App State        .clawui/app-state.json        UI preferences, current view state
+Layer 3 — Enrichment       .clawui/enrichments.json      User annotations, tags, bookmarks, notes
+Layer 2 — Index/Cache      .clawui/index.db (SQLite)     Parsed structured index + cache
+Layer 1 — Raw Source       ~/.claude/projects/**/*.jsonl  Claude Code raw data (read-only)
 ```
 
-### 存储位置
+### Storage Location
 
-所有持久化数据放在项目根目录的 `.clawui/` 隐藏文件夹中：
-- 可跟随 git 版本控制（或 `.gitignore` 掉）
-- 单机本地状态，不涉及远程同步
-- 删除 `.clawui/` 即可完全重置，Layer 1 原始数据不受影响
+All persistent data lives in the `.clawui/` hidden directory at the project root:
+- Can be tracked by git (or added to `.gitignore`)
+- Local single-machine state, no remote sync involved
+- Delete `.clawui/` to fully reset — Layer 1 raw data is unaffected
 
 ---
 
-## Layer 1 — Raw Source（只读）
+## Layer 1 — Raw Source (Read-Only)
 
-**来源**: `~/.claude/projects/<project-hash>/<session-uuid>.jsonl`
+**Source**: `~/.claude/projects/<project-hash>/<session-uuid>.jsonl`
 
-**现状**: 当前 `jsonl-parser.ts` 每次请求都从头读取 JSONL 文件并解析。
+**Current behavior**: `jsonl-parser.ts` reads and parses JSONL files from scratch on each request.
 
-**不变**: 这一层永远只读，不写入任何内容。是一切数据的 source of truth。
+**Invariant**: This layer is always read-only. It is the source of truth for all data.
 
-**JSONL 行类型**:
-- `user` / `assistant` — 对话消息
-- `tool_use` / `tool_result` — 工具调用（嵌套在 assistant content 中）
-- `file-history-snapshot` / `progress` / `queue-operation` — 元数据（跳过）
+**JSONL line types**:
+- `user` / `assistant` — Conversation messages
+- `tool_use` / `tool_result` — Tool calls (nested in assistant content)
+- `file-history-snapshot` / `progress` / `queue-operation` — Metadata (skipped)
 
 ---
 
-## Layer 2 — Index / Cache（SQLite）
+## Layer 2 — Index / Cache (SQLite)
 
-**文件**: `.clawui/index.db`
+**File**: `.clawui/index.db`
 
-**目的**: 避免每次都重新解析整个 JSONL。提供快速查询、搜索、排序。
+**Purpose**: Avoid re-parsing entire JSONL files on every request. Provides fast query, search, and sort.
 
-**表结构**:
+**Schema**:
 
 ```sql
--- 项目索引
+-- Project index
 CREATE TABLE projects (
-  id           TEXT PRIMARY KEY,   -- 目录名 (e.g., "-Users-leizhou-Git-ClawUI")
-  name         TEXT,               -- 解码后的友好名 (e.g., "Git/ClawUI")
-  decoded_path TEXT,               -- 完整路径
+  id           TEXT PRIMARY KEY,   -- Directory name (e.g., "-Users-user-Git-ClawUI")
+  name         TEXT,               -- Decoded friendly name (e.g., "Git/ClawUI")
+  decoded_path TEXT,               -- Full path
   session_count INTEGER DEFAULT 0,
-  updated_at   TEXT                -- 最后扫描时间
+  updated_at   TEXT                -- Last scan time
 );
 
--- Session 索引
+-- Session index
 CREATE TABLE sessions (
-  id           TEXT PRIMARY KEY,   -- session UUID
+  id           TEXT PRIMARY KEY,   -- Session UUID
   project_id   TEXT REFERENCES projects(id),
-  slug         TEXT,               -- Claude Code 给的 slug
-  cwd          TEXT,               -- 工作目录
-  created_at   TEXT,               -- 首条消息时间
-  updated_at   TEXT,               -- 末条消息时间
-  node_count   INTEGER DEFAULT 0,  -- user+assistant 消息数
-  file_size    INTEGER,            -- JSONL 文件字节数（增量检测用）
-  file_mtime   TEXT                -- JSONL 文件 mtime（增量检测用）
+  slug         TEXT,               -- Claude Code slug
+  cwd          TEXT,               -- Working directory
+  created_at   TEXT,               -- First message timestamp
+  updated_at   TEXT,               -- Last message timestamp
+  node_count   INTEGER DEFAULT 0,  -- user+assistant message count
+  file_size    INTEGER,            -- JSONL file bytes (for incremental detection)
+  file_mtime   TEXT                -- JSONL file mtime (for incremental detection)
 );
 
--- Timeline 节点缓存
+-- Timeline node cache
 CREATE TABLE timeline_nodes (
-  id           TEXT PRIMARY KEY,   -- node UUID
+  id           TEXT PRIMARY KEY,   -- Node UUID
   session_id   TEXT REFERENCES sessions(id),
-  seq          INTEGER,            -- 节点顺序
+  seq          INTEGER,            -- Node order
   type         TEXT,               -- user/assistant/tool_use/tool_result/error/system
   timestamp    TEXT,
-  title        TEXT,               -- 摘要（前 120 字）
-  content      TEXT,               -- 完整内容
+  title        TEXT,               -- Summary (first 120 chars)
+  content      TEXT,               -- Full content
   tool_name    TEXT,
   tool_input   TEXT,
   tool_result  TEXT,
@@ -82,27 +82,27 @@ CREATE TABLE timeline_nodes (
 CREATE INDEX idx_nodes_session ON timeline_nodes(session_id, seq);
 ```
 
-**增量更新策略**:
-1. 扫描 `~/.claude/projects/` 目录
-2. 对比 `file_size` + `file_mtime` → 只重新解析变化的文件
-3. 变化的文件：清空其 `timeline_nodes` → 重新解析写入
-4. 后台定时扫描（启动时 + 每 30s）或 API 请求触发 lazy refresh
+**Incremental update strategy**:
+1. Scan the `~/.claude/projects/` directory
+2. Compare `file_size` + `file_mtime` — only re-parse changed files
+3. For changed files: clear their `timeline_nodes` → re-parse and write
+4. Background periodic scan (on startup + every 30s) or triggered by API request for lazy refresh
 
-**选 SQLite 的理由**:
-- 单文件，零配置
-- 支持全文搜索（FTS5）未来可用
-- Node.js 用 `better-sqlite3`（同步 API，简单高效）
-- 比 JSON 文件快得多（尤其 session 多了之后）
+**Why SQLite**:
+- Single file, zero configuration
+- Supports full-text search (FTS5) for future use
+- Node.js uses `better-sqlite3` (synchronous API, simple and efficient)
+- Much faster than JSON files (especially as session count grows)
 
 ---
 
-## Layer 3 — Enrichment（JSON）
+## Layer 3 — Enrichment (JSON)
 
-**文件**: `.clawui/enrichments.json`
+**File**: `.clawui/enrichments.json`
 
-**目的**: 用户附加的元数据，不依赖 Claude Code 原始数据。
+**Purpose**: User-attached metadata, independent of Claude Code raw data.
 
-**结构**:
+**Structure**:
 
 ```json
 {
@@ -111,7 +111,7 @@ CREATE INDEX idx_nodes_session ON timeline_nodes(session_id, seq);
     "<session-uuid>": {
       "starred": true,
       "tags": ["bugfix", "ClawUI"],
-      "notes": "这个 session 解决了 TTY 问题",
+      "notes": "This session resolved the TTY issue",
       "alias": "TTY Fix Session",
       "archived": false
     }
@@ -119,28 +119,28 @@ CREATE INDEX idx_nodes_session ON timeline_nodes(session_id, seq);
   "nodes": {
     "<node-id>": {
       "bookmarked": true,
-      "annotation": "关键突破点"
+      "annotation": "Key breakthrough point"
     }
   },
-  "tags": ["bugfix", "feature", "experiment", "ClawUI", "MerakLegal"]
+  "tags": ["bugfix", "feature", "experiment", "ClawUI"]
 }
 ```
 
-**为什么用 JSON 而不是 SQLite**:
-- 数据量小（几百个标注顶天了）
-- 可读性好，手动编辑方便
-- 可以 git track 作为项目知识
-- 不需要查询优化
+**Why JSON instead of SQLite**:
+- Small data volume (a few hundred annotations at most)
+- Good readability, easy to manually edit
+- Can be git-tracked as project knowledge
+- No query optimization needed
 
 ---
 
-## Layer 4 — App State（JSON）
+## Layer 4 — App State (JSON)
 
-**文件**: `.clawui/app-state.json`
+**File**: `.clawui/app-state.json`
 
-**目的**: UI 运行时状态，关了再开能恢复。
+**Purpose**: UI runtime state, persists across restarts.
 
-**结构**:
+**Structure**:
 
 ```json
 {
@@ -150,7 +150,7 @@ CREATE INDEX idx_nodes_session ON timeline_nodes(session_id, seq);
     "sidebarWidth": 300,
     "timelineExpandAll": false,
     "lastViewedSession": "e9b4b7f9-c4f0-4456-9975-5bed7e7a7678",
-    "lastViewedProject": "-Users-leizhou-Git-ClawUI"
+    "lastViewedProject": "-Users-user-Git-ClawUI"
   },
   "recentSessions": [
     { "id": "e9b4b7f9-...", "viewedAt": "2026-02-21T18:00:00Z" }
@@ -162,84 +162,84 @@ CREATE INDEX idx_nodes_session ON timeline_nodes(session_id, seq);
 }
 ```
 
-**应该 `.gitignore`**: 这是个人偏好，不需要版本控制。
+**Should be `.gitignore`d**: This is personal preference data, not worth version controlling.
 
 ---
 
-## 迁移方案：从现状到四层模型
+## Migration Path: From Initial State to Four-Layer Model
 
-### 现状
+### Initial State
 
 ```
-请求 → jsonl-parser.ts 每次读文件解析 → 返回
-       (无持久化，无缓存)
+Request → jsonl-parser.ts reads file on every request → Response
+           (no persistence, no cache)
 ```
 
-### Phase 1 — 加入 Layer 2 索引（最高优先级）
+### Phase 1 — Add Layer 2 Index (Highest Priority)
 
-**改动**:
-1. 新增 `backend/src/db.ts` — SQLite 初始化 + 增量同步逻辑
-2. 修改 `jsonl-parser.ts` → 将 `parseTimeline()` 逻辑拆为：
-   - `syncSession(sessionId)` — 检测变化 → 解析 → 写入 SQLite
-   - `getTimeline(sessionId)` — 从 SQLite 读取
-3. 修改 `routes.ts` → 启动时触发全量扫描，API 走 SQLite
-4. 新增 `.clawui/` 目录 + `index.db`
-5. `.gitignore` 加 `.clawui/index.db`
+**Changes**:
+1. New `backend/src/db.ts` — SQLite initialization + incremental sync logic
+2. Modify `jsonl-parser.ts` → Split `parseTimeline()` into:
+   - `syncSession(sessionId)` — Detect changes → parse → write to SQLite
+   - `getTimeline(sessionId)` — Read from SQLite
+3. Modify `routes.ts` → Trigger full scan on startup, API reads from SQLite
+4. New `.clawui/` directory + `index.db`
+5. `.gitignore` add `.clawui/index.db`
 
-**兼容性**: API 接口不变，前端零改动。纯后端优化。
+**Compatibility**: API interface unchanged, zero frontend changes. Pure backend optimization.
 
-**收益**:
-- Session 列表从 O(n×文件大小) 降到 O(1) 查询
-- Timeline 首次加载后缓存，增量更新
-- 为搜索功能打基础
+**Benefits**:
+- Session list drops from O(n * file_size) to O(1) query
+- Timeline cached after first load, incremental updates only
+- Foundation for search features
 
-### Phase 2 — 加入 Layer 3 + 4
+### Phase 2 — Add Layers 3 + 4
 
-**改动**:
-1. 新增 `backend/src/enrichment.ts` — 读写 `enrichments.json`
-2. 新增 API:
-   - `PATCH /api/sessions/:id/meta` — 更新 star/tags/notes
-   - `PATCH /api/nodes/:id/meta` — 更新 bookmark/annotation
-   - `GET /api/tags` — 列出所有标签
-3. 新增 `backend/src/app-state.ts` — 读写 `app-state.json`
-4. 前端加入：星标、标签筛选、节点书签等 UI
+**Changes**:
+1. New `backend/src/enrichment.ts` — Read/write `enrichments.json`
+2. New APIs:
+   - `PATCH /api/sessions/:id/meta` — Update star/tags/notes
+   - `PATCH /api/nodes/:id/meta` — Update bookmark/annotation
+   - `GET /api/tags` — List all tags
+3. New `backend/src/app-state.ts` — Read/write `app-state.json`
+4. Frontend additions: starring, tag filtering, node bookmarks, etc.
 
-### Phase 3 — 搜索 & 高级功能
+### Phase 3 — Search & Advanced Features
 
-- SQLite FTS5 全文搜索
-- 跨 session 搜索
-- 时间范围过滤
-- Token/cost 统计（从 JSONL 提取 usage 字段）
+- SQLite FTS5 full-text search
+- Cross-session search
+- Time range filtering
+- Token/cost statistics (extract usage fields from JSONL)
 
 ---
 
-## 目录结构
+## Directory Structure
 
 ```
 ~/Git/ClawUI/
-├── .clawui/                    # 持久化数据目录
-│   ├── index.db                # Layer 2 (gitignore)
-│   ├── enrichments.json        # Layer 3 (git track)
-│   └── app-state.json          # Layer 4 (gitignore)
-├── .gitignore                  # 加入 .clawui/index.db, .clawui/app-state.json
+├── .clawui/                    # Persistent data directory
+│   ├── index.db                # Layer 2 (gitignored)
+│   ├── enrichments.json        # Layer 3 (git tracked)
+│   └── app-state.json          # Layer 4 (gitignored)
+├── .gitignore                  # Includes .clawui/index.db, .clawui/app-state.json
 ├── backend/
 │   └── src/
-│       ├── db.ts               # NEW: SQLite 管理
-│       ├── enrichment.ts       # NEW: Layer 3 读写
-│       ├── app-state.ts        # NEW: Layer 4 读写
-│       ├── jsonl-parser.ts     # MODIFIED: 解析逻辑提取，写入 SQLite
-│       ├── cli-runner.ts       # 不变
-│       ├── routes.ts           # MODIFIED: 新增 API
-│       └── index.ts            # MODIFIED: 启动时初始化 DB
-└── frontend/                   # Phase 1 不改
+│       ├── db.ts               # SQLite management
+│       ├── enrichment.ts       # Layer 3 read/write
+│       ├── app-state.ts        # Layer 4 read/write
+│       ├── jsonl-parser.ts     # Parsing logic, writes to SQLite
+│       ├── cli-runner.ts       # Unchanged
+│       ├── routes.ts           # New API endpoints
+│       └── index.ts            # DB initialization on startup
+└── frontend/                   # No changes in Phase 1
 ```
 
 ---
 
-## 设计原则
+## Design Principles
 
-1. **Layer 1 只读** — 永远不写 Claude Code 的 JSONL
-2. **向上可丢弃** — 删 `.clawui/` 一切可重建（Layer 2 重新解析，Layer 3/4 丢失但不致命）
-3. **增量优先** — 用 mtime+size 检测变化，不重复解析
-4. **JSON for 小数据，SQLite for 大数据** — 标注用 JSON，索引用 SQLite
-5. **API 接口稳定** — Phase 1 不改现有 API contract，前端零改动
+1. **Layer 1 is read-only** — Never write to Claude Code's JSONL files
+2. **Upper layers are disposable** — Delete `.clawui/` and everything rebuilds (Layer 2 re-parses, Layer 3/4 are lost but non-critical)
+3. **Incremental first** — Use mtime+size to detect changes, avoid redundant parsing
+4. **JSON for small data, SQLite for large data** — Annotations use JSON, index uses SQLite
+5. **Stable API interface** — Phase 1 does not change the existing API contract, zero frontend changes

@@ -4,11 +4,15 @@ import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { parseTimelineRaw } from "./jsonl-parser.js";
 import type { TimelineNode, ProjectInfo, SessionMeta } from "./jsonl-parser.js";
+import { CLAWUI_DB_DIR } from "./config.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("db");
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 // Resolve project root (one level up from backend/)
 const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const DB_DIR = join(PROJECT_ROOT, ".clawui");
+const DB_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR);
 const DB_PATH = join(DB_DIR, "index.db");
 
 let db: Database.Database;
@@ -73,6 +77,7 @@ export function syncAll(): void {
   if (!existsSync(CLAUDE_PROJECTS_DIR)) return;
 
   const projectEntries = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  log.debug(`syncAll: scanning ${projectEntries.length} entries in ${CLAUDE_PROJECTS_DIR}`);
 
   // Track which project IDs we see so we can clean up stale ones
   const seenProjectIds = new Set<string>();
@@ -142,6 +147,7 @@ export function syncAll(): void {
 export function syncSession(sessionId: string): void {
   if (!existsSync(CLAUDE_PROJECTS_DIR)) return;
 
+  log.debug(`syncSession: looking for session ${sessionId.slice(0, 8)}`);
   const projectEntries = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
   for (const entry of projectEntries) {
     if (!entry.isDirectory()) continue;
@@ -151,6 +157,7 @@ export function syncSession(sessionId: string): void {
       return;
     }
   }
+  log.debug(`syncSession: session ${sessionId.slice(0, 8)} not found`);
 }
 
 /**
@@ -169,6 +176,7 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string)
   if (existing && existing.file_size === fileSize && existing.file_mtime === fileMtime) {
     return; // No change
   }
+  log.debug(`syncSessionFile: re-parsing ${sessionId.slice(0, 8)} (size=${fileSize}, changed=${!existing ? "new" : "modified"})`);
 
   // Extract session metadata from first few lines
   let slug: string | undefined;

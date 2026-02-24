@@ -5,6 +5,12 @@
 body {
   background: #0a0a0f;
   color: #e2e8f0;
+  overflow-x: hidden;
+}
+
+/* Prevent horizontal overflow globally */
+html {
+  overflow-x: hidden;
 }
 
 /* Custom scrollbar */
@@ -22,9 +28,28 @@ body {
   background: #475569;
 }
 
+/* Thin scrollbar for horizontal scroll containers */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  height: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 2px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
 /* Code blocks */
 pre {
-  background: #0f0f1a !important;
+  background: #0f0f1a;
   border: 1px solid #1e293b;
   border-radius: 8px;
   padding: 12px;
@@ -35,4 +60,13 @@ pre {
 
 code {
   font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+}
+
+/* AI sparkle animation — subtle pulse + rotation for AI-triggered loading */
+@keyframes ai-sparkle {
+  0%, 100% { opacity: 1; transform: scale(1) rotate(0deg); }
+  50% { opacity: 0.6; transform: scale(0.85) rotate(15deg); }
+}
+.animate-ai-sparkle {
+  animation: ai-sparkle 1.2s ease-in-out infinite;
 }

@@ -3,11 +3,14 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { CLAUDE_PATH } from "./config.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("cli-runner");
 
 const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exactly this marker on its own line: ---SUGGESTIONS--- followed by a JSON array of 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. No markdown code blocks around it.`;
 
 const EXEC_TIMEOUT = 180_000; // 3 minutes
-const CLAUDE_PATH = process.env.CLAUDE_PATH || "/Users/leizhou/.local/bin/claude";
 
 export interface Suggestion {
   title: string;
@@ -48,12 +51,16 @@ expect eof
     const tmpExpect = join(tmpdir(), `clawui-expect-${randomUUID()}.exp`);
     writeFileSync(tmpExpect, expectScript, "utf-8");
 
-    execFile("/usr/bin/expect", [tmpExpect], {
+    log.debug(`Spawning expect script: ${tmpExpect}, session: ${sessionId}, cwd: ${cwd || process.cwd()}`);
+
+    let childPid: number | undefined;
+    const child = execFile("/usr/bin/expect", [tmpExpect], {
       timeout: EXEC_TIMEOUT,
       maxBuffer: 10 * 1024 * 1024,
       cwd: cwd || process.cwd(),
       env: { ...process.env },
     }, (error, stdout, stderr) => {
+      log.debug(`Expect process exited: pid=${childPid}, exitCode=${error ? error.code ?? "error" : 0}`);
       // Clean up expect script
       try { unlinkSync(tmpExpect); } catch {}
       try { unlinkSync(tmpFile); } catch {}
@@ -78,6 +85,7 @@ expect eof
       }
       resolve(clean);
     });
+    childPid = child.pid;
   });
 }
 

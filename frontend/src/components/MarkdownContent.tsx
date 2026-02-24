@@ -95,13 +95,23 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-/** Parse inline markdown: bold, italic, inline code, links */
+/** Resolve image URLs: relative /api/ paths get the API base prepended */
+function resolveImageUrl(src: string): string {
+  if (src.startsWith("/api/")) {
+    const port = process.env.NEXT_PUBLIC_API_PORT || "3001";
+    return typeof window !== "undefined"
+      ? `${window.location.protocol}//${window.location.hostname}:${port}${src}`
+      : src;
+  }
+  return src;
+}
+
+/** Parse inline markdown: bold, italic, inline code, images, links */
 function renderInline(text: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  // Combined regex for inline patterns
-  // Order matters: code first (to avoid bold/italic inside code), then bold, italic, links
+  // Order: code, images (before links to avoid conflict), bold, italic, links
   const pattern =
-    /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
+    /(`[^`]+`)|(\*\*[^*]+\*\*)|(!\[[^\]]*\]\([^)]+\))|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
 
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -116,7 +126,7 @@ function renderInline(text: string): React.ReactNode[] {
     const m = match[0];
 
     if (match[1]) {
-      // Inline code: `code`
+      // Inline code
       nodes.push(
         <code
           key={key++}
@@ -126,27 +136,44 @@ function renderInline(text: string): React.ReactNode[] {
         </code>
       );
     } else if (match[2]) {
-      // Bold: **text**
+      // Bold
       nodes.push(
         <strong key={key++} className="font-semibold text-text-primary">
           {m.slice(2, -2)}
         </strong>
       );
     } else if (match[3]) {
-      // Italic: *text*
+      // Image: ![alt](url)
+      const imgMatch = m.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+      if (imgMatch) {
+        const alt = imgMatch[1];
+        const src = resolveImageUrl(imgMatch[2]);
+        nodes.push(
+          <img
+            key={key++}
+            src={src}
+            alt={alt}
+            className="max-w-full rounded-lg border border-border-primary my-1 max-h-[400px] object-contain"
+          />
+        );
+      }
+    } else if (match[4]) {
+      // Italic
       nodes.push(
         <em key={key++} className="italic text-text-secondary">
           {m.slice(1, -1)}
         </em>
       );
-    } else if (match[4]) {
+    } else if (match[5]) {
       // Link: [text](url)
       const linkMatch = m.match(/\[([^\]]+)\]\(([^)]+)\)/);
       if (linkMatch) {
+        const url = linkMatch[2];
+        const isSafe = /^(https?:\/\/|\/|#|mailto:)/i.test(url);
         nodes.push(
           <a
             key={key++}
-            href={linkMatch[2]}
+            href={isSafe ? url : "#"}
             target="_blank"
             rel="noopener noreferrer"
             className="text-accent-blue hover:underline"
@@ -203,7 +230,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
           )}
         </button>
       </div>
-      <pre className="rounded-lg bg-[#0f0f1a] border border-border-primary p-3 pr-20 overflow-x-auto text-[13px] leading-relaxed font-mono text-text-secondary">
+      <pre className="rounded-lg bg-[#0f0f1a] border border-border-primary p-3 pr-10 sm:pr-20 overflow-x-auto text-[13px] leading-relaxed font-mono text-text-secondary">
         {content}
       </pre>
     </div>

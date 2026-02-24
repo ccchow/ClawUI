@@ -1,8 +1,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { createLogger } from "./logger.js";
+import { CLAWUI_DB_DIR } from "./config.js";
+
+const log = createLogger("enrichment");
 
 const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const CLAWUI_DIR = join(PROJECT_ROOT, ".clawui");
+const CLAWUI_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR);
 const ENRICHMENTS_PATH = join(CLAWUI_DIR, "enrichments.json");
 
 export interface SessionEnrichment {
@@ -30,16 +34,22 @@ function defaultEnrichments(): EnrichmentsData {
 }
 
 export function getEnrichments(): EnrichmentsData {
-  if (!existsSync(ENRICHMENTS_PATH)) return defaultEnrichments();
+  if (!existsSync(ENRICHMENTS_PATH)) {
+    log.debug("Enrichments file not found, using defaults");
+    return defaultEnrichments();
+  }
   try {
+    log.debug(`Reading enrichments from ${ENRICHMENTS_PATH}`);
     return JSON.parse(readFileSync(ENRICHMENTS_PATH, "utf-8")) as EnrichmentsData;
   } catch {
+    log.warn("Failed to parse enrichments file, using defaults");
     return defaultEnrichments();
   }
 }
 
 function saveEnrichments(data: EnrichmentsData): void {
   if (!existsSync(CLAWUI_DIR)) mkdirSync(CLAWUI_DIR, { recursive: true });
+  log.debug(`Writing enrichments to ${ENRICHMENTS_PATH}`);
   writeFileSync(ENRICHMENTS_PATH, JSON.stringify(data, null, 2), "utf-8");
 }
 

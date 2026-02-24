@@ -6,6 +6,8 @@ import Link from "next/link";
 import {
   getTimeline,
   updateSessionMeta,
+  getSessionMeta,
+  runPrompt,
   getSessionExecution,
   getBlueprint,
   type TimelineNode,
@@ -14,20 +16,13 @@ import {
   type Blueprint,
   type MacroNode,
 } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/format-time";
 import { Timeline } from "@/components/Timeline";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
 import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
 
 const POLL_INTERVAL = 5_000;
-
-function timeAgo(ts: number): string {
-  const diff = Math.floor((Date.now() - ts) / 1000);
-  if (diff < 5) return "just now";
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
-}
 
 function SessionInfoHeader({
   sessionId,
@@ -121,7 +116,7 @@ function SessionInfoHeader({
             }
           }}
           placeholder="Add tag..."
-          className="text-xs px-2 py-0.5 rounded-lg bg-bg-primary border border-border-primary text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue w-24"
+          className="text-xs px-2 py-0.5 rounded-lg bg-bg-primary border border-border-primary text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue w-20 sm:w-24"
         />
       </div>
 
@@ -201,9 +196,9 @@ export default function SessionPage() {
     nodeIndex: number;
   } | null>(null);
 
+  // Used for polling and manual refresh only (not initial load)
   const fetchNodes = useCallback(
-    async (showLoader = false) => {
-      if (showLoader) setLoading(true);
+    async () => {
       try {
         const n = await getTimeline(id);
         // Only update state if node count changed (avoids re-render churn)
@@ -212,59 +207,67 @@ export default function SessionPage() {
           nodeCountRef.current = n.length;
         }
         setLastRefresh(Date.now());
-        if (showLoader) setLoading(false);
-      } catch (e) {
-        if (showLoader) {
-          setError(e instanceof Error ? e.message : String(e));
-          setLoading(false);
-        }
+      } catch {
+        // Silently ignore poll errors
       }
     },
     [id]
   );
 
-  // Fetch blueprint context (reverse lookup: session → execution → blueprint)
+  // Consolidated initial load: fetch nodes + meta + blueprint context together
   useEffect(() => {
-    async function loadBlueprintContext() {
-      try {
-        const execution = await getSessionExecution(id);
-        if (!execution) return;
-        const bp = await getBlueprint(execution.blueprintId);
-        const node = bp.nodes.find((n) => n.id === execution.nodeId);
-        if (!node) return;
-        const nodeIndex = bp.nodes.findIndex((n) => n.id === execution.nodeId);
-        setBlueprintContext({ blueprint: bp, node, nodeIndex });
-      } catch {
-        // No blueprint linked — that's fine
-      }
-    }
-    loadBlueprintContext();
-  }, [id]);
-
-  // Fetch session enrichment meta
-  useEffect(() => {
-    async function loadSessionMeta() {
-      try {
-        const res = await fetch(`http://localhost:3001/api/sessions/${id}/meta`);
-        if (res.ok) {
-          const meta = await res.json();
-          setSessionMeta(meta);
-        }
-      } catch {
-        // Meta endpoint may not exist yet, ignore
-      }
-    }
-    loadSessionMeta();
-  }, [id]);
-
-  // Initial load
-  useEffect(() => {
+    let cancelled = false;
     nodeCountRef.current = 0;
-    fetchNodes(true);
-    // Restore suggestions from cookie for this session
-    const saved = loadSuggestions(id);
-    if (saved.length > 0) setSuggestions(saved);
-  }, [fetchNodes, id]);
+    setLoading(true);
+
+    async function loadAll() {
+      // Fire all three fetches in parallel
+      const [nodesResult, metaResult, bpResult] = await Promise.allSettled([
+        getTimeline(id),
+        getSessionMeta(id),
+        getSessionExecution(id).then(async (execution) => {
+          if (!execution) return null;
+          const bp = await getBlueprint(execution.blueprintId);
+          const node = bp.nodes.find((n) => n.id === execution.nodeId);
+          if (!node) return null;
+          const nodeIndex = bp.nodes.findIndex((n) => n.id === execution.nodeId);
+          return { blueprint: bp, node, nodeIndex };
+        }),
+      ]);
+
+      if (cancelled) return;
+
+      // Batch all state updates together
+      if (nodesResult.status === "fulfilled") {
+        setNodes(nodesResult.value);
+        nodeCountRef.current = nodesResult.value.length;
+        setLastRefresh(Date.now());
+      } else {
+        setError(
+          nodesResult.reason instanceof Error
+            ? nodesResult.reason.message
+            : String(nodesResult.reason)
+        );
+      }
+
+      if (metaResult.status === "fulfilled" && metaResult.value) {
+        setSessionMeta(metaResult.value);
+      }
+
+      if (bpResult.status === "fulfilled" && bpResult.value) {
+        setBlueprintContext(bpResult.value);
+      }
+
+      // Restore suggestions from cookie
+      const saved = loadSuggestions(id);
+      if (saved.length > 0) setSuggestions(saved);
+
+      setLoading(false);
+    }
+
+    loadAll();
+    return () => { cancelled = true; };
+  }, [id]);
 
   // Persist suggestions to cookie whenever they change
   useEffect(() => {
@@ -280,7 +283,7 @@ export default function SessionPage() {
     const interval = setInterval(() => {
       // Only poll when tab is visible and not running a prompt
       if (!document.hidden && !running) {
-        fetchNodes(false);
+        fetchNodes();
       }
     }, POLL_INTERVAL);
 
@@ -291,7 +294,7 @@ export default function SessionPage() {
   useEffect(() => {
     if (!lastRefresh) return;
     const tick = setInterval(() => {
-      setRefreshLabel(timeAgo(lastRefresh));
+      setRefreshLabel(formatTimeAgo(lastRefresh));
     }, 1_000);
     return () => clearInterval(tick);
   }, [lastRefresh]);
@@ -332,25 +335,10 @@ export default function SessionPage() {
       return updated;
     });
 
-    console.log("[ClawUI] Starting run:", { sessionId: id, promptLen: prompt.length });
     const startTime = Date.now();
     try {
-      const url = `http://localhost:3001/api/sessions/${id}/run`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
+      const data = await runPrompt(id, prompt);
       const elapsed = Date.now() - startTime;
-      console.log("[ClawUI] Response received:", { status: res.status, elapsed: `${elapsed}ms` });
-
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`API error ${res.status}: ${body}`);
-      }
-
-      const data = await res.json();
-      console.log("[ClawUI] Parsed:", { outputLen: data.output?.length, suggestions: data.suggestions?.length });
 
       // Replace thinking node with actual response
       setNodes((prev) => {
@@ -415,8 +403,8 @@ export default function SessionPage() {
         >
           ← Back to sessions
         </Link>
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap min-w-0">
+          <h1 className="text-xl font-bold truncate max-w-[60vw] sm:max-w-none">
             {sessionMeta.alias || "Session"}
           </h1>
           <span className="text-sm text-text-muted font-mono">{id.slice(0, 8)}</span>
@@ -426,7 +414,7 @@ export default function SessionPage() {
 
           {/* Tags in header */}
           {sessionMeta.tags && sessionMeta.tags.length > 0 && (
-            <div className="flex gap-1">
+            <div className="flex gap-1 flex-wrap">
               {sessionMeta.tags.map((tag) => (
                 <span
                   key={tag}
@@ -439,7 +427,7 @@ export default function SessionPage() {
           )}
 
           {/* Refresh indicator */}
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2 w-full sm:w-auto">
             <button
               onClick={() => setAutoRefresh((v) => !v)}
               title={autoRefresh ? "Auto-refresh on (click to disable)" : "Auto-refresh off (click to enable)"}
@@ -449,7 +437,7 @@ export default function SessionPage() {
             />
             <span className="text-xs text-text-muted">{refreshLabel}</span>
             <button
-              onClick={() => fetchNodes(false)}
+              onClick={() => fetchNodes()}
               title="Refresh now"
               className="text-xs text-text-muted hover:text-text-primary transition-colors px-1.5 py-0.5 rounded hover:bg-bg-tertiary"
             >
@@ -460,30 +448,53 @@ export default function SessionPage() {
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="animate-spin rounded-full h-8 w-8 border-2 border-accent-blue border-t-transparent" />
+        /* Skeleton layout that reserves the same vertical space as loaded content */
+        <div className="space-y-4 animate-pulse">
+          {/* Blueprint banner placeholder */}
+          <div className="h-12 rounded-xl bg-bg-secondary border border-border-primary" />
+          {/* Session info header placeholder */}
+          <div className="h-24 rounded-xl bg-bg-secondary border border-border-primary" />
+          {/* Prompt input placeholder */}
+          <div className="h-12 rounded-xl bg-bg-secondary border border-border-primary" />
+          {/* Timeline node skeletons */}
+          <div className="h-20 rounded-xl bg-bg-secondary border border-border-primary" />
+          <div className="h-20 rounded-xl bg-bg-secondary border border-border-primary" />
+          <div className="h-20 rounded-xl bg-bg-secondary border border-border-primary" />
+          <div className="h-20 rounded-xl bg-bg-secondary border border-border-primary" />
         </div>
       ) : (
         <>
-          {/* Blueprint context banner */}
-          {blueprintContext && (
-            <div className="rounded-xl border border-accent-purple/30 bg-accent-purple/10 p-3 mb-4 flex items-center gap-2 text-sm">
-              <span className="text-accent-purple font-medium">Blueprint</span>
-              <Link
-                href={`/blueprints/${blueprintContext.blueprint.id}`}
-                className="text-accent-blue hover:underline font-medium truncate"
-              >
-                {blueprintContext.blueprint.title}
-              </Link>
-              <span className="text-text-muted">&rarr;</span>
-              <span className="text-text-secondary">
-                Node #{blueprintContext.nodeIndex + 1}:
-              </span>
-              <span className="text-text-primary font-medium truncate">
-                {blueprintContext.node.title}
-              </span>
-            </div>
-          )}
+          {/* Blueprint context banner — always reserve space, transition opacity */}
+          <div
+            className={`rounded-xl border p-3 mb-4 flex items-center gap-2 text-sm transition-opacity duration-200 min-w-0 flex-wrap ${
+              blueprintContext
+                ? "border-accent-purple/30 bg-accent-purple/10 opacity-100"
+                : "border-transparent opacity-0 pointer-events-none"
+            }`}
+            style={{ minHeight: blueprintContext ? undefined : 0, height: blueprintContext ? undefined : 0, marginBottom: blueprintContext ? undefined : 0, padding: blueprintContext ? undefined : 0, overflow: "hidden" }}
+          >
+            {blueprintContext && (
+              <>
+                <span className="text-accent-purple font-medium flex-shrink-0">Blueprint</span>
+                <Link
+                  href={`/blueprints/${blueprintContext.blueprint.id}`}
+                  className="text-accent-blue hover:underline font-medium truncate min-w-0"
+                >
+                  {blueprintContext.blueprint.title}
+                </Link>
+                <span className="text-text-muted flex-shrink-0">&rarr;</span>
+                <span className="text-text-secondary flex-shrink-0">
+                  Node #{blueprintContext.nodeIndex + 1}:
+                </span>
+                <Link
+                  href={`/blueprints/${blueprintContext.blueprint.id}/nodes/${blueprintContext.node.id}`}
+                  className="text-accent-blue hover:underline font-medium truncate min-w-0"
+                >
+                  {blueprintContext.node.title}
+                </Link>
+              </>
+            )}
+          </div>
 
           {/* Session info header with notes and tag editor */}
           <SessionInfoHeader

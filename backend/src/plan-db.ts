@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("plan-db");
 
 // ─── PRD v3 Types ────────────────────────────────────────────
 
 export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
-export type MacroNodeStatus = "pending" | "running" | "done" | "failed" | "blocked" | "skipped";
+export type MacroNodeStatus = "pending" | "queued" | "running" | "done" | "failed" | "blocked" | "skipped";
 export type ArtifactType = "handoff_summary" | "file_diff" | "test_report" | "custom";
 export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
 export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
+export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
 
 // Layer 1: Blueprint (was "Plan")
 export interface Blueprint {
@@ -65,8 +69,23 @@ export interface NodeExecution {
   outputSummary?: string;
   contextTokensUsed?: number;
   parentExecutionId?: string;
+  cliPid?: number;
+  blockerInfo?: string;
+  taskSummary?: string;
+  failureReason?: FailureReason;
   startedAt: string;
   completedAt?: string;
+}
+
+// Info returned by getStaleRunningExecutions for smart recovery
+export interface StaleExecution {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  sessionId: string | null;
+  cliPid: number | null;
+  startedAt: string;
+  projectCwd: string | null;
 }
 
 // Backward-compat aliases
@@ -77,7 +96,7 @@ export type NodeStatus = MacroNodeStatus;
 
 // ─── Schema version & migration ──────────────────────────────
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 export function initPlanTables(): void {
   const db = getDb();
@@ -90,12 +109,12 @@ export function initPlanTables(): void {
     | undefined;
   const currentVersion = row?.version ?? 0;
 
-  if (currentVersion < CURRENT_SCHEMA_VERSION) {
+  if (currentVersion < 2) {
     // Drop old v1 tables if they exist
     db.exec("DROP TABLE IF EXISTS plan_nodes");
     db.exec("DROP TABLE IF EXISTS plans");
 
-    // Create v2 tables
+    // Create v2+ tables (includes cli_pid from the start for new installations)
     db.exec(`
       CREATE TABLE IF NOT EXISTS blueprints (
         id           TEXT PRIMARY KEY,
@@ -145,6 +164,7 @@ export function initPlanTables(): void {
         output_summary       TEXT,
         context_tokens_used  INTEGER,
         parent_execution_id  TEXT,
+        cli_pid              INTEGER,
         started_at           TEXT NOT NULL,
         completed_at         TEXT
       );
@@ -155,7 +175,26 @@ export function initPlanTables(): void {
       CREATE INDEX IF NOT EXISTS idx_executions_node ON node_executions(node_id);
       CREATE INDEX IF NOT EXISTS idx_executions_session ON node_executions(session_id);
     `);
+  }
 
+  // Incremental migration: add cli_pid column for process tracking
+  const cols = db.prepare("PRAGMA table_info(node_executions)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "cli_pid")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN cli_pid INTEGER");
+  }
+  // Incremental migration: add blocker_info and task_summary columns for API callbacks
+  if (!cols.some((c) => c.name === "blocker_info")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN blocker_info TEXT");
+  }
+  if (!cols.some((c) => c.name === "task_summary")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN task_summary TEXT");
+  }
+  // Incremental migration: add failure_reason column for failure categorization
+  if (!cols.some((c) => c.name === "failure_reason")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN failure_reason TEXT");
+  }
+
+  if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
       "plan_schema",
       CURRENT_SCHEMA_VERSION,
@@ -213,6 +252,10 @@ interface ExecutionRow {
   output_summary: string | null;
   context_tokens_used: number | null;
   parent_execution_id: string | null;
+  cli_pid: number | null;
+  blocker_info: string | null;
+  task_summary: string | null;
+  failure_reason: string | null;
   started_at: string;
   completed_at: string | null;
 }
@@ -243,6 +286,10 @@ function rowToExecution(row: ExecutionRow): NodeExecution {
     ...(row.output_summary ? { outputSummary: row.output_summary } : {}),
     ...(row.context_tokens_used != null ? { contextTokensUsed: row.context_tokens_used } : {}),
     ...(row.parent_execution_id ? { parentExecutionId: row.parent_execution_id } : {}),
+    ...(row.cli_pid != null ? { cliPid: row.cli_pid } : {}),
+    ...(row.blocker_info ? { blockerInfo: row.blocker_info } : {}),
+    ...(row.task_summary ? { taskSummary: row.task_summary } : {}),
+    ...(row.failure_reason ? { failureReason: row.failure_reason as FailureReason } : {}),
     startedAt: row.started_at,
     ...(row.completed_at ? { completedAt: row.completed_at } : {}),
   };
@@ -620,6 +667,7 @@ export function createExecution(
   status?: ExecutionStatus,
   outputSummary?: string,
   completedAt?: string,
+  cliPid?: number,
 ): NodeExecution {
   const db = getDb();
   const id = randomUUID();
@@ -627,9 +675,9 @@ export function createExecution(
   const effectiveStatus = status ?? "running";
 
   db.prepare(`
-    INSERT INTO node_executions (id, node_id, blueprint_id, session_id, type, status, input_context, output_summary, parent_execution_id, started_at, completed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, nodeId, blueprintId, sessionId ?? null, type, effectiveStatus, inputContext ?? null, outputSummary ?? null, parentExecutionId ?? null, now, completedAt ?? null);
+    INSERT INTO node_executions (id, node_id, blueprint_id, session_id, type, status, input_context, output_summary, parent_execution_id, cli_pid, started_at, completed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, nodeId, blueprintId, sessionId ?? null, type, effectiveStatus, inputContext ?? null, outputSummary ?? null, parentExecutionId ?? null, cliPid ?? null, now, completedAt ?? null);
 
   return {
     id,
@@ -641,6 +689,7 @@ export function createExecution(
     ...(inputContext ? { inputContext } : {}),
     ...(outputSummary ? { outputSummary } : {}),
     ...(parentExecutionId ? { parentExecutionId } : {}),
+    ...(cliPid != null ? { cliPid } : {}),
     startedAt: now,
     ...(completedAt ? { completedAt } : {}),
   };
@@ -648,7 +697,7 @@ export function createExecution(
 
 export function updateExecution(
   id: string,
-  patch: Partial<Pick<NodeExecution, "status" | "outputSummary" | "contextTokensUsed" | "completedAt" | "sessionId">>,
+  patch: Partial<Pick<NodeExecution, "status" | "outputSummary" | "contextTokensUsed" | "completedAt" | "sessionId" | "cliPid" | "failureReason">>,
 ): NodeExecution | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(id) as ExecutionRow | undefined;
@@ -662,6 +711,8 @@ export function updateExecution(
   if (patch.contextTokensUsed !== undefined) { sets.push("context_tokens_used = ?"); params.push(patch.contextTokensUsed); }
   if (patch.completedAt !== undefined) { sets.push("completed_at = ?"); params.push(patch.completedAt); }
   if (patch.sessionId !== undefined) { sets.push("session_id = ?"); params.push(patch.sessionId); }
+  if (patch.cliPid !== undefined) { sets.push("cli_pid = ?"); params.push(patch.cliPid); }
+  if (patch.failureReason !== undefined) { sets.push("failure_reason = ?"); params.push(patch.failureReason); }
 
   if (sets.length === 0) return rowToExecution(existing);
 
@@ -670,6 +721,22 @@ export function updateExecution(
 
   const row = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(id) as ExecutionRow;
   return rowToExecution(row);
+}
+
+export function setExecutionBlocker(executionId: string, blockerJson: string): void {
+  const db = getDb();
+  db.prepare("UPDATE node_executions SET blocker_info = ? WHERE id = ?").run(blockerJson, executionId);
+}
+
+export function setExecutionTaskSummary(executionId: string, summary: string): void {
+  const db = getDb();
+  db.prepare("UPDATE node_executions SET task_summary = ? WHERE id = ?").run(summary, executionId);
+}
+
+export function getExecution(executionId: string): NodeExecution | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(executionId) as ExecutionRow | undefined;
+  return row ? rowToExecution(row) : null;
 }
 
 export function getExecutionsForNode(nodeId: string): NodeExecution[] {
@@ -735,6 +802,32 @@ export function reorderNodes(blueprintId: string, ordering: { id: string; seq: n
   );
 }
 
+/**
+ * Batch lookup: for a list of session IDs, return the associated macro node title + description.
+ * Uses a single SQL query for efficiency.
+ */
+export function getNodeInfoForSessions(sessionIds: string[]): Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }> {
+  if (sessionIds.length === 0) return new Map();
+  const db = getDb();
+  const placeholders = sessionIds.map(() => "?").join(", ");
+  const rows = db.prepare(`
+    SELECT ne.session_id, mn.title, mn.description, mn.blueprint_id
+    FROM node_executions ne
+    JOIN macro_nodes mn ON ne.node_id = mn.id
+    WHERE ne.session_id IN (${placeholders})
+  `).all(...sessionIds) as { session_id: string; title: string; description: string | null; blueprint_id: string }[];
+
+  const result = new Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }>();
+  for (const row of rows) {
+    result.set(row.session_id, {
+      nodeTitle: row.title,
+      nodeDescription: row.description ?? "",
+      blueprintId: row.blueprint_id,
+    });
+  }
+  return result;
+}
+
 export function getNodeBySession(sessionId: string): MacroNode | null {
   const execution = getExecutionBySession(sessionId);
   if (!execution) return null;
@@ -744,4 +837,135 @@ export function getNodeBySession(sessionId: string): MacroNode | null {
   const arts = getArtifactsForNodeInternal(row.id);
   const execs = getExecutionsForNodeInternal(row.id);
   return rowToMacroNode(row, arts.input, arts.output, execs);
+}
+
+/**
+ * Returns all executions stuck in "running" state with their blueprint context.
+ * Used by smartRecoverStaleExecutions() in plan-executor.ts to check liveness
+ * before deciding whether to mark as failed.
+ */
+export function getStaleRunningExecutions(): StaleExecution[] {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT ne.id, ne.node_id, ne.blueprint_id, ne.session_id, ne.cli_pid, ne.started_at, b.project_cwd
+    FROM node_executions ne
+    JOIN blueprints b ON ne.blueprint_id = b.id
+    WHERE ne.status = 'running'
+  `).all() as { id: string; node_id: string; blueprint_id: string; session_id: string | null; cli_pid: number | null; started_at: string; project_cwd: string | null }[];
+  return rows.map(r => ({
+    id: r.id,
+    nodeId: r.node_id,
+    blueprintId: r.blueprint_id,
+    sessionId: r.session_id,
+    cliPid: r.cli_pid,
+    startedAt: r.started_at,
+    projectCwd: r.project_cwd,
+  }));
+}
+
+/**
+ * Returns executions that were recently marked as failed due to "server restart"
+ * but may still have active sessions running.
+ */
+export function getRecentRestartFailedExecutions(withinMinutes: number): StaleExecution[] {
+  const db = getDb();
+  const cutoff = new Date(Date.now() - withinMinutes * 60 * 1000).toISOString();
+  const rows = db.prepare(`
+    SELECT ne.id, ne.node_id, ne.blueprint_id, ne.session_id, ne.cli_pid, ne.started_at, b.project_cwd
+    FROM node_executions ne
+    JOIN blueprints b ON ne.blueprint_id = b.id
+    WHERE ne.status = 'failed'
+      AND ne.output_summary LIKE '%Server restarted%'
+      AND ne.completed_at > ?
+  `).all(cutoff) as { id: string; node_id: string; blueprint_id: string; session_id: string | null; cli_pid: number | null; started_at: string; project_cwd: string | null }[];
+  return rows.map(r => ({
+    id: r.id,
+    nodeId: r.node_id,
+    blueprintId: r.blueprint_id,
+    sessionId: r.session_id,
+    cliPid: r.cli_pid,
+    startedAt: r.started_at,
+    projectCwd: r.project_cwd,
+  }));
+}
+
+/**
+ * On startup, mark truly-dead stale executions as failed.
+ * Accepts an optional skipIds set of execution IDs that should NOT be marked
+ * as failed (because they're still alive and being monitored).
+ */
+export function recoverStaleExecutions(skipIds?: Set<string>): void {
+  const db = getDb();
+
+  // Find running executions
+  const staleExecs = db
+    .prepare("SELECT id, node_id, blueprint_id FROM node_executions WHERE status = 'running'")
+    .all() as { id: string; node_id: string; blueprint_id: string }[];
+
+  const now = new Date().toISOString();
+
+  // Note: "queued" nodes are NOT reset here — they will be re-enqueued
+  // by requeueOrphanedNodes() in plan-executor.ts after server startup.
+
+  const toFail = skipIds ? staleExecs.filter(e => !skipIds.has(e.id)) : staleExecs;
+
+  if (toFail.length > 0) {
+    log.info(`Marking ${toFail.length} truly-dead execution(s) as failed (${staleExecs.length - toFail.length} still alive, being monitored)...`);
+
+    for (const exec of toFail) {
+      db.prepare(
+        "UPDATE node_executions SET status = 'failed', output_summary = 'Server restarted while execution was running', completed_at = ? WHERE id = ?"
+      ).run(now, exec.id);
+
+      // Reset the node to "failed" so it can be retried
+      db.prepare(
+        "UPDATE macro_nodes SET status = 'failed', error = 'Execution interrupted by server restart' WHERE id = ? AND status = 'running'"
+      ).run(exec.node_id);
+    }
+  }
+
+  // Also reset any blueprint stuck in "running"
+  const staleBlueprints = db
+    .prepare("SELECT DISTINCT blueprint_id FROM macro_nodes WHERE status = 'running'")
+    .all() as { blueprint_id: string }[];
+
+  // Also gather blueprints with queued nodes (they'll be re-enqueued separately)
+  const queuedBlueprintIds = db
+    .prepare("SELECT DISTINCT blueprint_id FROM macro_nodes WHERE status = 'queued'")
+    .all() as { blueprint_id: string }[];
+
+  // Reset blueprints that have no more running/queued nodes
+  const allBlueprintIds = [...new Set([
+    ...toFail.map(e => e.blueprint_id),
+    ...staleBlueprints.map(b => b.blueprint_id),
+    ...queuedBlueprintIds.map(b => b.blueprint_id),
+  ])];
+  // Reset ALL blueprints stuck in "running" that have no active nodes
+  const stuckBlueprints = db
+    .prepare("SELECT id FROM blueprints WHERE status = 'running'")
+    .all() as { id: string }[];
+  for (const bp of stuckBlueprints) {
+    const stillActive = db
+      .prepare("SELECT COUNT(*) as cnt FROM macro_nodes WHERE blueprint_id = ? AND status IN ('running', 'queued')")
+      .get(bp.id) as { cnt: number };
+    if (stillActive.cnt === 0) {
+      db.prepare("UPDATE blueprints SET status = 'approved' WHERE id = ?").run(bp.id);
+    }
+  }
+
+  if (toFail.length > 0 || staleExecs.length > 0) {
+    log.info("Recovery complete.");
+  }
+}
+
+/**
+ * Returns all nodes with "queued" status (orphaned from a previous server process).
+ * Called by plan-executor.ts to re-enqueue them after startup.
+ */
+export function getOrphanedQueuedNodes(): { id: string; blueprintId: string }[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT id, blueprint_id FROM macro_nodes WHERE status = 'queued'")
+    .all() as { id: string; blueprint_id: string }[];
+  return rows.map((r) => ({ id: r.id, blueprintId: r.blueprint_id }));
 }

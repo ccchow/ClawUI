@@ -1,112 +1,150 @@
-# ClawUI — Claude Code Session Viewer
+![CI](https://github.com/anthropics/ClawUI/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Visualize Claude Code session history as interactive timelines, with continuation via suggestion buttons.
+# ClawUI: The Visual Orchestrator for Claude Code
 
-## Architecture
+> **Turn your linear Claude Code CLI into a macro-planning Node Graph.**
 
-```
-~/.claude/projects/**/*.jsonl     ← Layer 1: Raw Source (read-only)
-        ↓
-.clawui/index.db (SQLite)        ← Layer 2: Index/Cache (incremental sync)
-.clawui/enrichments.json          ← Layer 3: Stars, tags, bookmarks, notes
-.clawui/app-state.json            ← Layer 4: UI preferences
-        ↓
-Backend (Express :3001)           → REST API (12 endpoints)
-        ↓
-Frontend (Next.js :3000)          → Timeline UI + Interactive Controls
-```
+ClawUI is a next-generation visual dashboard and orchestration engine for Claude Code. It solves the biggest pain points of complex AI coding tasks: context window explosion and terminal scroll fatigue.
 
-### Four-Layer Data Model
+By upgrading your CLI experience with a **Blueprint DAG (Directed Acyclic Graph) System** and **Proactive Next Actions**, ClawUI transforms Claude Code from a simple chat interface into an autonomous, long-term project manager.
 
-| Layer | Storage | Purpose |
-|-------|---------|---------|
-| 1 — Raw | `~/.claude/projects/*.jsonl` | Claude Code's native data (read-only) |
-| 2 — Index | `.clawui/index.db` | SQLite cache with incremental mtime+size sync |
-| 3 — Enrichment | `.clawui/enrichments.json` | User annotations: stars, tags, notes, bookmarks |
-| 4 — App State | `.clawui/app-state.json` | UI preferences, recent sessions |
+## Screenshots
 
-Delete `.clawui/` to reset — Layer 2 rebuilds from JSONL, Layer 3/4 are non-critical.
+| Dashboard Overview | Blueprint DAG View | Session Detail |
+|---|---|---|
+| ![Dashboard Overview](docs/images/dashboard-overview.png) | ![Blueprint DAG](docs/images/blueprint-desktop.png) | ![Session Detail](docs/images/dashboard-session-detail.png) |
 
-See [docs/DATA-MODEL.md](docs/DATA-MODEL.md) for full design.
+## ✨ Why ClawUI?
 
-## Features
+* **🗺️ From Terminal to DAG:** Stop scrolling through endless terminal logs. ClawUI visualizes your macro-plans as a node graph. Let Claude plan the architecture, and execute it node-by-node.
+* **⚡ Proactive Copilot:** Whenever a session pauses, ClawUI predicts your next moves. Click one of the 3 AI-generated suggestion buttons to inject commands directly into the CLI—no typing required.
+* **🧩 Context Boundary Control:** Execute nodes in dependency order. Artifacts from completed nodes are automatically passed downstream, perfectly isolating context and preventing LLM hallucinations.
+* **🔒 100% Local & Secure:** ClawUI sits directly on top of your local `~/.claude/` directory. No external cloud relays, no code leaving your machine (other than standard Anthropic API calls).
 
-- **Session List** — Browse all Claude Code projects and sessions
-  - ⭐ Star sessions, 🏷️ tag & filter, 📦 archive
-  - Search by slug, ID, or path
-- **Timeline View** — Vertical timeline of every interaction
-  - 👤 User messages, 🤖 Assistant responses, 🔧 Tool calls with collapsible I/O
-  - 🔖 Bookmark nodes, add annotations
-  - 📝 Session notes and inline tag editor
-- **Interactive Continuation** — Send prompts via `claude --resume`
-  - 3 AI-generated continuation suggestions per response
-  - Free-form prompt input
-- **Incremental Sync** — Background 30s polling, only re-parses changed files
+---
 
-## Quick Start
+## 🚀 Core Features
+
+### 1. The Blueprint System (Task Orchestration)
+
+The Blueprint system brings structured task decomposition to Claude Code:
+
+* **AI-Powered Decomposition:** Describe a high-level goal, and ClawUI will automatically generate an ordered DAG (Directed Acyclic Graph) of tasks.
+* **Dependency-Aware Execution:** Nodes execute in strict order. State and context are handed off perfectly from upstream to downstream tasks.
+* **Node-Level Interception:** Run, retry, skip, or manually edit prompts for any specific node before executing it.
+
+### 2. The Timeline Viewer (Session Observability)
+
+A beautiful, Linear-style vertical timeline for every interaction:
+
+* **Rich I/O Parsing:** Collapsible views for Bash execution, File Edits, and Read operations.
+* **Interactive Continuation:** AI analyzes the terminal output and suggests Top 3 Next Actions to keep the momentum going.
+* **Session Management:** Star, tag, filter, and search through your entire Claude Code history.
+
+---
+
+## 🛠 Quick Start
+
+### Prerequisites
+
+* **Node.js 20+** and **npm 10+**
+* **Claude Code CLI** installed globally
+* **macOS or Linux** (requires `/usr/bin/expect` for TTY wrapping)
+
+### Installation
 
 ```bash
-# Install dependencies
+# Clone the repository and install dependencies
+git clone https://github.com/anthropics/ClawUI.git
+cd ClawUI
 npm install
-cd backend && npm install && cd ..
-cd frontend && npm install && cd ..
 
-# Start both (backend :3001 + frontend :3000)
+# Start the full stack (Express backend :3001 + Next.js frontend :3000)
 npm run dev
 
-# Or separately
-npm run dev:backend    # Express on port 3001
-npm run dev:frontend   # Next.js on port 3000
 ```
 
-Open http://localhost:3000
+Open the secure URL printed in the terminal to access your dashboard (includes an auth token).
 
-## API Endpoints
+---
+
+## 🏗 System Architecture
+
+ClawUI operates on a highly optimized, non-intrusive 4-layer data architecture that treats your native Claude logs as the single source of truth.
+
+```text
+~/.claude/projects/**/*.jsonl     <- Layer 1: Raw Source (Read-only single source of truth)
+        |
+.clawui/index.db (SQLite)         <- Layer 2: Ultra-fast Index/Cache (Incremental sync)
+.clawui/enrichments.json          <- Layer 3: User Meta (Stars, tags, bookmarks)
+.clawui/app-state.json            <- Layer 4: UI Preferences
+        |
+Backend (Express :3001)           -> REST API & Process Manager
+        |
+Frontend (Next.js :3000)          -> DAG UI & Timeline Controller
+
+```
+
+*Delete the `.clawui/` directory anytime to reset. Layer 2 automatically rebuilds from your raw JSONL files in seconds.* 👉 Dive deeper into our [Four-Layer Data Model](docs/DATA-MODEL.md) and [Blueprint System Design](docs/PLAN-SYSTEM.md).
+
+---
+
+## 🔌 API Reference
+
+ClawUI exposes a robust REST API for both Session monitoring and Blueprint execution.
+*(Expand to view core endpoints)*
+
+<details>
+<summary><b>Session & Node APIs</b></summary>
 
 | Method | Path | Description |
-|--------|------|-------------|
+| --- | --- | --- |
 | GET | `/api/projects` | List all Claude Code projects |
-| GET | `/api/projects/:id/sessions` | List sessions (supports `?starred=true&tag=x&archived=true`) |
-| GET | `/api/sessions/:id/timeline` | Parse session into timeline nodes |
+| GET | `/api/sessions/:id/timeline` | Parse session into rich timeline nodes |
 | POST | `/api/sessions/:id/run` | Execute prompt, returns `{ output, suggestions }` |
-| PATCH | `/api/sessions/:id/meta` | Update star/tags/notes/alias/archived |
-| PATCH | `/api/nodes/:id/meta` | Update bookmark/annotation |
-| GET | `/api/tags` | List all tags |
-| GET | `/api/state` | Get app state |
-| PUT | `/api/state` | Update app state |
-| GET | `/api/sync` | Trigger manual re-sync |
+| POST | `/api/blueprints/:id/generate` | AI-generate nodes from description |
+| POST | `/api/blueprints/:id/nodes/:nodeId/run` | Execute a single node in a dedicated session |
 
-## Tech Stack
+</details>
 
-- **Backend**: Node.js, TypeScript, Express, better-sqlite3, `expect` (for Claude CLI TTY)
-- **Frontend**: Next.js 14, React 18, Tailwind CSS, shadcn/ui
-- **Data**: SQLite (index), JSON (enrichment + state), JSONL (source)
+## Security
 
-## Project Structure
+ClawUI enforces a **dual-layer isolation** model to protect your machine:
 
-```
-ClawUI/
-├── .clawui/                 # Persistent data (auto-created)
-│   ├── index.db             # SQLite index cache (gitignored)
-│   ├── enrichments.json     # User annotations (git tracked)
-│   └── app-state.json       # UI preferences (gitignored)
-├── backend/src/
-│   ├── index.ts             # Express server entry
-│   ├── routes.ts            # REST API routes
-│   ├── db.ts                # SQLite init + incremental sync
-│   ├── jsonl-parser.ts      # JSONL parsing logic
-│   ├── cli-runner.ts        # Claude CLI via expect
-│   ├── enrichment.ts        # Layer 3 read/write
-│   └── app-state.ts         # Layer 4 read/write
-├── frontend/src/
-│   ├── app/                 # Next.js pages
-│   ├── components/          # React components
-│   └── lib/api.ts           # API client
-└── docs/
-    ├── DATA-MODEL.md        # Four-layer architecture design
-    └── PRD-v2.md            # Product requirements
+### Network Layer — Localhost Lockdown
+
+Both the backend (Express :3001) and frontend (Next.js :3000) bind exclusively to `127.0.0.1`. Direct connections from other devices on your LAN are refused at the TCP level. Remote access (e.g., from a phone or tablet) is handled by running `tailscale serve` as an external reverse proxy — ClawUI itself never listens on `0.0.0.0`.
+
+### Application Layer — Local Auth Token
+
+On every backend startup, a cryptographically random token is generated and written to `.clawui/auth-token`. All `/api/*` requests must include this token via the `x-clawui-token` header (or `?auth=` query param for initial browser access). The token rotates on each restart.
+
+```text
+# The terminal prints a secure URL on startup:
+========================================================
+  ClawUI Secure Dashboard Ready
+  Local:     http://localhost:3000
+  Tailscale: http://<your-tailscale-ip>:3000/?auth=<token>
+========================================================
 ```
 
-## Status
+On first visit, the frontend extracts the token from the URL, stores it in `localStorage`, and strips the parameter from the address bar.
 
-✅ MVP Complete — Session viewing, enrichment, interactive continuation all working.
+### Other Notes
+
+- **`--dangerously-skip-permissions` flag**: Claude Code requires this flag for non-interactive (programmatic) use. ClawUI passes it automatically when executing prompts via `claude --resume`. This is a Claude Code requirement, not a ClawUI design choice.
+- **CORS** is locked to `http://127.0.0.1:3000` — only the local frontend origin is allowed.
+- **Tailscale recommended** for remote access. Run `tailscale serve --bg 3000` to securely expose the dashboard to your Tailnet.
+
+## 🔮 Coming Soon
+
+- **OpenClaw/Pi Support** — A standardized, open protocol for agent orchestration UIs to communicate with any coding agent backend. Decouple the frontend from Claude Code specifics so ClawUI (and other tools) can orchestrate any LLM-powered coding agent.
+
+## 🤝 Contributing
+
+We are building the omnichannel orchestration engine for agentic workflows. Contributions are highly welcome! Please check out our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on architecture, code style, and setting up the dev environment.
+
+## 📄 License
+
+MIT License (c) 2025-2026. See [LICENSE](LICENSE) for details.

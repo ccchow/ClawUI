@@ -1,15 +1,20 @@
 "use client";
 
 const statusColors: Record<string, string> = {
-  pending: "bg-gray-400",
-  running: "bg-blue-500 animate-pulse",
-  done: "bg-green-500",
-  failed: "bg-red-500",
-  blocked: "bg-yellow-500",
-  skipped: "bg-gray-300",
-  draft: "bg-gray-400",
-  approved: "bg-blue-400",
-  paused: "bg-yellow-400",
+  pending: "bg-text-muted",
+  queued: "bg-accent-amber animate-pulse",
+  running: "bg-accent-blue animate-pulse",
+  done: "bg-accent-green",
+  failed: "bg-accent-red",
+  blocked: "bg-accent-amber",
+  skipped: "bg-text-muted/50",
+  draft: "bg-text-muted",
+  approved: "bg-accent-blue/70",
+  paused: "bg-accent-amber/70",
+};
+
+const statusLabels: Record<string, string> = {
+  queued: "Waiting in queue",
 };
 
 export function StatusIndicator({
@@ -21,11 +26,12 @@ export function StatusIndicator({
 }) {
   const sizeClass = size === "sm" ? "w-2 h-2" : "w-2.5 h-2.5";
   const colorClass = statusColors[status] ?? "bg-gray-400";
+  const label = statusLabels[status] ?? status;
 
   return (
     <span
       className={`inline-block rounded-full flex-shrink-0 ${sizeClass} ${colorClass}`}
-      title={status}
+      title={label}
     />
   );
 }
