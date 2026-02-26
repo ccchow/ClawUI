@@ -128,6 +128,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 ## Key Design Decisions
 
 - **expect for TTY**: Claude Code requires a TTY — `node-pty` fails on Node 25, so we use `expect` (path auto-detected via `EXPECT_PATH` config) with `set stty_init "columns 2000"`
+- **Windows support**: On Windows (`process.platform === "win32"`), Claude CLI runs directly via `node cli.js` without TTY/expect wrapping — confirmed to work with `--output-format text`, `--output-format json`, and `--dangerously-skip-permissions`. Path encoding handles both `/` and `\` separators via `encodeProjectPath()` from `cli-utils.ts`. `decodeProjectPath()` detects Windows drive letters. `isProcessAlive()` uses `tasklist` on Windows (signal 0 is unreliable). Shell scripts have Node.js `.mjs` equivalents in `scripts/`.
 - **Inline suggestions**: One API call per prompt — suffix asks Claude to append `---SUGGESTIONS---` + JSON
 - **SQLite for index**: `better-sqlite3` sync API, incremental updates via file mtime+size comparison
 - **JSON for small data**: Enrichments and app state are JSON files (small, readable, diffable)
@@ -185,6 +186,8 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 - **JSONL session structure**: Each line is a JSON object with `type` (user/assistant/system/progress/queue-operation), `message.content` (array of blocks), `message.usage` (token counts), `isApiErrorMessage` flag. System messages have `subtype`: `compact_boundary` (context compaction with `compactMetadata.preTokens`), `turn_duration`, `stop_hook_summary`, `local_command`. Auto-compaction triggers at ~167K-174K tokens. API errors show `{input_tokens: 0, output_tokens: 0}` with error text in content.
 - **Fire-and-forget button loading state**: AI-triggered buttons that use `enqueueBlueprintTask` must NOT use promise-based `finally { setLoading(false) }` — the API returns immediately so loading clears before work starts. Instead, use an optimistic flag (`setOptimistic(true)` on click) combined with a derived loading state from `pendingTasks` polling (e.g., `const loading = optimistic || pendingTasks.some(t => t.type === "my_type")`). Clear optimistic flag once polling confirms the task exists. Call `loadData()` after the API call to trigger immediate polling.
 - **New exports need mock updates**: When adding new exports to a module (e.g., `validateSessionId` to `cli-runner.ts`), all `vi.mock()` blocks for that module in test files must include the new export — Vitest throws "[vitest] No 'exportName' export is defined on the mock" otherwise.
+- **Windows `.cmd` shim resolution**: `spawn("npx", ...)` fails on Windows without `shell: true` because `npx` is actually `npx.cmd`. Use `spawn("node", [cliJsPath, ...])` to bypass the shim, or `shell: true` as a fallback. The `CLAUDE_CLI_JS` constant in `config.ts` resolves the path to Claude's `cli.js` for direct node invocation.
+- **Windows path encoding**: `encodeProjectPath()` in `cli-utils.ts` handles both `/` and `\` separators and strips drive letter colons. Use it instead of `path.replace(/\//g, "-")` everywhere a Claude project directory name is constructed.
 
 ## Environment Variables
 
@@ -195,6 +198,7 @@ All config is centralized in `backend/src/config.ts`. See `.env.example` for def
 - `NEXT_PUBLIC_API_PORT` — Frontend API port (default: `3001`, must match backend PORT)
 - `CLAUDE_PATH` — Path to Claude CLI binary (auto-detected: checks `~/.local/bin/claude`, `/usr/local/bin/claude`, then PATH)
 - `EXPECT_PATH` — Path to `expect` binary (auto-detected: checks `/usr/bin/expect`, `/usr/local/bin/expect`, `/opt/local/bin/expect`, `/opt/homebrew/bin/expect`, then PATH)
+- `CLAUDE_PATH` — On Windows, auto-detects from `%APPDATA%\npm\claude.cmd`, PATH via `where.exe`, then falls back to bare `claude`. Set explicitly if Claude is installed in a non-standard location.
 - `LOG_LEVEL` — Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)
 - `CLAWUI_DEV` — Set to `1` to reuse existing auth token across backend restarts and enable dev UI features (default: unset, token rotates every restart). Exposed to frontend via `GET /api/dev/status`.
 
