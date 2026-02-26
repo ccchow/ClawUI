@@ -55,11 +55,31 @@ export function decodeProjectPath(encoded: string): string | undefined {
 
   const stripped = encoded.replace(/^-+/, "");
   if (!stripped) {
-    decodeProjectPathCache.set(encoded, "/");
-    return "/";
+    const root = process.platform === "win32" ? undefined : "/";
+    decodeProjectPathCache.set(encoded, root);
+    return root;
   }
 
   const parts = stripped.split("-");
+
+  // Detect Windows drive letter: first part is a single letter (e.g., "C")
+  // The encoded form of "C:\Users\foo" is "C--Users-foo"
+  // After stripping leading "-" from "C--Users-foo" we get parts: ["C", "", "Users", "foo"]
+  // But if original was "C--Users-foo", stripped is "C--Users-foo", parts are ["C", "", "Users", "foo"]
+  // The empty part signals the backslash separator after the drive letter colon.
+  if (parts[0].length === 1 && /^[A-Za-z]$/.test(parts[0])) {
+    const driveLetter = parts[0].toUpperCase();
+    const driveRoot = `${driveLetter}:\\`;
+    if (existsSync(driveRoot)) {
+      // Skip the empty part after drive letter (from the `:` → `-` encoding)
+      const startIdx = (parts.length > 1 && parts[1] === "") ? 2 : 1;
+      const result = walkFs(driveRoot, parts, startIdx);
+      decodeProjectPathCache.set(encoded, result);
+      return result;
+    }
+  }
+
+  // Unix path: start from /
   const result = walkFs("/", parts, 0);
   decodeProjectPathCache.set(encoded, result);
   return result;

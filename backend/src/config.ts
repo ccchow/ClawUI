@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 
 /**
  * Resolve the path to the Claude CLI binary.
- * Priority: CLAUDE_PATH env → common install locations → PATH lookup via `which`.
+ * Priority: CLAUDE_PATH env → common install locations → PATH lookup.
  */
 function resolveClaudePath(): string {
   // 1. Explicit env var
@@ -13,26 +13,41 @@ function resolveClaudePath(): string {
     return process.env.CLAUDE_PATH;
   }
 
-  // 2. Common install locations
-  const candidates = [
-    join(homedir(), ".local", "bin", "claude"),
-    "/usr/local/bin/claude",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
+  if (process.platform === "win32") {
+    // Windows install locations
+    const winCandidates = [
+      join(homedir(), "AppData", "Roaming", "npm", "claude.cmd"),
+      join(homedir(), ".npm-global", "claude.cmd"),
+    ];
+    for (const candidate of winCandidates) {
+      if (existsSync(candidate)) return candidate;
     }
+    // PATH lookup via where.exe
+    try {
+      const resolved = execFileSync("where", ["claude"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        windowsHide: true,
+      }).trim().split(/\r?\n/)[0];
+      if (resolved) return resolved;
+    } catch { /* where failed */ }
+  } else {
+    // Unix install locations
+    const candidates = [
+      join(homedir(), ".local", "bin", "claude"),
+      "/usr/local/bin/claude",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    // PATH lookup via which
+    try {
+      const resolved = execFileSync("/usr/bin/which", ["claude"], { encoding: "utf-8" }).trim();
+      if (resolved) return resolved;
+    } catch { /* which failed */ }
   }
 
-  // 3. Fallback: check PATH via `which`
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["claude"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // `which` failed — claude not in PATH
-  }
-
-  // 4. Last resort: bare command name (will fail at runtime if not in PATH)
+  // Last resort: bare command name (will fail at runtime if not in PATH)
   return "claude";
 }
 
@@ -43,6 +58,9 @@ export const CLAUDE_PATH = resolveClaudePath();
  * Priority: EXPECT_PATH env → common install locations → PATH lookup via `which` → bare "expect".
  */
 function resolveExpectPath(): string {
+  // expect is not needed on Windows — Claude CLI works without TTY wrapping
+  if (process.platform === "win32") return "";
+
   if (process.env.EXPECT_PATH) {
     return process.env.EXPECT_PATH;
   }
@@ -88,3 +106,8 @@ export const LOG_LEVEL = process.env.LOG_LEVEL || "info";
 
 /** Dev mode flag — reuses auth token, enables dev UI features. */
 export const CLAWUI_DEV = process.env.CLAWUI_DEV === "1";
+
+import { resolveClaudeCliJs } from "./cli-utils.js";
+
+/** Path to Claude's cli.js for direct node invocation on Windows. Null on Unix. */
+export const CLAUDE_CLI_JS = resolveClaudeCliJs(CLAUDE_PATH);

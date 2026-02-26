@@ -14,8 +14,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
-    "dev:stable": "NEXT_PUBLIC_API_PORT=3001 next start --port 3000 --hostname 127.0.0.1",
-    "dev:dev": "NEXT_PUBLIC_API_PORT=3101 next dev --port 3100 --hostname 127.0.0.1"
+    "dev:stable": "cross-env NEXT_PUBLIC_API_PORT=3001 next start --port 3000 --hostname 127.0.0.1",
+    "dev:dev": "cross-env NEXT_PUBLIC_API_PORT=3101 next dev --port 3100 --hostname 127.0.0.1"
   },
   "dependencies": {
     "next": "^14.2.0",

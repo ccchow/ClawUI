@@ -1,9 +1,10 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { CLAUDE_PATH, EXPECT_PATH } from "./config.js";
+import { CLAUDE_PATH, EXPECT_PATH, CLAUDE_CLI_JS } from "./config.js";
+import { cleanEnvForClaude, stripAnsi } from "./cli-utils.js";
 import { createLogger } from "./logger.js";
 
 // Child process tracking — populated by index.ts at startup
@@ -32,17 +33,6 @@ const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exact
 
 const EXEC_TIMEOUT = 180_000; // 3 minutes
 
-/**
- * Build a clean environment for spawning Claude CLI subprocesses.
- * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
- * error when the backend itself was started from within a Claude Code session.
- */
-function cleanEnvForClaude(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
-  return env;
-}
-
 export interface Suggestion {
   title: string;
   description: string;
@@ -55,7 +45,7 @@ export interface RunResult {
 }
 
 /**
- * Run Claude Code via `expect` to provide a TTY (required by Claude Code).
+ * Run Claude Code — platform-branching entry point.
  */
 function runClaude(
   sessionId: string,
@@ -63,6 +53,74 @@ function runClaude(
   cwd?: string
 ): Promise<string> {
   validateSessionId(sessionId);
+  if (process.platform === "win32") {
+    return runClaudeWindows(sessionId, prompt, cwd);
+  }
+  return runClaudeUnix(sessionId, prompt, cwd);
+}
+
+/**
+ * Windows: Run Claude CLI directly via node (no TTY/expect needed).
+ */
+function runClaudeWindows(
+  sessionId: string,
+  prompt: string,
+  cwd?: string
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = ["--dangerously-skip-permissions", "--resume", sessionId, "--output-format", "text", "-p", prompt];
+
+    // Use node + cli.js for reliable argument passing; fall back to shell:true
+    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
+    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
+    const useShell = !CLAUDE_CLI_JS;
+
+    log.debug(`Spawning Claude (Windows): session=${sessionId}, cwd=${cwd || process.cwd()}`);
+
+    const child = spawn(cmd, spawnArgs, {
+      timeout: EXEC_TIMEOUT,
+      cwd: cwd || process.cwd(),
+      env: cleanEnvForClaude(),
+      shell: useShell,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    child.stdin.end();
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    child.on("error", (err) => {
+      reject(new Error(`Claude CLI spawn error: ${err.message}`));
+    });
+
+    child.on("close", (code) => {
+      const clean = stripAnsi(stdout).trim();
+
+      if (clean.length > 0) {
+        resolve(clean);
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(`Claude CLI error (exit ${code}): ${stderr}`));
+        return;
+      }
+      resolve(clean);
+    });
+  });
+}
+
+/**
+ * Unix: Run Claude Code via `expect` to provide a TTY (required by Claude Code on Unix).
+ */
+function runClaudeUnix(
+  sessionId: string,
+  prompt: string,
+  cwd?: string
+): Promise<string> {
   return new Promise((resolve, reject) => {
     // Write prompt to temp file to avoid shell escaping issues
     const tmpFile = join(tmpdir(), `clawui-prompt-${randomUUID()}.txt`);
@@ -102,11 +160,7 @@ expect eof
       const lines = stdout.split("\n");
       const spawnIdx = lines.findIndex(l => l.includes("spawn") && l.includes("claude"));
       const cleanLines = spawnIdx >= 0 ? lines.slice(spawnIdx + 1) : lines;
-      const clean = cleanLines.join("\n")
-        .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")  // ANSI escape codes
-        .replace(/\x1B\][^\x07]*\x07/g, "")      // OSC sequences
-        .replace(/\r/g, "")
-        .trim();
+      const clean = stripAnsi(cleanLines.join("\n")).trim();
 
       if (clean.length > 0) {
         resolve(clean);

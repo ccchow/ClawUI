@@ -90,11 +90,24 @@ async function main() {
   });
 
   // Start frontend
-  const frontend = spawn("npx", ["next", "start", "--port", String(FRONTEND_PORT), "--hostname", "127.0.0.1"], {
-    cwd: FRONTEND_DIR,
-    stdio: "inherit",
-    env: { ...process.env, NEXT_PUBLIC_API_PORT: String(BACKEND_PORT) },
-  });
+  // On Windows, invoke next directly via node to avoid npx.cmd ENOENT issues.
+  // On Unix, npx works fine.
+  const isWin = process.platform === "win32";
+  let frontend;
+  if (isWin) {
+    const nextCliJs = join(FRONTEND_DIR, "node_modules", "next", "dist", "bin", "next");
+    frontend = spawn("node", [nextCliJs, "start", "--port", String(FRONTEND_PORT), "--hostname", "127.0.0.1"], {
+      cwd: FRONTEND_DIR,
+      stdio: "inherit",
+      env: { ...process.env, NEXT_PUBLIC_API_PORT: String(BACKEND_PORT) },
+    });
+  } else {
+    frontend = spawn("npx", ["next", "start", "--port", String(FRONTEND_PORT), "--hostname", "127.0.0.1"], {
+      cwd: FRONTEND_DIR,
+      stdio: "inherit",
+      env: { ...process.env, NEXT_PUBLIC_API_PORT: String(BACKEND_PORT) },
+    });
+  }
 
   // Wait for auth token and print URL
   const token = await waitForAuthToken();
@@ -121,6 +134,17 @@ async function main() {
 
   process.on("SIGINT", () => cleanup("SIGINT"));
   process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+  // On Windows, SIGTERM isn't reliably caught. Use 'exit' event as fallback.
+  if (process.platform === "win32") {
+    process.on("exit", () => {
+      if (!exiting) {
+        exiting = true;
+        try { backend.kill(); } catch {}
+        try { frontend.kill(); } catch {}
+      }
+    });
+  }
 
   // Exit when either child dies (with grace period for sibling)
   backend.on("exit", (code) => {

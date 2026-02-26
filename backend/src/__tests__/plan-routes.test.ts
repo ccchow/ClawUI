@@ -3,17 +3,19 @@ import express from "express";
 import request from "supertest";
 
 // Mock node:fs for projectCwd validation in blueprint creation
+// Normalize paths for cross-platform: on Windows join("/test","CLAUDE.md") → "\test\CLAUDE.md"
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
     existsSync: vi.fn((p: string) => {
       // Allow /test and /test/CLAUDE.md to pass validation
-      if (p === "/test" || p === "/test/CLAUDE.md") return true;
+      const np = p.replace(/\\/g, "/");
+      if (np === "/test" || np === "/test/CLAUDE.md") return true;
       return actual.existsSync(p);
     }),
     statSync: vi.fn((p: string) => {
-      if (p === "/test") return { isDirectory: (): boolean => true };
+      if (p.replace(/\\/g, "/") === "/test") return { isDirectory: (): boolean => true };
       return actual.statSync(p);
     }),
   };

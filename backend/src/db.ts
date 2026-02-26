@@ -1,8 +1,8 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, sep } from "node:path";
 import { homedir } from "node:os";
-import { parseTimelineRaw } from "./jsonl-parser.js";
+import { parseTimelineRaw, decodeProjectPath } from "./jsonl-parser.js";
 import type { TimelineNode, ProjectInfo, SessionMeta } from "./jsonl-parser.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -70,6 +70,23 @@ export function initDb(): void {
 }
 
 /**
+ * Naive decode of a project directory name for display purposes only.
+ * On Windows, detects drive-letter patterns (e.g. "Q--src-ClawUI" → "Q:\src\ClawUI").
+ * On Unix, falls back to simple dash→slash replacement.
+ */
+function naiveDecodePath(projectId: string): string {
+  // Detect Windows drive-letter pattern: single letter followed by "--"
+  // e.g. "Q--src-ClawUI" → drive "Q", rest "src-ClawUI"
+  const winMatch = projectId.match(/^([A-Za-z])--(.*)/);
+  if (winMatch) {
+    const drive = winMatch[1].toUpperCase();
+    const rest = winMatch[2].replace(/-/g, sep);
+    return `${drive}:${sep}${rest}`;
+  }
+  return projectId.replace(/-/g, "/");
+}
+
+/**
  * Full scan of ~/.claude/projects/ — compare file_size+mtime, only re-parse changed files.
  */
 export function syncAll(): void {
@@ -88,9 +105,10 @@ export function syncAll(): void {
     seenProjectIds.add(projectId);
     const projDir = join(CLAUDE_PROJECTS_DIR, projectId);
 
-    // Decode project name
-    const decodedPath = projectId.replace(/-/g, "/");
-    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+    // Decode project name — use filesystem-aware decode for accuracy, naive as fallback
+    const decodedPath = decodeProjectPath(projectId) ?? naiveDecodePath(projectId);
+    const segments = decodedPath.split(/[\\/]/).filter(Boolean);
+    const projectName = segments.slice(-2).join("/");
 
     const jsonlFiles = readdirSync(projDir).filter((f) => f.endsWith(".jsonl"));
 
@@ -250,10 +268,22 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string)
         file_mtime = excluded.file_mtime
     `).run(sessionId, projectId, slug ?? null, cwd ?? null, createdAt, updatedAt, nodeCount, fileSize, fileMtime);
 
-    // Insert nodes
+    // Insert nodes (ON CONFLICT handles duplicate node IDs from sessions appearing
+    // under multiple project directory encodings, e.g. on Windows)
     const insertNode = db.prepare(`
       INSERT INTO timeline_nodes (id, session_id, seq, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        seq = excluded.seq,
+        type = excluded.type,
+        timestamp = excluded.timestamp,
+        title = excluded.title,
+        content = excluded.content,
+        tool_name = excluded.tool_name,
+        tool_input = excluded.tool_input,
+        tool_result = excluded.tool_result,
+        tool_use_id = excluded.tool_use_id
     `);
 
     for (let i = 0; i < nodes.length; i++) {
@@ -295,9 +325,10 @@ export function getProjects(): ProjectInfo[] {
 }
 
 export function getSessions(projectId: string): SessionMeta[] {
-  // Decode project name for the response
-  const decodedPath = projectId.replace(/-/g, "/");
-  const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+  // Decode project name — filesystem-aware for accuracy, naive as fallback
+  const decodedPath = decodeProjectPath(projectId) ?? naiveDecodePath(projectId);
+  const segments = decodedPath.split(/[\\/]/).filter(Boolean);
+  const projectName = segments.slice(-2).join("/");
 
   const rows = db.prepare(`
     SELECT id, project_id, slug, cwd, created_at, updated_at, node_count

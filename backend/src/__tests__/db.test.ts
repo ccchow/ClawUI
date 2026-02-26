@@ -578,6 +578,76 @@ describe("JSONL helper functions", () => {
   });
 });
 
+// ─── naiveDecodePath logic (re-implemented locally) ──────────
+
+describe("naiveDecodePath logic", () => {
+  // Re-implement the private naiveDecodePath function from db.ts for isolated testing
+  function naiveDecodePath(projectId: string, sep: string): string {
+    // Detect Windows drive-letter pattern: single letter followed by "--"
+    const winMatch = projectId.match(/^([A-Za-z])--(.*)/);
+    if (winMatch) {
+      const drive = winMatch[1].toUpperCase();
+      const rest = winMatch[2].replace(/-/g, sep);
+      return `${drive}:${sep}${rest}`;
+    }
+    return projectId.replace(/-/g, "/");
+  }
+
+  describe("Windows (sep = \\)", () => {
+    const sep = "\\";
+
+    it("decodes drive-letter pattern Q--src-ClawUI", () => {
+      expect(naiveDecodePath("Q--src-ClawUI", sep)).toBe("Q:\\src\\ClawUI");
+    });
+
+    it("decodes C--Users-user-project", () => {
+      expect(naiveDecodePath("C--Users-user-project", sep)).toBe("C:\\Users\\user\\project");
+    });
+
+    it("uppercases lowercase drive letters", () => {
+      expect(naiveDecodePath("c--Users-test", sep)).toBe("C:\\Users\\test");
+    });
+
+    it("handles drive root with no path segments", () => {
+      expect(naiveDecodePath("D--", sep)).toBe("D:\\");
+    });
+  });
+
+  describe("Unix (sep = /)", () => {
+    const sep = "/";
+
+    it("decodes standard Unix path -home-user-project", () => {
+      expect(naiveDecodePath("-home-user-project", sep)).toBe("/home/user/project");
+    });
+
+    it("decodes root path -", () => {
+      expect(naiveDecodePath("-", sep)).toBe("/");
+    });
+
+    it("decodes path without leading dash", () => {
+      expect(naiveDecodePath("home-user", sep)).toBe("home/user");
+    });
+  });
+
+  describe("Edge cases", () => {
+    it("single letter without -- is not treated as drive letter", () => {
+      // "A-foo-bar" has just a single dash after 'A', not '--'
+      // So the regex ^([A-Za-z])--(.*)$ should NOT match
+      const result = naiveDecodePath("A-foo-bar", "/");
+      expect(result).toBe("A/foo/bar"); // falls through to Unix-style decode
+    });
+
+    it("multi-letter prefix is not treated as drive letter", () => {
+      const result = naiveDecodePath("AB--stuff", "/");
+      expect(result).toBe("AB//stuff");
+    });
+
+    it("no dashes returns string unchanged", () => {
+      expect(naiveDecodePath("projectname", "/")).toBe("projectname");
+    });
+  });
+});
+
 describe("Transaction behavior (sync write)", () => {
   let db: Database.Database;
 
