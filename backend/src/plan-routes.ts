@@ -36,7 +36,7 @@ import type { CompletionEvaluation } from "./plan-executor.js";
 import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR, PORT } from "./config.js";
-import { LOCAL_AUTH_TOKEN } from "./auth.js";
+
 
 const log = createLogger("plan-routes");
 
@@ -1704,12 +1704,11 @@ planRouter.post("/api/uploads", (req, res) => {
 // POST /api/plans — create (accepts both cwd and projectCwd)
 planRouter.post("/api/plans", (req, res) => {
   try {
-    const { title, description, cwd, projectCwd, projectId } = req.body as {
+    const { title, description, cwd, projectCwd } = req.body as {
       title?: string;
       description?: string;
       cwd?: string;
       projectCwd?: string;
-      projectId?: string;
     };
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       res.status(400).json({ error: "Missing or empty 'title'" });

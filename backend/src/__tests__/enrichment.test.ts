@@ -1,15 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 // We need to mock the file paths used by enrichment.ts.
 // The module uses `import.meta.dirname` to resolve paths.
 // We'll mock the fs functions to redirect to our temp dir.
-
-let tmpDir: string;
-let enrichmentsPath: string;
 
 // Mock the module-level constants by mocking the fs operations
 vi.mock("node:fs", async (importOriginal) => {

@@ -204,7 +204,6 @@ vi.mock("../db.js", () => ({
 import planRouter from "../plan-routes.js";
 import {
   createBlueprint,
-  getBlueprint,
   listBlueprints,
   updateBlueprint,
   deleteBlueprint,
@@ -217,12 +216,10 @@ import {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   getExecution,
   getExecutionsForNode,
-  getExecutionBySession,
-  getNodeBySession,
   setExecutionBlocker,
   setExecutionTaskSummary,
 } from "../plan-db.js";
-import { getQueueInfo } from "../plan-executor.js";
+// getQueueInfo is auto-mocked by vi.mock("../plan-executor.js")
 
 function createApp() {
   const app = express();

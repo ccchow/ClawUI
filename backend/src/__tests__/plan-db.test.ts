@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import Database from "better-sqlite3";
+import { describe, it, expect, beforeAll } from "vitest";
 import { join } from "node:path";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
@@ -11,12 +10,9 @@ import { randomUUID } from "node:crypto";
 // The plan-db module uses getDb() which requires initDb() to have been called.
 // We'll initialize a temporary database.
 
-let tmpDir: string;
-let dbPath: string;
-
 describe("plan-db", () => {
   beforeAll(async () => {
-    tmpDir = join(tmpdir(), `clawui-plandb-test-${randomUUID()}`);
+    const tmpDir = join(tmpdir(), `clawui-plandb-test-${randomUUID()}`);
     mkdirSync(tmpDir, { recursive: true });
 
     // Import db module and initialize with a temp database
@@ -314,7 +310,7 @@ describe("plan-db", () => {
   });
 
   it("cascade delete removes nodes when blueprint is deleted", async () => {
-    const { createBlueprint, createMacroNode, deleteBlueprint, getBlueprint } = await import("../plan-db.js");
+    const { createBlueprint, createMacroNode, deleteBlueprint } = await import("../plan-db.js");
     const { getDb } = await import("../db.js");
 
     const bp = createBlueprint("Cascade Test");

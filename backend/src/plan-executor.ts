@@ -21,7 +21,7 @@ import {
   createRelatedSession,
 } from "./plan-db.js";
 import { syncSession } from "./db.js";
-import type { Blueprint, MacroNode, NodeExecution, Artifact, StaleExecution, FailureReason } from "./plan-db.js";
+import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
 import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
 import { analyzeSessionHealth } from "./jsonl-parser.js";
 
@@ -525,7 +525,7 @@ close $of
         cwd: cwd || process.cwd(),
         env: cleanEnvForClaude(),
       },
-      (error, _stdout, _stderr) => {
+      (error) => {
         // Read output from file (avoids TTY echo contamination)
         let clean = "";
         try {
@@ -613,7 +613,7 @@ close $of
         cwd: cwd || process.cwd(),
         env: cleanEnvForClaude(),
       },
-      (error, _stdout, _stderr) => {
+      (error) => {
         let clean = "";
         try {
           clean = readFileSync(outputFile, "utf-8")

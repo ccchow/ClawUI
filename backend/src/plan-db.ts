@@ -1112,22 +1112,6 @@ export function recoverStaleExecutions(skipIds?: Set<string>): void {
     }
   }
 
-  // Also reset any blueprint stuck in "running"
-  const staleBlueprints = db
-    .prepare("SELECT DISTINCT blueprint_id FROM macro_nodes WHERE status = 'running'")
-    .all() as { blueprint_id: string }[];
-
-  // Also gather blueprints with queued nodes (they'll be re-enqueued separately)
-  const queuedBlueprintIds = db
-    .prepare("SELECT DISTINCT blueprint_id FROM macro_nodes WHERE status = 'queued'")
-    .all() as { blueprint_id: string }[];
-
-  // Reset blueprints that have no more running/queued nodes
-  const allBlueprintIds = [...new Set([
-    ...toFail.map(e => e.blueprint_id),
-    ...staleBlueprints.map(b => b.blueprint_id),
-    ...queuedBlueprintIds.map(b => b.blueprint_id),
-  ])];
   // Reset ALL blueprints stuck in "running" that have no active nodes
   const stuckBlueprints = db
     .prepare("SELECT id FROM blueprints WHERE status = 'running'")

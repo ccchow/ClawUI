@@ -70,9 +70,8 @@ import {
   getEnrichments,
   updateSessionMeta,
   updateNodeMeta,
-  getAllTags,
 } from "../enrichment.js";
-import { getAppState, updateAppState, trackSessionView } from "../app-state.js";
+import { updateAppState, trackSessionView } from "../app-state.js";
 import { runPrompt } from "../cli-runner.js";
 
 function createApp() {

@@ -64,7 +64,7 @@ expect eof
 
     log.debug(`Spawning expect script: ${tmpExpect}, session: ${sessionId}, cwd: ${cwd || process.cwd()}`);
 
-    let childPid: number | undefined;
+    let childPid: number | undefined; // eslint-disable-line prefer-const
     const child = execFile(EXPECT_PATH, [tmpExpect], {
       timeout: EXEC_TIMEOUT,
       maxBuffer: 10 * 1024 * 1024,
