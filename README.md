@@ -119,19 +119,102 @@ Frontend (Next.js :3000)          -> DAG UI & Timeline Controller
 
 ## 🔌 API Reference
 
-ClawUI exposes a robust REST API for both Session monitoring and Blueprint execution.
-*(Expand to view core endpoints)*
+ClawUI exposes a full REST API for session monitoring, blueprint orchestration, and AI-powered operations.
 
 <details>
-<summary><b>Session & Node APIs</b></summary>
+<summary><b>Session APIs</b></summary>
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/api/projects` | List all Claude Code projects |
-| GET | `/api/sessions/:id/timeline` | Parse session into rich timeline nodes |
+| GET | `/api/projects/:id/sessions` | List sessions with enrichment data |
+| GET | `/api/sessions/:id/timeline` | Get timeline nodes from SQLite |
+| GET | `/api/sessions/:id/last-message` | Lightweight poll for latest node |
+| GET | `/api/sessions/:id/health` | Analyze session context health |
 | POST | `/api/sessions/:id/run` | Execute prompt, returns `{ output, suggestions }` |
+| PATCH | `/api/sessions/:id/meta` | Update session enrichment (star, tags, notes, archive) |
+| PATCH | `/api/nodes/:id/meta` | Update node enrichment |
+| GET | `/api/tags` | List all tags |
+| GET | `/api/state` | Get app state |
+| PUT | `/api/state` | Update app state |
+| GET | `/api/sync` | Trigger manual re-sync |
+| GET | `/api/global-status` | Aggregate queue info across all blueprints |
+
+</details>
+
+<details>
+<summary><b>Blueprint CRUD</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/blueprints` | Create blueprint with project directory |
+| GET | `/api/blueprints` | List blueprints (filter by status, project, archived) |
+| GET | `/api/blueprints/:id` | Get blueprint with all nodes |
+| PUT | `/api/blueprints/:id` | Update blueprint metadata |
+| DELETE | `/api/blueprints/:id` | Delete blueprint and all nodes |
+| POST | `/api/blueprints/:id/archive` | Archive blueprint |
+| POST | `/api/blueprints/:id/unarchive` | Unarchive blueprint |
+| POST | `/api/blueprints/:id/approve` | Set status to approved |
+
+</details>
+
+<details>
+<summary><b>Node CRUD & Batch Operations</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/blueprints/:id/nodes` | Add single node |
+| PUT | `/api/blueprints/:id/nodes/:nodeId` | Edit node |
+| DELETE | `/api/blueprints/:id/nodes/:nodeId` | Delete node |
+| POST | `/api/blueprints/:id/nodes/reorder` | Reorder nodes |
+| PUT | `/api/blueprints/:id/nodes/batch` | Batch update multiple nodes |
+| POST | `/api/blueprints/:id/nodes/batch-create` | Create multiple nodes with inter-batch deps |
+
+</details>
+
+<details>
+<summary><b>AI-Powered Operations</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
 | POST | `/api/blueprints/:id/generate` | AI-generate nodes from description |
-| POST | `/api/blueprints/:id/nodes/:nodeId/run` | Execute a single node in a dedicated session |
+| POST | `/api/blueprints/:id/reevaluate-all` | AI reevaluate all non-done nodes |
+| POST | `/api/blueprints/:id/enrich-node` | AI-enrich node title & description |
+| POST | `/api/blueprints/:id/nodes/:nodeId/reevaluate` | AI reevaluate single node |
+| POST | `/api/blueprints/:id/nodes/:nodeId/split` | AI decompose node into 2-3 sub-nodes |
+| POST | `/api/blueprints/:id/nodes/:nodeId/smart-dependencies` | AI auto-pick dependencies |
+| POST | `/api/blueprints/:id/nodes/:nodeId/evaluate` | AI post-completion evaluation |
+
+</details>
+
+<details>
+<summary><b>Execution & Queue Control</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/blueprints/:id/nodes/:nodeId/run` | Run single node (fire-and-forget) |
+| POST | `/api/blueprints/:id/run` | Run next pending node |
+| POST | `/api/blueprints/:id/run-all` | Run all pending nodes in dependency order |
+| POST | `/api/blueprints/:id/nodes/:nodeId/unqueue` | Cancel queued node, revert to pending |
+| POST | `/api/blueprints/:id/nodes/:nodeId/resume-session` | Resume failed node in existing session |
+| POST | `/api/blueprints/:id/nodes/:nodeId/recover-session` | Find and link lost session |
+| GET | `/api/blueprints/:id/queue` | Get queue info for blueprint |
+| GET | `/api/blueprints/:id/nodes/:nodeId/executions` | Get execution history |
+| GET | `/api/blueprints/:id/nodes/:nodeId/related-sessions` | Sessions from interactive ops |
+| GET | `/api/blueprints/:id/nodes/:nodeId/artifacts` | Get node artifacts |
+| POST | `/api/blueprints/:id/nodes/:nodeId/artifacts` | Create artifact |
+
+</details>
+
+<details>
+<summary><b>Execution Callbacks (called by Claude Code during execution)</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
+| POST | `/api/blueprints/:id/nodes/:nodeId/evaluation-callback` | Post-completion evaluation result |
+| POST | `/api/blueprints/:id/executions/:execId/report-blocker` | Report execution blocker |
+| POST | `/api/blueprints/:id/executions/:execId/task-summary` | Report task completion summary |
+| POST | `/api/blueprints/:id/executions/:execId/report-status` | Authoritative execution status |
 
 </details>
 
