@@ -4,10 +4,8 @@
   A Claude Code Orchestrator with User/Agent Interface<br><br>
   <a href="https://github.com/ccchow/ClawUI/actions/workflows/ci.yml"><img src="https://github.com/ccchow/ClawUI/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/@clawui/cli"><img src="https://img.shields.io/npm/v/@clawui/cli.svg" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/@clawui/cli"><img src="https://img.shields.io/npm/dm/@clawui/cli.svg" alt="npm downloads"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/TypeScript-5.4-blue.svg" alt="TypeScript">
-  <a href="https://github.com/ccchow/ClawUI/stargazers"><img src="https://img.shields.io/github/stars/ccchow/ClawUI.svg?style=social" alt="GitHub stars"></a>
   <a href="https://github.com/ccchow/ClawUI/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://github.com/ccchow/ClawUI/blob/main/CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
 </p>
