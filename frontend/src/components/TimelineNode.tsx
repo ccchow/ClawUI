@@ -33,16 +33,16 @@ const DOT_COLOR: Record<TimelineNode["type"], string> = {
 };
 
 const BADGE_COLOR: Record<string, string> = {
-  Read: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-  Write: "bg-orange-500/15 text-orange-400 border-orange-500/30",
-  Edit: "bg-sky-500/15 text-sky-400 border-sky-500/30",
-  Bash: "bg-violet-500/15 text-violet-400 border-violet-500/30",
-  Grep: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
-  Glob: "bg-yellow-500/15 text-yellow-400 border-yellow-500/30",
-  WebFetch: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
-  WebSearch: "bg-cyan-500/15 text-cyan-400 border-cyan-500/30",
-  Task: "bg-pink-500/15 text-pink-400 border-pink-500/30",
-  TodoWrite: "bg-indigo-500/15 text-indigo-400 border-indigo-500/30",
+  Read: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
+  Write: "bg-orange-500/15 text-orange-700 dark:text-orange-400 border-orange-500/30",
+  Edit: "bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30",
+  Bash: "bg-violet-500/15 text-violet-700 dark:text-violet-400 border-violet-500/30",
+  Grep: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/30",
+  Glob: "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/30",
+  WebFetch: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 border-cyan-500/30",
+  WebSearch: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 border-cyan-500/30",
+  Task: "bg-pink-500/15 text-pink-700 dark:text-pink-400 border-pink-500/30",
+  TodoWrite: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 border-indigo-500/30",
 };
 
 const DEFAULT_BADGE = "bg-text-muted/15 text-text-secondary border-text-muted/30";
@@ -319,7 +319,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
 
       <div
         className={`rounded-lg border-l-2 ${
-          bookmarked ? "border-amber-400 bg-amber-400/5" : colorClass
+          bookmarked ? "border-accent-amber bg-accent-amber/5" : colorClass
         } p-3 cursor-pointer transition-all hover:bg-bg-hover/30`}
         onClick={() => showExpand && setExpanded(!expanded)}
       >

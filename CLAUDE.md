@@ -65,7 +65,7 @@ Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
 
 ### Frontend (`frontend/`)
 
-Next.js 14, React 18, Tailwind CSS 3, dark theme.
+Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 
 **Routes:**
 - `/` — Redirects to `/blueprints` (blueprint-centric landing page)
@@ -76,7 +76,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark theme.
 - `/blueprints/[id]` — Plan detail with node cards and dependency flow
 - `/blueprints/[id]/nodes/[nodeId]` — Node detail with execution timeline
 
-**Key components:** `SessionList`, `Timeline`, `TimelineNode`, `ToolPairNode`, `MacroNodeCard`, `StatusIndicator`, `SuggestionButtons`, `PromptInput`, `MarkdownContent`, `AISparkle`, `AuthProvider`, `NavBar` (global execution indicator via `getGlobalStatus()` polling), `SkeletonLoader` (reusable skeleton with variants: `card`, `list`, `nodeCard`, `nodeDetail`).
+**Key components:** `SessionList`, `Timeline`, `TimelineNode`, `ToolPairNode`, `MacroNodeCard`, `StatusIndicator`, `SuggestionButtons`, `PromptInput`, `MarkdownContent`, `AISparkle`, `AuthProvider`, `ThemeProvider` (wraps `next-themes`, syncs to backend app-state), `NavBar` (theme toggle via `useTheme()` + global execution indicator via `getGlobalStatus()` polling), `SkeletonLoader` (reusable skeleton with variants: `card`, `list`, `nodeCard`, `nodeDetail`).
 
 **API client:** `lib/api.ts` — all requests use relative `/api/*` paths routed through the Next.js proxy. Auth token read from `localStorage` and attached via `x-clawui-token` header. `next.config.mjs` has rewrites proxying `/api/*` → `http://localhost:3001/api/*`.
 
@@ -85,7 +85,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark theme.
 - Backend imports use `.js` extensions: `import { foo } from "./bar.js"`
 - Frontend uses `@/*` path alias → `./src/*`
 - All frontend components are `"use client"`
-- Dark theme with custom Tailwind tokens: `bg-primary`, `accent-blue`, `accent-purple`, etc. (defined in `tailwind.config.ts`)
+- **CSS variable theming**: Color tokens use CSS custom properties (`globals.css`) with RGB channel format (`--bg-primary: 10 10 15`) so Tailwind opacity modifiers (`bg-bg-secondary/50`) work. `:root` = light theme, `.dark` = dark theme. `tailwind.config.ts` references them as `rgb(var(--bg-primary) / <alpha-value>)`. `globals.css` uses `rgb(var(--bg-primary))` for direct CSS usage (body, scrollbars, code blocks, focus rings). Theme switching managed by `next-themes` (`ThemeProvider.tsx`): `attribute='class'`, `defaultTheme='dark'`, `storageKey='clawui-theme'`, syncs to backend via `updateAppState({ ui: { theme } })`. `<html>` tag has `suppressHydrationWarning` (required by next-themes). Never use hardcoded dark-mode colors like `bg-[#0a0a0f]` — use semantic tokens (`bg-bg-primary`) that respond to theme. `html` element has `color-scheme: light` (`:root`) and `color-scheme: dark` (`.dark`) for native scrollbar/form control theming.
 - Optimistic UI updates for all mutations (star, bookmark, tag, notes)
 - `next.config.mjs` (not `.ts`) for Next.js 14 compatibility
 - ESLint scoped to `backend/src/**/*.ts` only (config + deps at root: `eslint.config.mjs`, root `package.json`)
@@ -102,14 +102,14 @@ Next.js 14, React 18, Tailwind CSS 3, dark theme.
 - **Button press feedback**: All interactive buttons use `active:scale-[0.98] transition-all` (smaller elements use `0.97`, card-level items use `0.995`). Disabled buttons use `disabled:opacity-40 disabled:cursor-not-allowed` consistently.
 - **Inline confirmation pattern**: Never use `window.confirm()` — it breaks the dark theme. Use inline confirmation with state toggle: `confirmingX` state shows a `Yes`/`Cancel` button pair with `animate-fade-in` where the action button was (see blueprints/[id]/page.tsx generate/reevaluate for reference).
 - **SVG over emoji icons**: Use inline SVGs instead of emoji for interactive icons (stars, bookmarks, archive, sort, refresh, chevrons). Chevrons use a rotating SVG (`transition-transform rotate-90`) instead of swapping characters.
-- **Semantic color tokens**: Always use semantic tokens (`accent-amber`, `accent-green`, `accent-blue`, etc.) for UI elements. Raw Tailwind colors (`yellow-400`, `green-600`, `amber-400`) are only acceptable for contextual data visualization (e.g., failure reason color coding in node detail).
+- **Semantic color tokens**: Always use semantic tokens (`accent-amber`, `accent-green`, `accent-blue`, etc.) for UI elements. Raw Tailwind colors (`yellow-400`, `green-600`, `amber-400`) are only acceptable for contextual data visualization (e.g., failure reason color coding in node detail, tool badge colors in `TimelineNode.tsx`). Data visualization text colors at the `-400` level lack contrast on light backgrounds — use `dark:` variants: `text-emerald-700 dark:text-emerald-400`. Semi-transparent backgrounds (`bg-emerald-500/15`) work on both themes without variants. SVG `stroke` attributes should use `currentColor` + a `text-*` class instead of hardcoded hex (e.g., `stroke="currentColor" className="text-accent-green"` instead of `stroke="#22c55e"`). Hardcoded hex in `DependencyGraph.tsx` is acceptable (SVG canvas rendering context where CSS variables can't be used).
 - **Page fade-in**: All main page root `<div>` elements use `animate-fade-in` class for subtle 0.2s opacity transition on navigation.
 - **ARIA labels on icon-only buttons**: Every `<button>` that shows only an icon (no visible text) must have `aria-label`. Dynamic labels for toggles (e.g., `aria-label={starred ? "Unstar session" : "Star session"}`).
 - **`aria-expanded` on collapse controls**: All expand/collapse toggles (card sections, time groups, older nodes, collapsible content) must include `aria-expanded={isExpanded}`.
 - **Focus trapping in overlays**: Modal overlays (node switcher) use `role="dialog"` + `aria-modal="true"` + `aria-label`. A `useEffect` traps Tab key within the dialog and closes on Escape, returning focus to the trigger button via a ref.
-- **`focus-visible` global styles**: `globals.css` provides `*:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }` for keyboard navigation. No `:focus` styles — only `:focus-visible` to avoid affecting mouse/touch users.
+- **`focus-visible` global styles**: `globals.css` provides `*:focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: 2px; }` for keyboard navigation (theme-aware via CSS variable). No `:focus` styles — only `:focus-visible` to avoid affecting mouse/touch users.
 - **StatusIndicator accessibility**: Uses `role="img"` and `aria-label={label}` with full status label mapping (Pending, Running, Completed, Failed, Blocked, Skipped, Waiting in queue, Draft, Approved, Paused).
-- **Color contrast**: `text.muted` token is `#708096` (bumped from `#64748b`) for ~5.5:1 contrast ratio against `bg-primary` (#0a0a0f), meeting WCAG AA for small text.
+- **Color contrast**: `text-muted` dark value is `112 128 150` (~#708096) for ~4.9:1 against dark `bg-primary`. Light value is `95 110 132` for ~5.2:1 against white and ~4.7:1 against `bg-tertiary`, meeting WCAG AA. Light-mode accent colors are darkened vs dark theme for text contrast: blue `37 99 235` (5.2:1), purple `124 58 237` (5.7:1), green `21 128 61` (5.0:1), amber `180 83 9` (5.0:1), red `220 38 38` (4.8:1) — all pass AA on white. Dark theme keeps brighter accent values for visibility on dark backgrounds. `text-white` on accent button backgrounds is acceptable (buttons use large enough text); for loading spinners inside buttons, use `border-current` instead of `border-white` to inherit the button's text color.
 - **Node numbering**: Always use `node.order + 1` (DB `order` field) for display numbers — in `MacroNodeCard`, dependency picker chips, node switcher, and bottom nav. Never use array index for numbering.
 - **Filter state persistence**: Blueprint pages persist filter state to URL search params via `window.history.replaceState` (no history pollution) + `sessionStorage` for cross-page back links. Blueprints list: `?status=running&archived=1` (key: `clawui:blueprints-filters`). Blueprint detail: `?filter=failed&sort=manual&order=oldest` (key: `clawui:blueprint-${id}-filters`). Back links (`blueprintsBackHref`, `blueprintBackHref`) read from sessionStorage to reconstruct the parent page's filter URL. Default values are omitted from URL params.
 - **Skipped node filtering**: After a node is split, its status becomes `skipped`. Dependency picker excludes skipped nodes unless already selected (shown dimmed with "(split)" label). Node switcher overlay excludes skipped nodes entirely. Input artifact source links for skipped nodes render as non-clickable text with "(split)" indicator.

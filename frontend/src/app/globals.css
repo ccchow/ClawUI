@@ -2,15 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Light theme (default) — values are RGB channels for Tailwind opacity modifier support */
+/* Accent colors are darkened vs dark theme for WCAG AA text contrast on light backgrounds */
+:root {
+  --bg-primary: 255 255 255;
+  --bg-secondary: 248 250 252;
+  --bg-tertiary: 241 245 249;
+  --bg-hover: 226 232 240;
+  --text-primary: 15 23 42;
+  --text-secondary: 71 85 105;
+  --text-muted: 95 110 132;
+  --border-primary: 226 232 240;
+  --border-hover: 203 213 225;
+  --accent-blue: 37 99 235;
+  --accent-purple: 124 58 237;
+  --accent-green: 21 128 61;
+  --accent-amber: 180 83 9;
+  --accent-red: 220 38 38;
+}
+
+/* Dark theme */
+.dark {
+  --bg-primary: 10 10 15;
+  --bg-secondary: 18 18 26;
+  --bg-tertiary: 26 26 46;
+  --bg-hover: 34 34 56;
+  --text-primary: 226 232 240;
+  --text-secondary: 148 163 184;
+  --text-muted: 112 128 150;
+  --border-primary: 30 41 59;
+  --border-hover: 51 65 85;
+  --accent-blue: 59 130 246;
+  --accent-purple: 139 92 246;
+  --accent-green: 34 197 94;
+  --accent-amber: 245 158 11;
+  --accent-red: 239 68 68;
+}
+
+/* Smooth theme transition */
+*,
+*::before,
+*::after {
+  transition: background-color 0.2s, color 0.2s, border-color 0.2s;
+}
+
+/* Disable transition for animations and transforms to avoid conflicts */
+.animate-ai-sparkle,
+.animate-fade-in,
+.animate-slide-up,
+.animate-node-appear {
+  transition: none;
+}
+
 body {
-  background: #0a0a0f;
-  color: #e2e8f0;
+  background: rgb(var(--bg-primary));
+  color: rgb(var(--text-primary));
   overflow-x: hidden;
 }
 
-/* Prevent horizontal overflow globally */
+/* Prevent horizontal overflow globally + native color-scheme for scrollbars/form controls */
 html {
   overflow-x: hidden;
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
 }
 
 /* Custom scrollbar */
@@ -18,20 +74,20 @@ html {
   width: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #12121a;
+  background: rgb(var(--bg-secondary));
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: rgb(var(--border-hover));
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: rgb(var(--text-secondary));
 }
 
 /* Thin scrollbar for horizontal scroll containers */
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: #334155 transparent;
+  scrollbar-color: rgb(var(--border-hover)) transparent;
 }
 .scrollbar-thin::-webkit-scrollbar {
   height: 4px;
@@ -40,17 +96,17 @@ html {
   background: transparent;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: rgb(var(--border-hover));
   border-radius: 2px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: rgb(var(--text-secondary));
 }
 
 /* Code blocks */
 pre {
-  background: #0f0f1a;
-  border: 1px solid #1e293b;
+  background: rgb(var(--bg-tertiary));
+  border: 1px solid rgb(var(--border-primary));
   border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
@@ -91,7 +147,7 @@ code {
 
 /* New node highlight — brief green border pulse for nodes appearing during generation */
 @keyframes node-appear {
-  0% { border-color: #22c55e; box-shadow: 0 0 8px rgba(34, 197, 94, 0.3); }
+  0% { border-color: rgb(var(--accent-green)); box-shadow: 0 0 8px rgb(var(--accent-green) / 0.3); }
   100% { border-color: transparent; box-shadow: none; }
 }
 .animate-node-appear {
@@ -102,7 +158,7 @@ code {
 
 /* Focus-visible styles for keyboard navigation */
 *:focus-visible {
-  outline: 2px solid #3b82f6;
+  outline: 2px solid rgb(var(--accent-blue));
   outline-offset: 2px;
 }
 button:focus-visible, a:focus-visible {

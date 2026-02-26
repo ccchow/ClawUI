@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
+import { useTheme } from "next-themes";
 import { redeployStable, getDevStatus, getGlobalStatus } from "@/lib/api";
 import type { GlobalQueueInfo, GlobalQueueTask } from "@/lib/api";
 import { AISparkle } from "./AISparkle";
@@ -22,7 +23,7 @@ const typeColors: Record<string, string> = {
 };
 
 function TaskRow({ task }: { task: GlobalQueueTask }) {
-  const color = typeColors[task.type] ?? "bg-white/10 text-text-muted";
+  const color = typeColors[task.type] ?? "bg-bg-hover text-text-muted";
   const nodeTitle = task.nodeTitle || "Blueprint task";
   const blueprintTitle = task.blueprintTitle || task.blueprintId.slice(0, 8);
 
@@ -31,7 +32,7 @@ function TaskRow({ task }: { task: GlobalQueueTask }) {
     : `/blueprints/${task.blueprintId}`;
 
   return (
-    <div className="flex items-start gap-2 px-3 py-2 border-b border-white/5 last:border-b-0">
+    <div className="flex items-start gap-2 px-3 py-2 border-b border-border-primary last:border-b-0">
       <div className="min-w-0 flex-1">
         <Link
           href={nodeHref}
@@ -154,6 +155,11 @@ export function NavBar() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showTooltip]);
 
+  // Theme toggle
+  const { setTheme, resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   // Click handler: navigate to session of first active task if available, otherwise blueprint
   const handleIndicatorClick = () => {
     if (!globalStatus?.tasks.length) return;
@@ -197,6 +203,36 @@ export function NavBar() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            className="p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all active:scale-[0.98]"
+            aria-label={mounted && resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {!mounted ? (
+              // Placeholder during SSR to avoid hydration mismatch
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="4" />
+              </svg>
+            ) : resolvedTheme === "dark" ? (
+              // Sun icon — click to switch to light
+              <svg className="w-5 h-5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="5" />
+                <line x1="12" y1="1" x2="12" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="23" />
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                <line x1="1" y1="12" x2="3" y2="12" />
+                <line x1="21" y1="12" x2="23" y2="12" />
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+              </svg>
+            ) : (
+              // Moon icon — click to switch to dark
+              <svg className="w-5 h-5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
           {isActive && (
             <div
               ref={popoverRef}
@@ -214,8 +250,8 @@ export function NavBar() {
               </button>
               {showTooltip && globalStatus?.tasks && globalStatus.tasks.length > 0 && (
                 <div className="absolute top-full right-0 pt-1.5 min-w-[280px] max-w-[400px] z-50 animate-fade-in">
-                <div className="rounded-lg bg-bg-secondary border border-white/10 shadow-xl overflow-hidden">
-                  <div className="px-3 py-2 border-b border-white/5 text-xs font-medium text-text-muted">
+                <div className="rounded-lg bg-bg-secondary border border-border-primary shadow-xl overflow-hidden">
+                  <div className="px-3 py-2 border-b border-border-primary text-xs font-medium text-text-muted">
                     {taskCount} AI task{taskCount !== 1 ? "s" : ""}
                   </div>
                   <div className="max-h-[300px] overflow-y-auto">

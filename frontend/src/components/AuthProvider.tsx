@@ -28,7 +28,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Loading state (first render before useEffect runs)
   if (authorized === null) {
-    return <div className="min-h-screen bg-[#0a0a0f]" />;
+    return <div className="min-h-screen bg-bg-primary" />;
   }
 
   if (!authorized) {

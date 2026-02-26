@@ -244,10 +244,10 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
           onClick={handleCopy}
           title="Copy to clipboard"
           aria-label={copied ? "Copied" : "Copy to clipboard"}
-          className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/10"
+          className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-bg-hover"
         >
           {copied ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent-green">
               <polyline points="20 6 9 17 4 12" />
             </svg>
           ) : (
@@ -258,7 +258,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
           )}
         </button>
       </div>
-      <pre className="rounded-lg bg-[#0f0f1a] border border-border-primary p-3 pr-10 sm:pr-20 overflow-x-auto text-[13px] leading-relaxed font-mono text-text-secondary">
+      <pre className="rounded-lg bg-bg-tertiary border border-border-primary p-3 pr-10 sm:pr-20 overflow-x-auto text-[13px] leading-relaxed font-mono text-text-secondary">
         {content}
       </pre>
     </div>
