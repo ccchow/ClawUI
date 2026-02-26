@@ -30,21 +30,44 @@ By upgrading your CLI experience with a **Blueprint DAG (Directed Acyclic Graph)
 
 ## 🚀 Core Features
 
-### 1. The Blueprint System (Task Orchestration)
+### 1. AI-Powered Planning — From Idea to DAG
 
-The Blueprint system brings structured task decomposition to Claude Code:
+ClawUI's planning phase turns a one-line goal into a fully structured, dependency-aware execution plan:
 
-* **AI-Powered Decomposition:** Describe a high-level goal, and ClawUI will automatically generate an ordered DAG (Directed Acyclic Graph) of tasks.
-* **Dependency-Aware Execution:** Nodes execute in strict order. State and context are handed off perfectly from upstream to downstream tasks.
-* **Node-Level Interception:** Run, retry, skip, or manually edit prompts for any specific node before executing it.
+```text
+Your Goal ──► Smart Task Creation ──► Dependency Selection ──► DAG Blueprint
+  "Add auth"     AI generates nodes      AI wires dependencies     Ready to execute
+                 with grounded specs      between related nodes     node by node
+```
 
-### 2. The Timeline Viewer (Session Observability)
+* **Smart Task Creation** — Describe a high-level goal (e.g., *"add OAuth login"*). Claude Code analyzes your actual codebase — reading `CLAUDE.md`, existing code, and project structure — then generates concrete, implementation-ready task nodes with file paths, function signatures, and acceptance criteria. Every node is *grounded* in the real code, not generic boilerplate.
+* **Smart Dependency Selection** — AI analyzes each node's scope to automatically wire dependency edges. A one-click sparkle button lets you re-run dependency analysis on any node at any time.
+* **Smart Task Decomposition** — Any node that's too large can be *split* into 2-3 sub-nodes via AI decomposition. The original node is replaced in the DAG; downstream edges are automatically rewired to the last sub-node. The result is a clean DAG Blueprint ready for sequential or parallel execution.
 
-A beautiful, Linear-style vertical timeline for every interaction:
+### 2. Autonomous Execution — Self-Healing Task Graph
 
-* **Rich I/O Parsing:** Collapsible views for Bash execution, File Edits, and Read operations.
-* **Interactive Continuation:** AI analyzes the terminal output and suggests Top 3 Next Actions to keep the momentum going.
-* **Session Management:** Star, tag, filter, and search through your entire Claude Code history.
+Once a Blueprint is approved, ClawUI executes each node in dependency order with full AI autonomy:
+
+```text
+Node Queued ──► Claude Code Session ──► Post-Completion Eval ──► Next Node
+                 Isolated context          AI inspects result
+                 Artifact handoff          ├─ COMPLETE → continue
+                                           ├─ NEEDS_REFINEMENT → insert follow-up node
+                                           └─ HAS_BLOCKER → insert blocker sibling
+```
+
+* **Grounded Execution Context** — Each node runs in its own Claude Code session. The prompt is built from the node's spec plus *handoff artifacts* (structured summaries) from all upstream dependencies — no raw output dumping, no context pollution.
+* **Post-Completion Evaluation** — After a node finishes, AI evaluates whether the work is truly complete. Three outcomes: **COMPLETE** (advance to next node), **NEEDS_REFINEMENT** (auto-insert a follow-up node between this node and its dependents), or **HAS_BLOCKER** (create a blocker sibling that must be resolved first). The task graph *mutates itself* at runtime.
+* **Smart Retry & Session Resume** — Failed nodes can be resumed in-place: ClawUI reopens the *same* Claude Code session with full prior context, sends a lightweight continuation prompt, and lets Claude pick up where it left off. No wasted tokens re-explaining the task.
+* **Run All** — One click queues every eligible node. Nodes execute in dependency order; if any node fails, downstream nodes are held and the graph pauses for human review.
+
+### 3. Session Timeline — Full Observability
+
+Every Claude Code interaction — whether triggered by a Blueprint node or run manually — is captured as a rich, interactive timeline:
+
+* **Structured I/O** — Collapsible views for Bash commands, file edits, reads, and MCP tool calls. Each tool invocation is paired with its result.
+* **Proactive Suggestions** — When a session pauses, AI analyzes the output and proposes the top 3 next actions as one-click buttons.
+* **Session Management** — Star, tag, search, and filter across your entire Claude Code history. Sessions are grouped by project and linked back to their Blueprint nodes.
 
 ---
 
