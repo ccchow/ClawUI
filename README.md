@@ -147,7 +147,7 @@ On first visit, the frontend extracts the token from the URL, stores it in `loca
 
 ## 🤝 Contributing
 
-**ClawUI is the rare project that can serve as its own development environment.** Point ClawUI at this repo as a Blueprint workspace, and you can build new features, fix bugs, and submit patches — all from a browser on your desktop or phone, orchestrated by Claude Code through the very UI you're improving.
+**ClawUI is a project that can serve as its own development environment.** Point ClawUI at this repo as a Blueprint workspace, and you can build new features, fix bugs, and submit patches — all from a browser on your desktop or phone, orchestrated by Claude Code through the very UI you're improving.
 
 This makes contributing uniquely accessible:
 
