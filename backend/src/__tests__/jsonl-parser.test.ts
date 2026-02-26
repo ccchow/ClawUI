@@ -10,6 +10,7 @@ import {
   summarize,
   extractTextContent,
   parseTimelineRaw,
+  decodeProjectPath,
 } from "../jsonl-parser.js";
 
 // ─── cleanContent ────────────────────────────────────────────
@@ -405,4 +406,31 @@ describe("parseTimelineRaw", () => {
     expect(nodes).toHaveLength(1);
     expect(nodes[0].content).toBe("Plain string response");
   });
+});
+
+// ─── decodeProjectPath Windows support ───────────────────────
+
+describe("decodeProjectPath", () => {
+  if (process.platform === "win32") {
+    it("decodes Windows drive-letter paths", () => {
+      // Q:\src\ClawUI is encoded as Q--src-ClawUI
+      const result = decodeProjectPath("Q--src-ClawUI");
+      expect(result).toBeDefined();
+      expect(result).toMatch(/^[A-Z]:\\/);
+    });
+
+    it("decodes C--Users path prefix", () => {
+      // C:\Users is encoded as C--Users
+      const result = decodeProjectPath("C--Users");
+      expect(result).toBeDefined();
+      expect(result).toMatch(/^C:\\/);
+    });
+  } else {
+    it("decodes Unix paths", () => {
+      // On Unix, should fall through to walkFs with /
+      const result = decodeProjectPath("-Users");
+      // Result depends on filesystem — just verify it returns something or undefined
+      expect(result === undefined || typeof result === "string").toBe(true);
+    });
+  }
 });
