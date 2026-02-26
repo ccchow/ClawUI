@@ -2,8 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { CLAWUI_DB_DIR } from "./config.js";
 
-const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const CLAWUI_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR);
+const CLAWUI_DIR = CLAWUI_DB_DIR;
 const STATE_PATH = join(CLAWUI_DIR, "app-state.json");
 
 export interface RecentSession {

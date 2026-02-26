@@ -8,7 +8,7 @@ import { createLogger } from "./logger.js";
 const log = createLogger("auth");
 
 const DEV_MODE = CLAWUI_DEV;
-const tokenDir = join(process.cwd(), CLAWUI_DB_DIR);
+const tokenDir = CLAWUI_DB_DIR;
 const tokenPath = join(tokenDir, "auth-token");
 
 function resolveToken(): string {

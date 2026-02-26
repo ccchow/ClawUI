@@ -10,9 +10,7 @@ import { createLogger } from "./logger.js";
 const log = createLogger("db");
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
-// Resolve project root (one level up from backend/)
-const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const DB_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR);
+const DB_DIR = CLAWUI_DB_DIR;
 const DB_PATH = join(DB_DIR, "index.db");
 
 let db: Database.Database;

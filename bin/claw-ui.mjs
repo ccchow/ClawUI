@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 
 // ── Resolve package root ──
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,6 +15,11 @@ const FRONTEND_DIR = join(ROOT, "frontend");
 
 const BACKEND_PORT = parseInt(process.env.PORT || "3001", 10);
 const FRONTEND_PORT = parseInt(process.env.FRONTEND_PORT || "3000", 10);
+
+// ── Data directory ──
+// Default to ~/.clawui for global installs (the launcher is only used for
+// `claw-ui` CLI invocations, not `npm run dev`).
+const CLAWUI_DB_DIR = process.env.CLAWUI_DB_DIR || join(homedir(), ".clawui");
 
 // ── Pre-flight checks ──
 function checkBuilds() {
@@ -52,9 +58,8 @@ async function checkPorts() {
 }
 
 // ── Wait for auth token file ──
-// Backend writes token relative to its own cwd (BACKEND_DIR)
 function waitForAuthToken(timeout = 30000) {
-  const tokenPath = join(BACKEND_DIR, ".clawui", "auth-token");
+  const tokenPath = join(CLAWUI_DB_DIR, "auth-token");
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
@@ -81,7 +86,7 @@ async function main() {
   const backend = spawn("node", ["dist/index.js"], {
     cwd: BACKEND_DIR,
     stdio: "inherit",
-    env: { ...process.env, PORT: String(BACKEND_PORT) },
+    env: { ...process.env, PORT: String(BACKEND_PORT), CLAWUI_DB_DIR },
   });
 
   // Start frontend
@@ -102,7 +107,7 @@ async function main() {
     console.log("");
   } else {
     console.error("⚠️  Auth token not found after 30s. Check backend logs.");
-    console.error(`   Expected token at: ${join(BACKEND_DIR, ".clawui", "auth-token")}`);
+    console.error(`   Expected token at: ${join(CLAWUI_DB_DIR, "auth-token")}`);
   }
 
   // Clean shutdown
