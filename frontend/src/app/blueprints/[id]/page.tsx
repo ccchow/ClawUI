@@ -698,6 +698,7 @@ export default function BlueprintDetailPage() {
               <button
                 onClick={handleApprove}
                 disabled={approving}
+                title="Mark this blueprint as approved and ready for execution"
                 className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {approving ? "Approving..." : "Approve Plan"}
@@ -723,6 +724,7 @@ export default function BlueprintDetailPage() {
               <button
                 onClick={() => handleGenerate()}
                 disabled={generating}
+                title={generating ? "AI is generating task nodes..." : "Use AI to decompose the blueprint into executable task nodes"}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap ${
                   blueprint.nodes.length === 0
                     ? "bg-accent-purple text-white hover:bg-accent-purple/90"
@@ -760,7 +762,7 @@ export default function BlueprintDetailPage() {
                 <button
                   onClick={handleReevaluateAll}
                   disabled={isRunning || reevaluating || generateCooldown}
-                  title={generateCooldown ? "Please wait a moment after generating nodes" : undefined}
+                  title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
                   className="px-4 py-2 rounded-lg border border-accent-blue text-accent-blue text-sm font-medium hover:bg-accent-blue/10 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
                 >
                   {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
@@ -783,6 +785,7 @@ export default function BlueprintDetailPage() {
               <button
                 onClick={handleRunAll}
                 disabled={isRunning}
+                title={isRunning ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using Claude Code"}
                 className="px-4 py-2 rounded-lg bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
               >
                 {isRunning ? (

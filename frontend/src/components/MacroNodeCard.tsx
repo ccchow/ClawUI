@@ -359,8 +359,8 @@ export function MacroNodeCard({
               <button
                 onClick={handleReevaluate}
                 disabled={reevaluating || reevaluateQueued}
-                title={reevaluateQueued ? "Re-evaluation queued, waiting..." : "Re-evaluate node with AI"}
-                aria-label="Reevaluate node"
+                title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : "AI reads your codebase and updates this node's title, description, and status"}
+                aria-label={reevaluateQueued ? "Re-evaluation queued" : reevaluating ? "Re-evaluating node" : "Re-evaluate node with AI"}
                 className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 hidden sm:block"
               >
                 {reevaluating || reevaluateQueued ? (
@@ -466,7 +466,8 @@ export function MacroNodeCard({
                 <button
                   onClick={handleRun}
                   disabled={running}
-                  aria-label="Run node"
+                  aria-label={running ? "AI is running this node" : "Run node"}
+                  title={running ? "AI is executing this node in a Claude Code session..." : "Execute this node using Claude Code"}
                   className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                 >
                   {running ? (
@@ -549,6 +550,7 @@ export function MacroNodeCard({
               <button
                 onClick={handleEnrich}
                 disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
+                title={enriching ? "AI is enriching the title and description..." : "AI enhances the title and description with implementation details from your codebase"}
                 className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
@@ -639,8 +641,8 @@ export function MacroNodeCard({
                               }}
                               disabled={resumingExecId === exec.id || running}
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-green-600/15 text-green-500 hover:bg-green-600/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                              title="Resume this session"
-                              aria-label="Resume failed session"
+                              title={resumingExecId === exec.id ? "AI is resuming the failed session..." : "Resume this failed session — AI continues with full context from the previous attempt"}
+                              aria-label={resumingExecId === exec.id ? "Resuming session" : "Resume failed session"}
                             >
                               {resumingExecId === exec.id ? (
                                 <AISparkle size="xs" />

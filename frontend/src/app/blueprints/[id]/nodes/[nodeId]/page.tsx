@@ -620,6 +620,7 @@ export default function NodeDetailPage() {
                   <button
                     onClick={handleEnrich}
                     disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
+                    title={enriching ? "AI is enriching the title and description..." : "AI enhances the title and description with implementation details from your codebase"}
                     className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
@@ -728,6 +729,7 @@ export default function NodeDetailPage() {
             <button
               onClick={handleRun}
               disabled={isRunning}
+              title={isRunning ? "AI is executing this node in a Claude Code session..." : "Execute this node using Claude Code"}
               className="px-4 py-2.5 rounded-xl bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {isRunning ? (
@@ -750,6 +752,7 @@ export default function NodeDetailPage() {
                   setWarning(err instanceof Error ? err.message : String(err));
                 }
               }}
+              title="Manually mark this node as completed without running it"
               className="px-4 py-2.5 rounded-xl bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
@@ -785,6 +788,7 @@ export default function NodeDetailPage() {
             <button
               onClick={() => setShowSplitConfirm(true)}
               disabled={splitting}
+              title={splitting ? "AI is decomposing this node into sub-tasks..." : "AI splits this node into 2–3 smaller sub-tasks with dependency wiring"}
               className="px-4 py-2.5 rounded-xl border border-accent-purple/30 text-accent-purple text-sm font-medium hover:bg-accent-purple/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {splitting ? (
@@ -807,6 +811,7 @@ export default function NodeDetailPage() {
             <button
               onClick={handleRun}
               disabled={isRunning}
+              title={isRunning ? "AI is retrying this node..." : "Start a fresh execution — for resuming the previous session, use the play button in Execution History below"}
               className="px-4 py-2.5 rounded-xl border border-accent-amber/50 text-accent-amber text-sm font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
@@ -832,6 +837,7 @@ export default function NodeDetailPage() {
             <button
               onClick={handleReevaluate}
               disabled={reevaluating || reevaluateQueued}
+              title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : "AI reads your codebase and updates this node's title, description, and status"}
               className="px-4 py-2.5 rounded-xl border border-accent-amber/30 text-accent-amber text-sm font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               {reevaluating || reevaluateQueued ? (
@@ -964,8 +970,8 @@ export default function NodeDetailPage() {
                     }}
                     disabled={smartDepsLoading}
                     className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-accent-purple/20 text-accent-purple text-[10px] font-medium hover:bg-accent-purple/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="AI-pick dependencies"
-                    aria-label="AI-pick dependencies"
+                    title={smartDepsLoading ? "AI is analyzing nodes to pick dependencies..." : "AI analyzes node titles and descriptions to auto-select 0–3 logical dependencies"}
+                    aria-label={smartDepsLoading ? "AI picking dependencies" : "AI-pick dependencies"}
                   >
                     {smartDepsLoading ? <><AISparkle size="xs" /> Picking…</> : "✨ Auto"}
                   </button>
@@ -1204,7 +1210,7 @@ export default function NodeDetailPage() {
                             }}
                             disabled={resumingExecId === exec.id || isRunning}
                             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-all active:scale-[0.97] text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                            title="Resume this session"
+                            title={resumingExecId === exec.id ? "AI is resuming the failed session..." : "Resume this failed session — AI continues with full context from the previous attempt"}
                           >
                             {resumingExecId === exec.id ? (
                               <AISparkle size="xs" />
