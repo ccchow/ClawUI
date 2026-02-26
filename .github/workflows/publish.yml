@@ -36,7 +36,5 @@ jobs:
           test -f backend/dist/index.js || (echo "Backend build missing" && exit 1)
           test -d frontend/.next || (echo "Frontend build missing" && exit 1)
 
-      - name: Publish to npm
+      - name: Publish to npm (Trusted Publishing via OIDC)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
