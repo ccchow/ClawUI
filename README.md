@@ -237,6 +237,14 @@ ClawUI can serve as its own development environment — point a Blueprint at thi
 3. **Describe what you want to build** — ClawUI decomposes and executes it node by node
 4. **Review & PR** — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
+## ⚖️ Disclaimer & Legal
+
+ClawUI is an independent, unofficial community open-source project.
+
+> It is **NOT** affiliated with, endorsed by, or associated with Anthropic PBC. "Claude" and "Claude Code" are trademarks of Anthropic.
+
+ClawUI acts strictly as a local GUI orchestrator and does not distribute, modify, or bundle the proprietary claude-code CLI tool. Users must install and authenticate Claude Code independently, adhering to Anthropic's [Consumer Terms of Service](https://www.anthropic.com/legal/consumer-terms) and [Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms). ClawUI is designed exclusively for local, self-hosted usage by the authenticated individual, and must not be used to multiplex or proxy third-party traffic through a single Claude subscription.
+
 ## 📄 License
 
 MIT License (c) 2025-2026. See [LICENSE](LICENSE) for details.
