@@ -1,11 +1,12 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { writeFileSync, unlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getBlueprint, getArtifactsForNode } from "./plan-db.js";
-import { CLAUDE_PATH, EXPECT_PATH, PORT } from "./config.js";
+import { CLAUDE_PATH, EXPECT_PATH, CLAUDE_CLI_JS, PORT } from "./config.js";
 import { LOCAL_AUTH_TOKEN } from "./auth.js";
+import { cleanEnvForClaude, stripAnsi } from "./cli-utils.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("plan-generator");
@@ -13,21 +14,50 @@ const log = createLogger("plan-generator");
 const INTERACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 min
 
 /**
- * Build a clean environment for spawning Claude CLI subprocesses.
- * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
- * error when the backend itself was started from within a Claude Code session.
- */
-function cleanEnvForClaude(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
-  return env;
-}
-
-/**
  * Run Claude in text output mode (no tool use). Used for simple tasks that
  * only need text output (e.g., enrich-node, artifact generation).
  */
 export function runClaude(prompt: string, cwd?: string): Promise<string> {
+  if (process.platform === "win32") {
+    return runClaudeWindows(prompt, cwd);
+  }
+  return runClaudeUnix(prompt, cwd);
+}
+
+function runClaudeWindows(prompt: string, cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = ["--dangerously-skip-permissions", "--output-format", "text", "--max-turns", "200", "-p", prompt];
+    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
+    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
+
+    const child = spawn(cmd, spawnArgs, {
+      timeout: 200_000,
+      cwd: cwd || process.cwd(),
+      env: cleanEnvForClaude(),
+      shell: !CLAUDE_CLI_JS,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdin.end();
+
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", () => { /* discard */ });
+
+    child.on("error", (err) => reject(new Error(`Claude CLI error: ${err.message}`)));
+    child.on("close", (code) => {
+      const output = stripAnsi(stdout).trim();
+      if (output.length === 0) {
+        reject(new Error(`Claude returned empty output. Exit code: ${code}`));
+        return;
+      }
+      log.debug(`Claude output length: ${output.length}, first 200 chars: ${output.slice(0, 200).replace(/\n/g, "\\n")}`);
+      resolve(output);
+    });
+  });
+}
+
+function runClaudeUnix(prompt: string, cwd?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     // Claude Code requires TTY even in -p mode, so we must use expect.
     // log_user 0 suppresses TTY echo; we capture output via a temp output file.
@@ -85,11 +115,7 @@ close $of
       try { unlinkSync(expectFile); } catch { /* */ }
 
       // Strip ANSI escapes
-      output = output
-        .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
-        .replace(/\x1B\][^\x07]*\x07/g, "")
-        .replace(/\r/g, "")
-        .trim();
+      output = stripAnsi(output).trim();
 
       if (output.length === 0) {
         reject(new Error(`Claude returned empty output. expect error: ${error?.message?.slice(0, 300) ?? "none"}`));
@@ -106,6 +132,43 @@ close $of
  * Claude directly calls ClawUI API endpoints.
  */
 export function runClaudeInteractiveGen(prompt: string, cwd?: string): Promise<string> {
+  if (process.platform === "win32") {
+    return runClaudeInteractiveGenWindows(prompt, cwd);
+  }
+  return runClaudeInteractiveGenUnix(prompt, cwd);
+}
+
+function runClaudeInteractiveGenWindows(prompt: string, cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args = ["--dangerously-skip-permissions", "--max-turns", "200", "-p", prompt];
+    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
+    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
+
+    const child = spawn(cmd, spawnArgs, {
+      timeout: INTERACTIVE_TIMEOUT,
+      cwd: cwd || process.cwd(),
+      env: cleanEnvForClaude(),
+      shell: !CLAUDE_CLI_JS,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdin.end();
+
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+
+    child.on("error", (err) => reject(new Error(`Claude interactive (generator) failed: ${err.message}`)));
+    child.on("close", (code) => {
+      if (code !== 0 && !stdout) {
+        reject(new Error(`Claude interactive (generator) failed with exit code ${code}`));
+        return;
+      }
+      resolve(stdout || "");
+    });
+  });
+}
+
+function runClaudeInteractiveGenUnix(prompt: string, cwd?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const tmpFile = join(tmpdir(), `clawui-gen-prompt-${randomUUID()}.txt`);
     writeFileSync(tmpFile, prompt, "utf-8");
