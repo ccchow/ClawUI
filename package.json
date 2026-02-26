@@ -1,0 +1,53 @@
+{
+  "name": "@clawui/cli",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.2.0",
+  "license": "MIT",
+  "bin": {
+    "claw-ui": "./bin/claw-ui.mjs"
+  },
+  "description": "Visual timeline UI for Claude Code sessions with blueprint-based task orchestration",
+  "author": "ccchow",
+  "homepage": "https://github.com/ccchow/ClawUI#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ccchow/ClawUI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ccchow/ClawUI/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "agent",
+    "timeline",
+    "orchestration"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
+    "dev:backend": "npm run dev --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "build:backend": "npm run build --workspace=backend",
+    "build:frontend": "npm run build --workspace=frontend",
+    "start:backend": "npm run start --workspace=backend",
+    "lint": "npm run lint --workspace=backend",
+    "postinstall": "npm run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "eslint": "^10.0.1",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.56.0"
+  }
+}

@@ -1,0 +1,13 @@
+graph LR
+    A["⏳ Node Queued"]:::queued --> B["💻 Claude Code Session<br>Isolated context<br>Artifact handoff"]:::session
+    B --> C{"🔍 Post-Completion<br>Eval"}:::eval
+    C -->|"✅ COMPLETE"| D["▶ Next Node"]:::complete
+    C -->|"🔧 NEEDS_REFINEMENT"| E["➕ Insert follow-up<br>node"]:::refine
+    C -->|"🚫 HAS_BLOCKER"| F["⚠ Insert blocker<br>sibling"]:::blocker
+
+    classDef queued fill:#1e1b4b,stroke:#818cf8,color:#e0e7ff,stroke-width:2px
+    classDef session fill:#172554,stroke:#60a5fa,color:#dbeafe,stroke-width:2px
+    classDef eval fill:#422006,stroke:#f59e0b,color:#fef3c7,stroke-width:2px
+    classDef complete fill:#052e16,stroke:#4ade80,color:#dcfce7,stroke-width:2px
+    classDef refine fill:#1e1b4b,stroke:#a78bfa,color:#ede9fe,stroke-width:2px
+    classDef blocker fill:#450a0a,stroke:#f87171,color:#fee2e2,stroke-width:2px

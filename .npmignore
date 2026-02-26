@@ -1,0 +1,38 @@
+# Dev/CI
+.github/
+scripts/
+docs/
+.clawui/
+.clawui-dev/
+.worktrees/
+
+# Tests
+**/__tests__/
+**/*.test.*
+**/*.test.tsx
+**/test-setup.ts
+**/vitest.config.ts
+coverage/
+
+# Build artifacts (rebuilt by postinstall)
+backend/dist/
+frontend/.next/
+**/node_modules/
+
+# IDE / tooling
+.idea/
+.vscode/
+.firecrawl/
+.playwright-mcp/
+.serena/
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+*.log
+
+# Config files not needed at runtime
+eslint.config.mjs
+CLAUDE.md
+CONTRIBUTING.md

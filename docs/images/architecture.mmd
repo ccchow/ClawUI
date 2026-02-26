@@ -1,0 +1,24 @@
+graph TD
+    L1["📄 ~/.claude/projects/**/*.jsonl<br><b>Layer 1: Raw Source</b><br>Read-only single source of truth"]:::layer1
+
+    L1 --> L2
+
+    subgraph clawui [".clawui/ Directory"]
+        L2["🗃 index.db — SQLite<br><b>Layer 2: Index/Cache</b><br>Incremental sync by mtime+size"]:::layer2
+        L3["⭐ enrichments.json<br><b>Layer 3: User Meta</b><br>Stars, tags, bookmarks"]:::layer3
+        L4["⚙ app-state.json<br><b>Layer 4: UI Preferences</b>"]:::layer4
+    end
+
+    L2 --> BE
+    L3 --> BE
+    L4 --> BE
+
+    BE["🖥 Backend — Express :3001<br>REST API & Process Manager"]:::backend
+    BE --> FE["🌐 Frontend — Next.js :3000<br>DAG UI & Timeline Controller"]:::frontend
+
+    classDef layer1 fill:#422006,stroke:#f59e0b,color:#fef3c7,stroke-width:2px
+    classDef layer2 fill:#172554,stroke:#60a5fa,color:#dbeafe,stroke-width:2px
+    classDef layer3 fill:#1e1b4b,stroke:#a78bfa,color:#ede9fe,stroke-width:2px
+    classDef layer4 fill:#1a2e05,stroke:#84cc16,color:#ecfccb,stroke-width:2px
+    classDef backend fill:#052e16,stroke:#4ade80,color:#dcfce7,stroke-width:2px
+    classDef frontend fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe,stroke-width:2px

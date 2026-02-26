@@ -1,0 +1,33 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+.env
+.DS_Store
+coverage/
+.turbo/
+.next/
+.worktrees/
+
+# Tool artifacts
+.firecrawl/
+.playwright-mcp/
+.serena/
+
+# ClawUI runtime data (local to each installation)
+.clawui/
+
+# Screenshots
+dashboard-*.png
+.clawui-dev/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local environment overrides
+.env.local
+.env.*.local
