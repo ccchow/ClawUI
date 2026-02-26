@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/ClawUI.png" alt="ClawUI Logo" width="480"><br>
+  <img src="docs/images/ClawUI.png" alt="ClawUI Logo" width="240"><br>
   <strong>ClawUI</strong><br>
   A Claude Code Orchestrator with User/Agent Interface<br><br>
   <img src="https://github.com/ccchow/ClawUI/actions/workflows/ci.yml/badge.svg" alt="CI">
