@@ -147,7 +147,19 @@ On first visit, the frontend extracts the token from the URL, stores it in `loca
 
 ## 🤝 Contributing
 
-We are building the omnichannel orchestration engine for agentic workflows. Contributions are highly welcome! Please check out our [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on architecture, code style, and setting up the dev environment.
+**ClawUI is the rare project that can serve as its own development environment.** Point ClawUI at this repo as a Blueprint workspace, and you can build new features, fix bugs, and submit patches — all from a browser on your desktop or phone, orchestrated by Claude Code through the very UI you're improving.
+
+This makes contributing uniquely accessible:
+
+1. **Fork & clone** the repo, run `npm install && npm run dev`
+2. **Create a Blueprint** in ClawUI with your repo path as the workspace
+3. **Describe what you want to build** — ClawUI decomposes it into executable nodes
+4. **Watch Claude Code implement it**, node by node, with full context isolation
+5. **Review the results** in the Timeline viewer, then open a PR
+
+No deep familiarity with the codebase required to get started — the Blueprint system gives Claude Code the structure it needs to navigate the architecture on its own.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for code style, dev/stable environment setup, and PR guidelines.
 
 ## 📄 License
 
