@@ -12,6 +12,8 @@ export type ArtifactType = "handoff_summary" | "file_diff" | "test_report" | "cu
 export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
 export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
 export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
+export type ReportedStatus = "done" | "failed" | "blocked" | null;
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate";
 
 // Layer 1: Blueprint (was "Plan")
 export interface Blueprint {
@@ -20,6 +22,7 @@ export interface Blueprint {
   description: string;
   projectCwd?: string;
   status: BlueprintStatus;
+  archivedAt?: string;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -73,6 +76,22 @@ export interface NodeExecution {
   blockerInfo?: string;
   taskSummary?: string;
   failureReason?: FailureReason;
+  reportedStatus?: ReportedStatus;
+  reportedReason?: string;
+  compactCount?: number;
+  peakTokens?: number;
+  contextPressure?: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+// Related session: tracks sessions from enrich, reevaluate, split, evaluate operations
+export interface RelatedSession {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  sessionId: string;
+  type: RelatedSessionType;
   startedAt: string;
   completedAt?: string;
 }
@@ -169,11 +188,23 @@ export function initPlanTables(): void {
         completed_at         TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS node_related_sessions (
+        id            TEXT PRIMARY KEY,
+        node_id       TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        session_id    TEXT NOT NULL,
+        type          TEXT NOT NULL,
+        started_at    TEXT NOT NULL,
+        completed_at  TEXT
+      );
+
       CREATE INDEX IF NOT EXISTS idx_macro_nodes_blueprint ON macro_nodes(blueprint_id, "order");
       CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source_node_id);
       CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_node_id);
       CREATE INDEX IF NOT EXISTS idx_executions_node ON node_executions(node_id);
       CREATE INDEX IF NOT EXISTS idx_executions_session ON node_executions(session_id);
+      CREATE INDEX IF NOT EXISTS idx_related_sessions_node ON node_related_sessions(node_id);
+      CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
     `);
   }
 
@@ -193,6 +224,47 @@ export function initPlanTables(): void {
   if (!cols.some((c) => c.name === "failure_reason")) {
     db.exec("ALTER TABLE node_executions ADD COLUMN failure_reason TEXT");
   }
+  // Incremental migration: add reported_status and reported_reason columns for explicit status reporting
+  if (!cols.some((c) => c.name === "reported_status")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN reported_status TEXT");
+  }
+  if (!cols.some((c) => c.name === "reported_reason")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN reported_reason TEXT");
+  }
+  // Incremental migration: add context health columns for context-full detection
+  if (!cols.some((c) => c.name === "compact_count")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN compact_count INTEGER");
+  }
+  if (!cols.some((c) => c.name === "peak_tokens")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN peak_tokens INTEGER");
+  }
+  if (!cols.some((c) => c.name === "context_pressure")) {
+    db.exec("ALTER TABLE node_executions ADD COLUMN context_pressure TEXT");
+  }
+
+  // Incremental migration: create node_related_sessions table if not exists
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='node_related_sessions'").all();
+  if (tables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS node_related_sessions (
+        id            TEXT PRIMARY KEY,
+        node_id       TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        session_id    TEXT NOT NULL,
+        type          TEXT NOT NULL,
+        started_at    TEXT NOT NULL,
+        completed_at  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_related_sessions_node ON node_related_sessions(node_id);
+      CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
+    `);
+  }
+
+  // Incremental migration: add archived_at column to blueprints
+  const bpCols = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols.some((c) => c.name === "archived_at")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN archived_at TEXT");
+  }
 
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
@@ -210,6 +282,7 @@ interface BlueprintRow {
   description: string | null;
   status: string;
   project_cwd: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -256,6 +329,11 @@ interface ExecutionRow {
   blocker_info: string | null;
   task_summary: string | null;
   failure_reason: string | null;
+  reported_status: string | null;
+  reported_reason: string | null;
+  compact_count: number | null;
+  peak_tokens: number | null;
+  context_pressure: string | null;
   started_at: string;
   completed_at: string | null;
 }
@@ -290,6 +368,11 @@ function rowToExecution(row: ExecutionRow): NodeExecution {
     ...(row.blocker_info ? { blockerInfo: row.blocker_info } : {}),
     ...(row.task_summary ? { taskSummary: row.task_summary } : {}),
     ...(row.failure_reason ? { failureReason: row.failure_reason as FailureReason } : {}),
+    ...(row.reported_status ? { reportedStatus: row.reported_status as ReportedStatus } : {}),
+    ...(row.reported_reason ? { reportedReason: row.reported_reason } : {}),
+    ...(row.compact_count != null ? { compactCount: row.compact_count } : {}),
+    ...(row.peak_tokens != null ? { peakTokens: row.peak_tokens } : {}),
+    ...(row.context_pressure ? { contextPressure: row.context_pressure } : {}),
     startedAt: row.started_at,
     ...(row.completed_at ? { completedAt: row.completed_at } : {}),
   };
@@ -337,6 +420,7 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
     description: row.description ?? "",
     status: row.status as BlueprintStatus,
     ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
+    ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
     nodes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -347,9 +431,29 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
 
 function getArtifactsForNodeInternal(nodeId: string): { input: Artifact[]; output: Artifact[] } {
   const db = getDb();
-  const inputRows = db
+
+  // Input artifacts: explicitly targeted at this node
+  const targetedRows = db
     .prepare("SELECT * FROM artifacts WHERE target_node_id = ? ORDER BY created_at ASC")
     .all(nodeId) as ArtifactRow[];
+
+  // Also include output artifacts from dependency nodes that have no specific target
+  // (created when the source had no dependents at completion time)
+  const nodeRow = db.prepare("SELECT dependencies FROM macro_nodes WHERE id = ?").get(nodeId) as { dependencies: string | null } | undefined;
+  const depIds: string[] = nodeRow?.dependencies ? JSON.parse(nodeRow.dependencies) : [];
+
+  const seenSources = new Set(targetedRows.map(r => r.source_node_id));
+  let untargetedFromDeps: ArtifactRow[] = [];
+  if (depIds.length > 0) {
+    const placeholders = depIds.map(() => "?").join(",");
+    untargetedFromDeps = (db
+      .prepare(`SELECT * FROM artifacts WHERE source_node_id IN (${placeholders}) AND target_node_id IS NULL AND type = 'handoff_summary' ORDER BY created_at ASC`)
+      .all(...depIds) as ArtifactRow[])
+      .filter(r => !seenSources.has(r.source_node_id));
+  }
+
+  const inputRows = [...targetedRows, ...untargetedFromDeps];
+
   const outputRows = db
     .prepare("SELECT * FROM artifacts WHERE source_node_id = ? ORDER BY created_at ASC")
     .all(nodeId) as ArtifactRow[];
@@ -415,7 +519,7 @@ export function getBlueprint(id: string): Blueprint | null {
   return rowToBlueprint(row, getNodesForBlueprint(id));
 }
 
-export function listBlueprints(filters?: { status?: string; projectCwd?: string }): Blueprint[] {
+export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean }): Blueprint[] {
   const db = getDb();
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -428,6 +532,10 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string 
     conditions.push("project_cwd = ?");
     params.push(filters.projectCwd);
   }
+  // By default, exclude archived blueprints unless explicitly requested
+  if (!filters?.includeArchived) {
+    conditions.push("archived_at IS NULL");
+  }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db
@@ -435,6 +543,34 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string 
     .all(...params) as BlueprintRow[];
 
   return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id)));
+}
+
+export function listArchivedBlueprints(): Blueprint[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM blueprints WHERE archived_at IS NOT NULL ORDER BY archived_at DESC")
+    .all() as BlueprintRow[];
+  return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id)));
+}
+
+export function archiveBlueprint(id: string): Blueprint | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  db.prepare("UPDATE blueprints SET archived_at = ?, updated_at = ? WHERE id = ?").run(now, now, id);
+  return getBlueprint(id);
+}
+
+export function unarchiveBlueprint(id: string): Blueprint | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  db.prepare("UPDATE blueprints SET archived_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+  return getBlueprint(id);
 }
 
 export function updateBlueprint(
@@ -495,6 +631,11 @@ export function createMacroNode(
   const id = randomUUID();
   const now = new Date().toISOString();
   const depsJson = data.dependencies?.length ? JSON.stringify(data.dependencies) : null;
+
+  // Shift existing nodes at or above this order to make room
+  db.prepare(
+    'UPDATE macro_nodes SET "order" = "order" + 1, updated_at = ? WHERE blueprint_id = ? AND "order" >= ?'
+  ).run(now, blueprintId, data.order);
 
   db.prepare(`
     INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, created_at, updated_at)
@@ -580,6 +721,44 @@ export function updateMacroNode(
 
   // Touch parent blueprint
   db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+
+  // When dependencies change, create input artifact rows for newly-added deps that already have output artifacts
+  if (patch.dependencies !== undefined) {
+    const oldDeps: string[] = JSON.parse(existing.dependencies || "[]");
+    const newDeps = patch.dependencies as string[];
+    const addedDeps = newDeps.filter(d => !oldDeps.includes(d));
+
+    for (const depId of addedDeps) {
+      // Find output artifacts from the dependency node that don't already target this node
+      const existingTargeted = db
+        .prepare("SELECT id FROM artifacts WHERE source_node_id = ? AND target_node_id = ?")
+        .all(depId, nodeId) as { id: string }[];
+
+      if (existingTargeted.length === 0) {
+        // Get any output artifacts from the dep node (targeted or untargeted)
+        const outputArts = db
+          .prepare("SELECT * FROM artifacts WHERE source_node_id = ? AND type = 'handoff_summary' ORDER BY created_at DESC LIMIT 1")
+          .get(depId) as ArtifactRow | undefined;
+
+        if (outputArts) {
+          // Create a new artifact row targeting this node
+          const artId = randomUUID();
+          db.prepare(`
+            INSERT INTO artifacts (id, blueprint_id, source_node_id, target_node_id, type, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(artId, blueprintId, depId, nodeId, outputArts.type, outputArts.content, now);
+          log.debug(`Created input artifact for node ${nodeId} from late-added dep ${depId}`);
+        }
+      }
+    }
+
+    // Remove artifact rows for removed dependencies
+    const removedDeps = oldDeps.filter(d => !newDeps.includes(d));
+    for (const depId of removedDeps) {
+      db.prepare("DELETE FROM artifacts WHERE source_node_id = ? AND target_node_id = ?").run(depId, nodeId);
+      log.debug(`Removed input artifacts for node ${nodeId} from removed dep ${depId}`);
+    }
+  }
 
   // Return fully-loaded node
   const row = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get(nodeId) as MacroNodeRow;
@@ -697,7 +876,7 @@ export function createExecution(
 
 export function updateExecution(
   id: string,
-  patch: Partial<Pick<NodeExecution, "status" | "outputSummary" | "contextTokensUsed" | "completedAt" | "sessionId" | "cliPid" | "failureReason">>,
+  patch: Partial<Pick<NodeExecution, "status" | "outputSummary" | "contextTokensUsed" | "completedAt" | "sessionId" | "cliPid" | "failureReason" | "compactCount" | "peakTokens" | "contextPressure">>,
 ): NodeExecution | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM node_executions WHERE id = ?").get(id) as ExecutionRow | undefined;
@@ -713,6 +892,9 @@ export function updateExecution(
   if (patch.sessionId !== undefined) { sets.push("session_id = ?"); params.push(patch.sessionId); }
   if (patch.cliPid !== undefined) { sets.push("cli_pid = ?"); params.push(patch.cliPid); }
   if (patch.failureReason !== undefined) { sets.push("failure_reason = ?"); params.push(patch.failureReason); }
+  if (patch.compactCount !== undefined) { sets.push("compact_count = ?"); params.push(patch.compactCount); }
+  if (patch.peakTokens !== undefined) { sets.push("peak_tokens = ?"); params.push(patch.peakTokens); }
+  if (patch.contextPressure !== undefined) { sets.push("context_pressure = ?"); params.push(patch.contextPressure); }
 
   if (sets.length === 0) return rowToExecution(existing);
 
@@ -731,6 +913,12 @@ export function setExecutionBlocker(executionId: string, blockerJson: string): v
 export function setExecutionTaskSummary(executionId: string, summary: string): void {
   const db = getDb();
   db.prepare("UPDATE node_executions SET task_summary = ? WHERE id = ?").run(summary, executionId);
+}
+
+export function setExecutionReportedStatus(executionId: string, status: ReportedStatus, reason?: string): void {
+  const db = getDb();
+  db.prepare("UPDATE node_executions SET reported_status = ?, reported_reason = ? WHERE id = ?")
+    .run(status, reason ?? null, executionId);
 }
 
 export function getExecution(executionId: string): NodeExecution | null {
@@ -968,4 +1156,78 @@ export function getOrphanedQueuedNodes(): { id: string; blueprintId: string }[] 
     .prepare("SELECT id, blueprint_id FROM macro_nodes WHERE status = 'queued'")
     .all() as { id: string; blueprint_id: string }[];
   return rows.map((r) => ({ id: r.id, blueprintId: r.blueprint_id }));
+}
+
+// ─── Related Sessions CRUD ──────────────────────────────────
+
+interface RelatedSessionRow {
+  id: string;
+  node_id: string;
+  blueprint_id: string;
+  session_id: string;
+  type: string;
+  started_at: string;
+  completed_at: string | null;
+}
+
+function rowToRelatedSession(row: RelatedSessionRow): RelatedSession {
+  return {
+    id: row.id,
+    nodeId: row.node_id,
+    blueprintId: row.blueprint_id,
+    sessionId: row.session_id,
+    type: row.type as RelatedSessionType,
+    startedAt: row.started_at,
+    ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+  };
+}
+
+export function createRelatedSession(
+  nodeId: string,
+  blueprintId: string,
+  sessionId: string,
+  type: RelatedSessionType,
+  startedAt?: string,
+  completedAt?: string,
+): RelatedSession {
+  const db = getDb();
+  const id = randomUUID();
+  const now = startedAt ?? new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO node_related_sessions (id, node_id, blueprint_id, session_id, type, started_at, completed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, nodeId, blueprintId, sessionId, type, now, completedAt ?? null);
+
+  return {
+    id,
+    nodeId,
+    blueprintId,
+    sessionId,
+    type,
+    startedAt: now,
+    ...(completedAt ? { completedAt } : {}),
+  };
+}
+
+export function completeRelatedSession(id: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.prepare("UPDATE node_related_sessions SET completed_at = ? WHERE id = ?").run(now, id);
+}
+
+export function getRelatedSessionsForNode(nodeId: string): RelatedSession[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM node_related_sessions WHERE node_id = ? ORDER BY started_at DESC")
+    .all(nodeId) as RelatedSessionRow[];
+  return rows.map(rowToRelatedSession);
+}
+
+export function getRelatedSessionBySession(sessionId: string): RelatedSession | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM node_related_sessions WHERE session_id = ?")
+    .get(sessionId) as RelatedSessionRow | undefined;
+  return row ? rowToRelatedSession(row) : null;
 }

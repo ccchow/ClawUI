@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
 import { runPrompt } from "./cli-runner.js";
-import { getProjects, getSessions, getTimeline, syncAll, syncSession } from "./db.js";
+import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
 import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
@@ -91,6 +91,21 @@ router.get("/api/sessions/:id/timeline", (req, res) => {
       return;
     }
     res.json(nodes);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /api/sessions/:id/last-message — get only the most recent timeline node (lightweight polling)
+router.get("/api/sessions/:id/last-message", (req, res) => {
+  try {
+    syncSession(req.params.id as string);
+    const lastMessage = getLastMessage(req.params.id as string);
+    if (!lastMessage) {
+      res.status(404).json({ error: "No messages found in session" });
+      return;
+    }
+    res.json(lastMessage);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

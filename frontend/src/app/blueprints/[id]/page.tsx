@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, Fragment } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -17,12 +17,15 @@ import {
   runAllNodes,
   reevaluateAllNodes,
   recoverNodeSession,
+  archiveBlueprint as archiveBlueprintApi,
+  unarchiveBlueprint as unarchiveBlueprintApi,
 } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MacroNodeCard } from "@/components/MacroNodeCard";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { computeDepLayout } from "@/components/DependencyGraph";
+import { SkeletonLoader } from "@/components/SkeletonLoader";
 
 export default function BlueprintDetailPage() {
   const params = useParams();
@@ -44,10 +47,53 @@ export default function BlueprintDetailPage() {
   const [nodeDeps, setNodeDeps] = useState<string[]>([]);
   const [depsExpanded, setDepsExpanded] = useState(false);
 
-  const [reverseOrder, setReverseOrder] = useState(true);
-  const [smartSort, setSmartSort] = useState(true);
+  // Initialize filter state from URL search params
+  const VALID_NODE_STATUSES = useMemo(() => new Set<string>(["pending", "queued", "running", "done", "failed", "blocked", "skipped", "all"]), []);
+  const initNodeStatus = searchParams.get("filter");
+  const [reverseOrder, setReverseOrderRaw] = useState(searchParams.get("order") === "oldest" ? false : true);
+  const [smartSort, setSmartSortRaw] = useState(searchParams.get("sort") === "manual" ? false : true);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<MacroNodeStatus | "all">("all");
+  const [statusFilter, setStatusFilterRaw] = useState<MacroNodeStatus | "all">(
+    initNodeStatus && VALID_NODE_STATUSES.has(initNodeStatus) ? initNodeStatus as MacroNodeStatus | "all" : "all"
+  );
+
+  // Helper to sync filter state to URL + sessionStorage
+  const updateUrlParam = useCallback((key: string, value: string, defaultValue: string) => {
+    const url = new URL(window.location.href);
+    if (value === defaultValue) url.searchParams.delete(key);
+    else url.searchParams.set(key, value);
+    // Preserve ?generate param if present
+    window.history.replaceState({}, "", url.toString());
+    try { sessionStorage.setItem(`clawui:blueprint-${id}-filters`, url.search); } catch { /* ignore */ }
+  }, [id]);
+
+  // Save initial filter state to sessionStorage on mount
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    try { sessionStorage.setItem(`clawui:blueprint-${id}-filters`, url.search); } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
+  }, []);
+
+  const setStatusFilter = useCallback((value: MacroNodeStatus | "all") => {
+    setStatusFilterRaw(value);
+    updateUrlParam("filter", value, "all");
+  }, [updateUrlParam]);
+
+  const setSmartSort = useCallback((updater: boolean | ((prev: boolean) => boolean)) => {
+    setSmartSortRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      updateUrlParam("sort", next ? "smart" : "manual", "smart");
+      return next;
+    });
+  }, [updateUrlParam]);
+
+  const setReverseOrder = useCallback((updater: boolean | ((prev: boolean) => boolean)) => {
+    setReverseOrderRaw(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      updateUrlParam("order", next ? "newest" : "oldest", "newest");
+      return next;
+    });
+  }, [updateUrlParam]);
   const [showOlderNodes, setShowOlderNodes] = useState(false);
   const [generateInstruction, setGenerateInstruction] = useState("");
   const [approving, setApproving] = useState(false);
@@ -58,6 +104,17 @@ export default function BlueprintDetailPage() {
   const pollStartRef = useRef<number | null>(null);
   const MAX_POLL_DURATION = 35 * 60 * 1000; // 35 min safety cap
   const [generateCooldown, setGenerateCooldown] = useState(false);
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
+  const [confirmingReevaluate, setConfirmingReevaluate] = useState(false);
+
+  // Generation progress tracking
+  const preGenerateNodeIdsRef = useRef<Set<string> | null>(null);
+  const [newNodeIds, setNewNodeIds] = useState<Set<string>>(new Set());
+
+  // Editable title
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleValue, setTitleValue] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
 
   // Editable description
   const [editingDesc, setEditingDesc] = useState(false);
@@ -118,19 +175,18 @@ export default function BlueprintDetailPage() {
   }, [blueprint, searchParams]);
 
   const handleGenerate = async (skipConfirm = false) => {
-    if (!skipConfirm) {
-      const hasNodes = blueprint && blueprint.nodes.length > 0;
-      const msg = hasNodes
-        ? "This will regenerate nodes using Claude Code (may take 1-3 minutes). Existing pending nodes may be updated or removed. Continue?"
-        : "This will generate task nodes using Claude Code (may take 1-3 minutes). Continue?";
-      if (!window.confirm(msg)) return;
+    if (!skipConfirm && blueprint && blueprint.nodes.length > 0 && !confirmingRegenerate) {
+      setConfirmingRegenerate(true);
+      return;
     }
-
+    setConfirmingRegenerate(false);
     setGenerating(true);
     setError(null);
+    // Snapshot current node IDs to track new ones during generation
+    preGenerateNodeIdsRef.current = new Set(blueprint?.nodes.map(n => n.id) ?? []);
+    setNewNodeIds(new Set());
     try {
       await generatePlan(id, generateInstruction.trim() || undefined);
-      setGenerateInstruction("");
       // Generate is now fire-and-forget — reload to pick up pending task,
       // then polling will detect new nodes as Claude creates them via API
       await loadBlueprint();
@@ -141,6 +197,7 @@ export default function BlueprintDetailPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      setGenerateInstruction("");
       setGenerating(false);
     }
   };
@@ -170,6 +227,26 @@ export default function BlueprintDetailPage() {
           .then(([bp, queueInfo]) => {
             setBlueprint(bp);
             setPendingTasks(queueInfo.pendingTasks);
+            // Track newly created nodes during generation
+            if (preGenerateNodeIdsRef.current) {
+              const freshIds = bp.nodes
+                .map(n => n.id)
+                .filter(nid => !preGenerateNodeIdsRef.current!.has(nid));
+              if (freshIds.length > 0) {
+                setNewNodeIds(prev => {
+                  const next = new Set(prev);
+                  freshIds.forEach(nid => next.add(nid));
+                  return next;
+                });
+              }
+              // Clear tracking when generation completes
+              const isGenerating = queueInfo.pendingTasks.some(t => t.type === "generate");
+              if (!isGenerating) {
+                preGenerateNodeIdsRef.current = null;
+                // Keep newNodeIds visible briefly, then clear for animation
+                setTimeout(() => setNewNodeIds(new Set()), 3000);
+              }
+            }
             const stillActive = bp.status === "running"
               || bp.nodes.some(n => n.status === "running" || n.status === "queued")
               || queueInfo.pendingTasks.length > 0;
@@ -207,11 +284,11 @@ export default function BlueprintDetailPage() {
   };
 
   const handleReevaluateAll = async () => {
-    const nodeCount = blueprint?.nodes.filter(n => n.status !== "done" && n.status !== "running" && n.status !== "queued").length ?? 0;
-    if (!window.confirm(
-      `This will launch a Claude Code session to reevaluate ${nodeCount} node${nodeCount !== 1 ? "s" : ""} (may take several minutes). Continue?`
-    )) return;
-
+    if (!confirmingReevaluate) {
+      setConfirmingReevaluate(true);
+      return;
+    }
+    setConfirmingReevaluate(false);
     setReevaluating(true);
     setError(null);
     try {
@@ -301,10 +378,53 @@ export default function BlueprintDetailPage() {
     }
   };
 
+  // Compute dependency depth for each node (topological level in the DAG)
+  // Root nodes (no deps) = depth 0; depth = max(depth of deps) + 1
+  const depthMap = useMemo(() => {
+    const nodes = blueprint?.nodes ?? [];
+    const map = new Map<string, number>();
+    const visiting = new Set<string>();
+    const nodeById = new Map(nodes.map(n => [n.id, n]));
+
+    function getDepth(id: string): number {
+      if (map.has(id)) return map.get(id)!;
+      if (visiting.has(id)) return 0; // cycle guard
+      visiting.add(id);
+      const node = nodeById.get(id);
+      let depth = 0;
+      if (node && node.dependencies.length > 0) {
+        depth = Math.max(...node.dependencies.map(depId => getDepth(depId))) + 1;
+      }
+      visiting.delete(id);
+      map.set(id, depth);
+      return depth;
+    }
+
+    for (const node of nodes) {
+      getDepth(node.id);
+    }
+    return map;
+  }, [blueprint?.nodes]);
+
+  // Build back link preserving blueprints list filter state
+  const blueprintsBackHref = useMemo(() => {
+    try {
+      const saved = sessionStorage.getItem("clawui:blueprints-filters");
+      if (saved) return `/blueprints${saved}`;
+    } catch { /* ignore */ }
+    return "/blueprints";
+  }, []);
+
   if (loading) {
     return (
-      <div className="text-center py-16 text-text-muted">
-        Loading blueprint...
+      <div className="py-4">
+        <div className="w-32 h-4 rounded bg-bg-tertiary animate-pulse mb-4" />
+        <div className="flex items-center gap-3 mb-3">
+          <div className="w-3 h-3 rounded-full bg-bg-tertiary animate-pulse" />
+          <div className="h-6 w-2/3 rounded bg-bg-tertiary animate-pulse" />
+        </div>
+        <div className="h-4 w-1/2 rounded bg-bg-tertiary animate-pulse mb-6" />
+        <SkeletonLoader variant="nodeCard" count={4} />
       </div>
     );
   }
@@ -325,6 +445,8 @@ export default function BlueprintDetailPage() {
     );
   }
 
+  const isGeneratingTask = pendingTasks.some(t => t.type === "generate");
+  const newNodeCount = newNodeIds.size;
   const isRunning = blueprint.status === "running" || runningAll;
   const canRunAll = (blueprint.status === "approved" || blueprint.status === "failed" || blueprint.status === "paused")
     && blueprint.nodes.some((n) => n.status === "pending" || n.status === "failed");
@@ -345,13 +467,25 @@ export default function BlueprintDetailPage() {
     ? blueprint.nodes
     : blueprint.nodes.filter((n) => n.status === statusFilter);
 
+  // Active vs completed tier: active statuses always above completed ones
+  const completedStatuses = new Set<MacroNodeStatus>(["done", "skipped"]);
+
   let displayNodes: typeof filteredNodes;
   if (smartSort && statusFilter === "all") {
-    // Smart sort: group by status priority, maintain order within each group
+    // Smart sort: active tier on top; depth descending only for active nodes; then status priority, then createdAt descending
     displayNodes = [...filteredNodes].sort((a, b) => {
+      const aCompleted = completedStatuses.has(a.status);
+      const bCompleted = completedStatuses.has(b.status);
+      const tierDiff = (aCompleted ? 1 : 0) - (bCompleted ? 1 : 0);
+      if (tierDiff !== 0) return tierDiff;
+      // Depth only matters for active nodes — completed nodes skip depth sorting
+      if (!aCompleted) {
+        const depthDiff = (depthMap.get(b.id) ?? 0) - (depthMap.get(a.id) ?? 0);
+        if (depthDiff !== 0) return depthDiff;
+      }
       const priorityDiff = statusPriority[a.status] - statusPriority[b.status];
       if (priorityDiff !== 0) return priorityDiff;
-      return b.order - a.order;
+      return b.createdAt.localeCompare(a.createdAt);
     });
   } else {
     displayNodes = reverseOrder ? [...filteredNodes].reverse() : filteredNodes;
@@ -387,9 +521,9 @@ export default function BlueprintDetailPage() {
   const depLayouts = computeDepLayout(blueprint.nodes, visibleNodes);
 
   return (
-    <div>
+    <div className="animate-fade-in">
       <Link
-        href="/blueprints"
+        href={blueprintsBackHref}
         className="text-sm text-text-muted hover:text-text-secondary transition-colors mb-4 inline-block"
       >
         &#8592; Back to Blueprints
@@ -399,10 +533,96 @@ export default function BlueprintDetailPage() {
       <div className="mb-6">
         <div className="flex items-center gap-3 mb-2 min-w-0 overflow-hidden">
           <StatusIndicator status={blueprint.status} />
-          <h1 className="text-xl font-semibold truncate min-w-0 flex-1">{blueprint.title}</h1>
+          {editingTitle ? (
+            <input
+              ref={titleRef}
+              type="text"
+              value={titleValue}
+              onChange={(e) => setTitleValue(e.target.value)}
+              onBlur={async () => {
+                setEditingTitle(false);
+                const trimmed = titleValue.trim();
+                if (!trimmed || trimmed === blueprint.title) return;
+                try {
+                  const updated = await updateBlueprint(id, { title: trimmed });
+                  setBlueprint(updated);
+                } catch {
+                  // revert on failure
+                }
+              }}
+              onKeyDown={async (e) => {
+                if (e.key === "Escape") {
+                  setEditingTitle(false);
+                  setTitleValue(blueprint.title);
+                } else if (e.key === "Enter") {
+                  e.preventDefault();
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              readOnly={generating || enriching || reevaluating}
+              className={`text-xl font-semibold min-w-0 flex-1 px-2 py-0.5 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary focus:outline-none ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : ""}`}
+            />
+          ) : (
+            <h1
+              className={`text-xl font-semibold truncate min-w-0 flex-1 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
+              onClick={() => {
+                if (generating || enriching || reevaluating) return;
+                setTitleValue(blueprint.title);
+                setEditingTitle(true);
+                setTimeout(() => titleRef.current?.focus(), 0);
+              }}
+              title={generating || enriching || reevaluating ? "Editing disabled during AI operation" : "Click to edit"}
+            >
+              {blueprint.title}
+            </h1>
+          )}
           <span className="text-xs px-2 py-0.5 rounded-full bg-bg-tertiary text-text-muted capitalize flex-shrink-0">
             {blueprint.status === "running" ? "In Progress" : blueprint.status}
           </span>
+          {blueprint.archivedAt && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-text-muted/10 text-text-muted flex-shrink-0">
+              archived
+            </span>
+          )}
+          {/* Archive/Unarchive button */}
+          {blueprint.archivedAt ? (
+            <button
+              onClick={async () => {
+                try {
+                  const updated = await unarchiveBlueprintApi(id);
+                  setBlueprint(updated);
+                } catch { /* silently fail */ }
+              }}
+              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
+              aria-label="Unarchive blueprint"
+              title="Unarchive"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="5" rx="1" />
+                <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+                <path d="M12 12v6" />
+                <path d="M9 15l3-3 3 3" />
+              </svg>
+            </button>
+          ) : (
+            <button
+              onClick={async () => {
+                try {
+                  const updated = await archiveBlueprintApi(id);
+                  setBlueprint(updated);
+                } catch { /* silently fail */ }
+              }}
+              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
+              aria-label="Archive blueprint"
+              title="Archive"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="5" rx="1" />
+                <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+                <path d="M10 12h4" />
+              </svg>
+            </button>
+          )}
         </div>
         {editingDesc ? (
           <textarea
@@ -426,18 +646,20 @@ export default function BlueprintDetailPage() {
                 setDescValue(blueprint.description || "");
               }
             }}
-            className="w-full text-sm px-3 py-2 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary placeholder:text-text-muted focus:outline-none resize-y min-h-[60px] mb-3"
+            readOnly={generating || enriching || reevaluating}
+            className={`w-full text-sm px-3 py-2 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary placeholder:text-text-muted focus:outline-none resize-y min-h-[60px] mb-3 ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : ""}`}
             rows={2}
           />
         ) : (
           <p
-            className="text-sm text-text-secondary mb-3 cursor-pointer hover:text-text-primary transition-colors"
+            className={`text-sm text-text-secondary mb-3 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
             onClick={() => {
+              if (generating || enriching || reevaluating) return;
               setDescValue(blueprint.description || "");
               setEditingDesc(true);
               setTimeout(() => descRef.current?.focus(), 0);
             }}
-            title="Click to edit"
+            title={generating || enriching || reevaluating ? "Editing disabled during AI operation" : "Click to edit"}
           >
             {blueprint.description || <span className="text-text-muted italic">Click to add description...</span>}
           </p>
@@ -449,16 +671,17 @@ export default function BlueprintDetailPage() {
         )}
 
         {/* Generate instruction + action buttons */}
-        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-start">
           <div className="flex-1 min-w-0">
-            <input
-              type="text"
+            <textarea
+              rows={2}
               value={generateInstruction}
               onChange={(e) => setGenerateInstruction(e.target.value)}
-              placeholder="Optional: describe what to generate or change (e.g. 'add auth support', 'focus on testing')..."
-              className="w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary text-sm placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent-purple"
+              readOnly={generating}
+              placeholder="Optional: describe what to generate or change (e.g. 'add auth support', 'focus on testing')... Press Cmd+Enter to generate"
+              className={`w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary text-sm placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent-purple resize-y max-h-32 overflow-y-auto ${generating ? "opacity-60 cursor-not-allowed" : ""}`}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
                   if (!generating) handleGenerate();
                 }
@@ -470,51 +693,92 @@ export default function BlueprintDetailPage() {
               <button
                 onClick={handleApprove}
                 disabled={approving}
-                className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {approving ? "Approving..." : "Approve Plan"}
               </button>
             )}
-            <button
-              onClick={() => handleGenerate()}
-              disabled={generating}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap ${
-                blueprint.nodes.length === 0
-                  ? "bg-accent-purple text-white hover:bg-accent-purple/90"
-                  : "border border-accent-purple text-accent-purple hover:bg-accent-purple/10"
-              }`}
-            >
-              {generating ? (
-                <>
-                  <AISparkle size="sm" />
-                  Generating...
-                </>
-              ) : (
-                "Generate Nodes"
-              )}
-            </button>
-            {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
+            {confirmingRegenerate ? (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-accent-purple/40 bg-accent-purple/10 animate-fade-in">
+                <span className="text-xs text-accent-purple whitespace-nowrap">Regenerate nodes?</span>
+                <button
+                  onClick={() => handleGenerate(true)}
+                  className="px-2.5 py-1 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.98] transition-all"
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setConfirmingRegenerate(false)}
+                  className="px-2.5 py-1 rounded-md border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary active:scale-[0.98] transition-all"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
               <button
-                onClick={handleReevaluateAll}
-                disabled={isRunning || reevaluating || generateCooldown}
-                title={generateCooldown ? "Please wait a moment after generating nodes" : undefined}
-                className="px-4 py-2 rounded-lg border border-accent-blue text-accent-blue text-sm font-medium hover:bg-accent-blue/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                onClick={() => handleGenerate()}
+                disabled={generating}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap ${
+                  blueprint.nodes.length === 0
+                    ? "bg-accent-purple text-white hover:bg-accent-purple/90"
+                    : "border border-accent-purple text-accent-purple hover:bg-accent-purple/10"
+                }`}
               >
-                {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
+                {generating ? (
                   <>
                     <AISparkle size="sm" />
-                    Reevaluating...
+                    Generating...
                   </>
                 ) : (
-                  <>&#x1F504; Reevaluate</>
+                  "Generate Nodes"
                 )}
               </button>
+            )}
+            {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
+              confirmingReevaluate ? (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-accent-blue/40 bg-accent-blue/10 animate-fade-in">
+                  <span className="text-xs text-accent-blue whitespace-nowrap">Reevaluate all nodes?</span>
+                  <button
+                    onClick={handleReevaluateAll}
+                    className="px-2.5 py-1 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.98] transition-all"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmingReevaluate(false)}
+                    className="px-2.5 py-1 rounded-md border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary active:scale-[0.98] transition-all"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleReevaluateAll}
+                  disabled={isRunning || reevaluating || generateCooldown}
+                  title={generateCooldown ? "Please wait a moment after generating nodes" : undefined}
+                  className="px-4 py-2 rounded-lg border border-accent-blue text-accent-blue text-sm font-medium hover:bg-accent-blue/10 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                >
+                  {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
+                    <>
+                      <AISparkle size="sm" />
+                      Reevaluating...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                      </svg>
+                      Reevaluate
+                    </>
+                  )}
+                </button>
+              )
             )}
             {canRunAll && (
               <button
                 onClick={handleRunAll}
                 disabled={isRunning}
-                className="px-4 py-2 rounded-lg bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                className="px-4 py-2 rounded-lg bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
               >
                 {isRunning ? (
                   <>
@@ -522,12 +786,29 @@ export default function BlueprintDetailPage() {
                     Running...
                   </>
                 ) : (
-                  <>&#9654; Run All</>
+                  <>
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M4 2l10 6-10 6V2z" />
+                    </svg>
+                    Run All
+                  </>
                 )}
               </button>
             )}
           </div>
         </div>
+        {/* Generation progress banner */}
+        {isGeneratingTask && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-accent-purple/10 border border-accent-purple/30">
+            <AISparkle size="sm" className="text-accent-purple flex-shrink-0" />
+            <span className="text-sm text-accent-purple">
+              Generating nodes...
+              {newNodeCount > 0
+                ? ` ${newNodeCount} new node${newNodeCount !== 1 ? "s" : ""} created so far.`
+                : " New nodes will appear as they\u2019re created."}
+            </span>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -548,7 +829,8 @@ export default function BlueprintDetailPage() {
               value={nodeTitle}
               onChange={(e) => setNodeTitle(e.target.value)}
               placeholder="Node title"
-              className="w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30"
+              readOnly={enriching}
+              className={`w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
               autoFocus
               required
             />
@@ -556,6 +838,7 @@ export default function BlueprintDetailPage() {
               value={nodeDescription}
               onChange={setNodeDescription}
               placeholder="Description (supports Markdown and image paste)"
+              disabled={enriching}
             />
             {/* Dependency picker */}
             {blueprint.nodes.length > 0 && (
@@ -599,7 +882,7 @@ export default function BlueprintDetailPage() {
               <button
                 type="submit"
                 disabled={!nodeTitle.trim() || addingNode}
-                className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-sm hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-sm hover:bg-accent-blue/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {addingNode ? "Adding..." : "Add Node"}
               </button>
@@ -607,9 +890,9 @@ export default function BlueprintDetailPage() {
                 type="button"
                 disabled={!nodeTitle.trim() || enriching}
                 onClick={handleSmartCreate}
-                className="px-3 py-1.5 rounded-lg bg-accent-purple text-white text-sm hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-sm hover:bg-accent-purple/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Create"}
+                {enriching ? (<><AISparkle size="xs" /> Enrich</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
               </button>
               <button
                 type="button"
@@ -628,7 +911,7 @@ export default function BlueprintDetailPage() {
         ) : (
           <button
             onClick={() => setShowAddNode(true)}
-            className="w-full py-3 rounded-xl border border-dashed border-border-primary text-text-muted text-sm hover:border-border-hover hover:text-text-secondary hover:bg-bg-secondary transition-all"
+            className="w-full py-3 rounded-xl border border-dashed border-border-primary text-text-muted text-sm hover:border-border-hover hover:text-text-secondary hover:bg-bg-secondary transition-all active:scale-[0.99]"
           >
             + Add Node
           </button>
@@ -668,7 +951,7 @@ export default function BlueprintDetailPage() {
                   <button
                     key={s}
                     onClick={() => setStatusFilter(s)}
-                    className={`px-2 py-0.5 rounded-full text-[11px] border transition-colors capitalize ${
+                    className={`px-2 py-1.5 sm:py-0.5 rounded-full text-[11px] border transition-all active:scale-[0.96] capitalize ${
                       isActive
                         ? colorMap[s]
                         : "border-transparent text-text-muted hover:text-text-secondary hover:bg-bg-tertiary/50"
@@ -681,33 +964,38 @@ export default function BlueprintDetailPage() {
               <span className="w-px h-4 bg-border-primary mx-0.5" />
               <button
                 onClick={() => setSmartSort((v) => !v)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs transition-colors ${
+                className={`flex items-center gap-1.5 px-2.5 py-2 sm:py-1 rounded-lg text-xs transition-all active:scale-[0.97] ${
                   smartSort
                     ? "bg-accent-purple/15 border border-accent-purple/40 text-accent-purple"
                     : "bg-bg-secondary border border-border-primary text-text-muted hover:text-text-secondary hover:border-border-hover"
                 }`}
                 title="Group by status: active nodes first, completed last"
+                aria-label="Toggle smart sort"
               >
                 Smart Sort
               </button>
               {!smartSort && (
                 <button
                   onClick={() => setReverseOrder((v) => !v)}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-bg-secondary border border-border-primary text-text-muted text-xs hover:text-text-secondary hover:border-border-hover transition-colors"
+                  aria-label="Toggle sort order"
+                  className="flex items-center gap-1.5 px-2.5 py-2 sm:py-1 rounded-lg bg-bg-secondary border border-border-primary text-text-muted text-xs hover:text-text-secondary hover:border-border-hover transition-all active:scale-[0.97]"
                 >
-                  <span className="text-sm">{reverseOrder ? "\u2193" : "\u2191"}</span>
+                  <svg className={`w-3 h-3 transition-transform ${reverseOrder ? "" : "rotate-180"}`} viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 4a.5.5 0 0 1 .5.5v5.793l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 1 1 .708-.708L7.5 10.293V4.5A.5.5 0 0 1 8 4z" />
+                  </svg>
                   {reverseOrder ? "Newest first" : "Oldest first"}
                 </button>
               )}
               <span className="w-px h-4 bg-border-primary mx-0.5" />
               <button
                 onClick={() => setAutoRefresh((v) => !v)}
-                className={`relative flex items-center gap-1 p-1.5 rounded-lg text-xs transition-colors ${
+                className={`relative flex items-center gap-1 p-2.5 sm:p-1.5 rounded-lg text-xs transition-colors ${
                   autoRefresh
                     ? "text-accent-blue hover:text-accent-blue/80"
                     : "text-text-muted/40 hover:text-text-muted/60"
                 }`}
                 title={autoRefresh ? "Auto-refresh on (click to disable)" : "Auto-refresh off (click to enable)"}
+                aria-label="Toggle auto-refresh"
               >
                 <svg
                   className={`w-3.5 h-3.5 ${shouldPoll ? "animate-spin" : ""}`}
@@ -755,27 +1043,32 @@ export default function BlueprintDetailPage() {
                       {showCollapseButton && (
                         <button
                           onClick={() => setShowOlderNodes(false)}
+                          aria-expanded={true}
                           className="flex items-center gap-2 w-full text-left py-2 px-3 my-1 rounded-lg hover:bg-bg-secondary/50 transition-colors"
                         >
-                          <span className="text-xs text-text-muted font-mono">▼</span>
+                          <svg className="w-3 h-3 text-text-muted" viewBox="0 0 16 16" fill="currentColor">
+                          <path d="M4.427 7.427l3.396 3.396a.25.25 0 00.354 0l3.396-3.396A.25.25 0 0011.396 7H4.604a.25.25 0 00-.177.427z" />
+                        </svg>
                           <span className="text-xs font-medium text-text-secondary">
                             Collapse {olderDisplayNodes.length} completed nodes
                           </span>
                         </button>
                       )}
-                      <MacroNodeCard
-                        node={node}
-                        pendingTasks={pendingTasks}
-                        index={originalIndex}
-                        total={blueprint.nodes.length}
-                        blueprintId={blueprint.id}
-                        onRefresh={handleRefresh}
-                        onNodeUpdated={handleRefresh}
-                        onNodeDeleted={handleRefresh}
-                        defaultExpanded={false}
-                        isLastDisplayed={displayIdx === displayNodes.length - 1}
-                        depLanes={depLayouts[displayIdx]}
-                      />
+                      <div className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
+                        <MacroNodeCard
+                          node={node}
+                          pendingTasks={pendingTasks}
+                          index={originalIndex}
+                          total={blueprint.nodes.length}
+                          blueprintId={blueprint.id}
+                          onRefresh={handleRefresh}
+                          onNodeUpdated={handleRefresh}
+                          onNodeDeleted={handleRefresh}
+                          defaultExpanded={false}
+                          isLastDisplayed={displayIdx === displayNodes.length - 1}
+                          depLanes={depLayouts[displayIdx]}
+                        />
+                      </div>
                     </Fragment>
                   );
                 });
@@ -786,27 +1079,31 @@ export default function BlueprintDetailPage() {
               {topDisplayNodes.map((node, displayIdx) => {
                 const originalIndex = blueprint.nodes.indexOf(node);
                 return (
-                  <MacroNodeCard
-                    key={node.id}
-                    node={node}
-                    pendingTasks={pendingTasks}
-                    index={originalIndex}
-                    total={blueprint.nodes.length}
-                    blueprintId={blueprint.id}
-                    onRefresh={handleRefresh}
-                    onNodeUpdated={handleRefresh}
-                    onNodeDeleted={handleRefresh}
-                    defaultExpanded={false}
-                    isLastDisplayed={displayIdx === topDisplayNodes.length - 1}
-                    depLanes={depLayouts[displayIdx]}
-                  />
+                  <div key={node.id} className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
+                    <MacroNodeCard
+                      node={node}
+                      pendingTasks={pendingTasks}
+                      index={originalIndex}
+                      total={blueprint.nodes.length}
+                      blueprintId={blueprint.id}
+                      onRefresh={handleRefresh}
+                      onNodeUpdated={handleRefresh}
+                      onNodeDeleted={handleRefresh}
+                      defaultExpanded={false}
+                      isLastDisplayed={displayIdx === topDisplayNodes.length - 1}
+                      depLanes={depLayouts[displayIdx]}
+                    />
+                  </div>
                 );
               })}
               <button
                 onClick={() => setShowOlderNodes(true)}
+                aria-expanded={false}
                 className="flex items-center gap-2 w-full text-left py-2 px-3 my-1 rounded-lg hover:bg-bg-secondary/50 transition-colors"
               >
-                <span className="text-xs text-text-muted font-mono">▶</span>
+                <svg className="w-3 h-3 text-text-muted" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M6.427 4.427l3.396 3.396a.25.25 0 010 .354l-3.396 3.396A.25.25 0 016 11.396V4.604a.25.25 0 01.427-.177z" />
+                </svg>
                 <span className="text-xs font-medium text-text-secondary">
                   {olderDisplayNodes.length} completed nodes
                 </span>

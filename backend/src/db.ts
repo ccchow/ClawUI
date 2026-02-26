@@ -348,3 +348,37 @@ export function getTimeline(sessionId: string): TimelineNode[] {
     ...(r.tool_use_id ? { toolUseId: r.tool_use_id } : {}),
   }));
 }
+
+export function getLastMessage(sessionId: string): TimelineNode | null {
+  const row = db.prepare(`
+    SELECT id, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id
+    FROM timeline_nodes
+    WHERE session_id = ?
+    ORDER BY seq DESC
+    LIMIT 1
+  `).get(sessionId) as {
+    id: string;
+    type: string;
+    timestamp: string;
+    title: string;
+    content: string;
+    tool_name: string | null;
+    tool_input: string | null;
+    tool_result: string | null;
+    tool_use_id: string | null;
+  } | undefined;
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    type: row.type as TimelineNode["type"],
+    timestamp: row.timestamp,
+    title: row.title,
+    content: row.content,
+    ...(row.tool_name ? { toolName: row.tool_name } : {}),
+    ...(row.tool_input ? { toolInput: row.tool_input } : {}),
+    ...(row.tool_result ? { toolResult: row.tool_result } : {}),
+    ...(row.tool_use_id ? { toolUseId: row.tool_use_id } : {}),
+  };
+}

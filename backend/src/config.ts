@@ -38,6 +38,39 @@ function resolveClaudePath(): string {
 
 export const CLAUDE_PATH = resolveClaudePath();
 
+/**
+ * Resolve the path to the `expect` binary.
+ * Priority: EXPECT_PATH env → common install locations → PATH lookup via `which` → bare "expect".
+ */
+function resolveExpectPath(): string {
+  if (process.env.EXPECT_PATH) {
+    return process.env.EXPECT_PATH;
+  }
+
+  const candidates = [
+    "/usr/bin/expect",
+    "/usr/local/bin/expect",
+    "/opt/local/bin/expect",
+    "/opt/homebrew/bin/expect",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  try {
+    const resolved = execFileSync("/usr/bin/which", ["expect"], { encoding: "utf-8" }).trim();
+    if (resolved) return resolved;
+  } catch {
+    // `which` failed — expect not in PATH
+  }
+
+  return "expect";
+}
+
+export const EXPECT_PATH = resolveExpectPath();
+
 export const PORT = parseInt(process.env.PORT || "3001", 10);
 
 export const CLAWUI_DB_DIR = process.env.CLAWUI_DB_DIR || ".clawui";

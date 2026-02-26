@@ -1,7 +1,6 @@
 import { Router } from "express";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import {
@@ -10,6 +9,8 @@ import {
   listBlueprints,
   updateBlueprint,
   deleteBlueprint,
+  archiveBlueprint,
+  unarchiveBlueprint,
   createMacroNode,
   updateMacroNode,
   deleteMacroNode,
@@ -25,9 +26,12 @@ import {
   getNodeBySession,
   setExecutionBlocker,
   setExecutionTaskSummary,
+  setExecutionReportedStatus,
+  createRelatedSession,
+  getRelatedSessionsForNode,
 } from "./plan-db.js";
-import type { ArtifactType, ExecutionType, MacroNode } from "./plan-db.js";
-import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, addPendingTask, removePendingTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession } from "./plan-executor.js";
+import type { ArtifactType, ExecutionType, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
+import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
 import { createLogger } from "./logger.js";
@@ -36,7 +40,63 @@ import { LOCAL_AUTH_TOKEN } from "./auth.js";
 
 const log = createLogger("plan-routes");
 
+/**
+ * Helper to detect and record a related session after an interactive CLI call.
+ * Uses the same detectNewSession pattern as executeNodeInternal.
+ */
+function captureRelatedSession(
+  projectCwd: string | undefined,
+  beforeTimestamp: Date,
+  nodeId: string,
+  blueprintId: string,
+  type: RelatedSessionType,
+): void {
+  if (!projectCwd) return;
+  const sessionId = detectNewSession(projectCwd, beforeTimestamp);
+  if (sessionId) {
+    const now = new Date().toISOString();
+    createRelatedSession(nodeId, blueprintId, sessionId, type, beforeTimestamp.toISOString(), now);
+    log.debug(`Captured related session: type=${type}, nodeId=${nodeId.slice(0, 8)}, sessionId=${sessionId.slice(0, 8)}`);
+  }
+}
+
 const planRouter = Router();
+
+// ─── Enrichment callback store (for Smart Create) ────────────
+// In-memory store: Claude posts enrichment results via curl callback instead of writing temp files.
+const enrichmentCallbacks = new Map<string, {
+  resolve: (result: { title: string; description: string }) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+// POST /api/enrichment-callback/:requestId — callback for Smart Create enrichment
+planRouter.post("/api/enrichment-callback/:requestId", (req, res) => {
+  const entry = enrichmentCallbacks.get(req.params.requestId);
+  if (!entry) {
+    res.status(404).json({ error: "Unknown or expired enrichment request" });
+    return;
+  }
+  const { title, description } = req.body as { title?: string; description?: string };
+  if (!title || typeof title !== "string") {
+    res.status(400).json({ error: "Missing or invalid 'title'" });
+    return;
+  }
+  clearTimeout(entry.timer);
+  enrichmentCallbacks.delete(req.params.requestId);
+  entry.resolve({ title, description: description || "" });
+  res.json({ ok: true });
+});
+
+function waitForEnrichmentCallback(requestId: string, timeoutMs = 120_000): Promise<{ title: string; description: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      enrichmentCallbacks.delete(requestId);
+      reject(new Error("Enrichment callback timed out"));
+    }, timeoutMs);
+    enrichmentCallbacks.set(requestId, { resolve, reject, timer });
+  });
+}
 
 // ─── Blueprint CRUD ──────────────────────────────────────────
 
@@ -52,6 +112,21 @@ planRouter.post("/api/blueprints", (req, res) => {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
+    if (projectCwd && typeof projectCwd === "string" && projectCwd.trim().length > 0) {
+      const cwd = projectCwd.trim();
+      if (!existsSync(cwd)) {
+        res.status(400).json({ error: `Project directory does not exist: ${cwd}` });
+        return;
+      }
+      if (!statSync(cwd).isDirectory()) {
+        res.status(400).json({ error: `Path is not a directory: ${cwd}` });
+        return;
+      }
+      if (!existsSync(join(cwd, "CLAUDE.md"))) {
+        res.status(400).json({ error: `No CLAUDE.md found at ${cwd}. A CLAUDE.md file is required to identify a valid Claude Code workspace.` });
+        return;
+      }
+    }
     const blueprint = createBlueprint(title.trim(), description, projectCwd);
     res.status(201).json(blueprint);
   } catch (err) {
@@ -64,7 +139,8 @@ planRouter.get("/api/blueprints", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
     const projectCwd = req.query.projectCwd as string | undefined;
-    const blueprints = listBlueprints({ status, projectCwd });
+    const includeArchived = req.query.includeArchived === "true";
+    const blueprints = listBlueprints({ status, projectCwd, includeArchived });
     res.json(blueprints);
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -115,35 +191,86 @@ planRouter.delete("/api/blueprints/:id", (req, res) => {
   }
 });
 
+// POST /api/blueprints/:id/archive — archive a blueprint
+planRouter.post("/api/blueprints/:id/archive", (req, res) => {
+  try {
+    const result = archiveBlueprint(req.params.id);
+    if (!result) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:id/unarchive — unarchive a blueprint
+planRouter.post("/api/blueprints/:id/unarchive", (req, res) => {
+  try {
+    const result = unarchiveBlueprint(req.params.id);
+    if (!result) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ─── MacroNode operations ────────────────────────────────────
 
 // POST /api/blueprints/:blueprintId/enrich-node — AI-enrich title & description
 planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => {
   try {
-    const blueprint = getBlueprint(req.params.blueprintId);
+    const blueprintId = req.params.blueprintId;
+    const blueprint = getBlueprint(blueprintId);
     if (!blueprint) {
       res.status(404).json({ error: "Blueprint not found" });
       return;
     }
-    const { title, description } = req.body as { title?: string; description?: string };
+    const { title, description, nodeId } = req.body as { title?: string; description?: string; nodeId?: string };
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
 
-    // Build context about the blueprint
-    const existingNodes = blueprint.nodes
-      .map((n, i) => `  ${i + 1}. [${n.status}] ${n.title}${n.description ? ` — ${n.description}` : ""}`)
+    // Validate nodeId if provided
+    if (nodeId) {
+      const node = blueprint.nodes.find((n) => n.id === nodeId);
+      if (!node) {
+        res.status(404).json({ error: "Node not found" });
+        return;
+      }
+    }
+
+    // Build context: if the node has dependencies, only show those deps (saves tokens).
+    // Otherwise fall back to showing all nodes for broader context.
+    const currentNode = nodeId ? blueprint.nodes.find((n) => n.id === nodeId) : null;
+    const depIds = currentNode?.dependencies ?? [];
+    const contextNodes = depIds.length > 0
+      ? blueprint.nodes.filter((n) => depIds.includes(n.id))
+      : blueprint.nodes;
+    const contextLabel = depIds.length > 0 ? "Dependency nodes" : "Existing nodes";
+
+    // Titles + handoff summaries only, no descriptions
+    const existingNodes = contextNodes
+      .map((n, i) => {
+        let line = `  ${i + 1}. [${n.status}] ${n.title}`;
+        if (n.status === "done" && n.outputArtifacts.length > 0) {
+          line += ` — Handoff: ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 300)}`;
+        }
+        return line;
+      })
       .join("\n");
 
-    const resultFile = join(tmpdir(), `clawui-enrich-${randomUUID()}.json`);
-
-    const prompt = `You are helping a developer write a clear, actionable task node for a coding blueprint.
+    const enrichPromptBase = `You are helping a developer write a clear, actionable task node for a coding blueprint.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
 ${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
-${existingNodes ? `\nExisting nodes:\n${existingNodes}` : "\nNo existing nodes yet."}
+${existingNodes ? `\n${contextLabel}:\n${existingNodes}` : "\nNo existing nodes yet."}
 
 The user wants to add a new node with:
 - Title: "${title.trim()}"
@@ -153,34 +280,57 @@ Your task: Enrich and improve the title and description to make them clear and a
 1. Be specific about what needs to be done
 2. Reference relevant files/components if the project context suggests them
 3. Include acceptance criteria or expected behavior when helpful
-4. Stay concise — no fluff
+4. Stay concise — no fluff`;
 
-IMPORTANT: Write the result as a JSON file using bash. Do NOT output JSON in chat. Instead, run this bash command with your enriched values:
-cat > '${resultFile}' << 'ENRICH_EOF'
-{"title": "your improved title here", "description": "your improved description here"}
-ENRICH_EOF
+    if (nodeId) {
+      // Existing node: write directly to DB via curl (survives page closure)
+      const apiBase = getApiBase();
+      const authParam = getAuthParam();
 
-Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid. Use escaped quotes inside string values if needed.`;
+      const prompt = `${enrichPromptBase}
 
-    await enqueueBlueprintTask(req.params.blueprintId, async () => {
-      await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
-    });
+IMPORTANT: Do NOT output JSON in chat. Instead, update the node directly by calling the ClawUI API using curl:
 
-    // Read enriched result from temp file
-    let result: { title: string; description: string };
-    try {
-      const raw = readFileSync(resultFile, "utf-8").trim();
-      result = JSON.parse(raw);
-      if (!result.title || !result.description) {
-        throw new Error("Missing title or description in enrichment result");
+curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"title": "your enriched title", "description": "your enriched description"}'
+
+Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid — escape any special characters in string values.`;
+
+      const enrichBefore = new Date();
+      await enqueueBlueprintTask(blueprintId, async () => {
+        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+      });
+      captureRelatedSession(blueprint.projectCwd, enrichBefore, nodeId, blueprintId, "enrich");
+
+      // Read back the updated node from DB
+      const updated = getBlueprint(blueprintId);
+      const updatedNode = updated?.nodes.find((n) => n.id === nodeId);
+      if (updatedNode) {
+        res.json({ title: updatedNode.title, description: updatedNode.description });
+      } else {
+        res.json({ title: title.trim(), description: description?.trim() || "" });
       }
-    } catch (parseErr) {
-      throw new Error(`Enrichment failed: could not read result — ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
-    } finally {
-      try { unlinkSync(resultFile); } catch { /* ignore */ }
-    }
+    } else {
+      // New node (Smart Create): use API callback (same pattern as evaluation/generate)
+      const requestId = randomUUID();
+      const apiBase = getApiBase();
+      const authParam = getAuthParam();
+      const resultPromise = waitForEnrichmentCallback(requestId);
 
-    res.json({ title: result.title, description: result.description });
+      const prompt = `${enrichPromptBase}
+
+IMPORTANT: Do NOT output JSON in chat. Instead, post your enriched result by calling the ClawUI API using curl:
+
+curl -s -X POST '${apiBase}/api/enrichment-callback/${requestId}?${authParam}' -H 'Content-Type: application/json' -d '{"title": "your enriched title", "description": "your enriched description"}'
+
+Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid — escape any special characters in string values.`;
+
+      await enqueueBlueprintTask(blueprintId, async () => {
+        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+      });
+
+      const result = await resultPromise;
+      res.json({ title: result.title, description: result.description });
+    }
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -207,11 +357,10 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
     // Track in pending tasks for queue status API
     addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
 
-    // Build full context about all nodes and their statuses
+    // Build context about all nodes (titles + handoff summaries only, no descriptions)
     const nodesContext = blueprint.nodes
       .map((n, i) => {
         let line = `  ${i + 1}. [${n.status}] ${n.title}`;
-        if (n.description) line += ` — ${n.description}`;
         if (n.error) line += ` (ERROR: ${n.error})`;
         if (n.id === node.id) line += " ← THIS NODE";
         return line;
@@ -227,11 +376,12 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
     const apiBase = getApiBase();
     const authParam = getAuthParam();
 
-    // Build update payload instructions — include status reset for failed nodes
+    // Build update payload instructions — include status reset for failed/blocked nodes
     const capturedStatus = node.status;
-    const statusResetNote = capturedStatus === "failed"
-      ? `\nIMPORTANT: Because this node's current status is "failed", you MUST also include "status": "pending" in your curl payload to reset it so it can be re-run.`
+    const statusResetNote = (capturedStatus === "failed" || capturedStatus === "blocked")
+      ? `\nIMPORTANT: Because this node's current status is "${capturedStatus}", you MUST also include "status": "pending" in your curl payload to reset it so it can be re-run — UNLESS you determine the blocker/failure reason still applies.`
       : "";
+    const statusField = (capturedStatus === "failed" || capturedStatus === "blocked") ? ', "status": "pending"' : "";
 
     const prompt = `You are a project manager reviewing a development task node in the context of its parent blueprint/plan.
 
@@ -255,17 +405,21 @@ Your task: Re-evaluate this node considering the current state of the project. B
 1. Update the title to be clear and accurate given the current project state.
 2. Update the description to reflect what actually needs to be done (or has been done).
 3. If this node's task is ALREADY COMPLETED by another node, is REDUNDANT, OUT OF DATE, or NO LONGER NEEDED, add a warning paragraph at the end of the description starting with "⚠️ WARNING:" explaining why this node should be skipped or deleted.
+4. If the node is blocked, evaluate whether the blocking condition still exists. If the blocker has been resolved or is no longer relevant, set status to "pending". If the blocker persists, keep status as "blocked" and update the description to reflect the current blocker state.
 
 IMPORTANT: Do NOT output JSON in chat. Instead, update the node directly by calling the ClawUI API using curl:
 
-curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"title": "your updated title", "description": "your updated description", "error": ""${capturedStatus === "failed" ? ', "status": "pending"' : ""}}'
+curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"title": "your updated title", "description": "your updated description", "error": ""${statusField}}'
 
 Replace the placeholder values with your actual updated title and description. Make sure the JSON is valid — escape any special characters in string values.${statusResetNote}`;
 
     // Fire and forget — enqueue and apply results when done
+    const reevBefore = new Date();
+    const reevCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+        await runClaudeInteractiveGen(prompt, reevCwd || undefined);
+        captureRelatedSession(reevCwd, reevBefore, nodeId, blueprintId, "reevaluate");
       } finally {
         removePendingTask(blueprintId, nodeId, "reevaluate");
       }
@@ -275,6 +429,127 @@ Replace the placeholder values with your actual updated title and description. M
         error: `Re-evaluate failed: ${errMsg.slice(0, 200)}`,
       });
       log.error(`Reevaluate node ${nodeId} failed: ${errMsg}`);
+    });
+
+    res.json({ status: "queued", nodeId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/split — AI-powered node decomposition
+// Fire-and-forget: returns immediately with {status:"queued"}, creates sub-nodes in background
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/split", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const node = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!node) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+    if (node.status !== "pending") {
+      res.status(400).json({ error: "Only pending nodes can be split" });
+      return;
+    }
+
+    const blueprintId = req.params.blueprintId;
+    const nodeId = req.params.nodeId;
+
+    // Find downstream dependents (nodes that depend on this node)
+    const downstreamDeps = blueprint.nodes
+      .filter((n) => n.dependencies.includes(nodeId))
+      .map((n) => ({ id: n.id, title: n.title }));
+
+    // Track in pending tasks for queue status API
+    addPendingTask(blueprintId, { type: "split", nodeId, queuedAt: new Date().toISOString() });
+
+    // Build context about all nodes (titles + statuses only)
+    const nodesContext = blueprint.nodes
+      .map((n, i) => {
+        let line = `  ${i + 1}. [${n.status}] ${n.title}`;
+        if (n.id === nodeId) line += " ← THIS NODE (to be split)";
+        return line;
+      })
+      .join("\n");
+
+    const apiBase = getApiBase();
+    const authParam = getAuthParam();
+
+    const downstreamInfo = downstreamDeps.length > 0
+      ? `\nDownstream nodes that currently depend on this node (their dependencies must be rewired to point to the LAST sub-node):\n${downstreamDeps.map((d) => `  - ${d.id} ("${d.title}")`).join("\n")}`
+      : "\nNo downstream nodes depend on this node.";
+
+    const depsJson = JSON.stringify(node.dependencies);
+
+    const prompt = `You are a project manager splitting a large development task into smaller, more actionable sub-tasks.
+
+Blueprint: "${blueprint.title}"
+${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
+${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
+
+All nodes in the plan:
+${nodesContext}
+
+The node to split:
+- Node ID: ${nodeId}
+- Title: "${node.title}"
+- Description: "${node.description || "(none)"}"
+- Dependencies: ${depsJson}
+${downstreamInfo}
+
+Your task: Decompose this node into 2-3 smaller, self-contained sub-nodes. Each sub-node should be completable in a single Claude Code session. Think carefully about logical boundaries.
+
+Execute these steps IN ORDER using curl:
+
+**Step 1 — Create sub-nodes via batch-create:**
+The first sub-node must inherit the original node's dependencies: ${depsJson}
+Subsequent sub-nodes should depend on the previous one (use integer index: 0 for first created, 1 for second, etc.).
+
+curl -s -X POST '${apiBase}/api/blueprints/${blueprintId}/nodes/batch-create?${authParam}' -H 'Content-Type: application/json' -d '[
+  {"title": "Sub-task 1 title", "description": "Sub-task 1 description", "dependencies": ${depsJson}},
+  {"title": "Sub-task 2 title", "description": "Sub-task 2 description", "dependencies": [0]},
+  {"title": "Sub-task 3 title (if needed)", "description": "Sub-task 3 description", "dependencies": [1]}
+]'
+
+IMPORTANT: The response will contain a "nodes" array with the created nodes and their IDs. You MUST read the response to get the ID of the LAST created sub-node for step 2.
+
+${downstreamDeps.length > 0 ? `**Step 2 — Rewire downstream dependents:**
+For each downstream node, replace "${nodeId}" in their dependencies with the ID of the LAST sub-node you created.
+
+${downstreamDeps.map((d) => `curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${d.id}?${authParam}' -H 'Content-Type: application/json' -d '{"dependencies": [REPLACE_WITH_CORRECT_DEPS]}'
+# Original deps for "${d.title}": replace "${nodeId}" with the last sub-node's ID`).join("\n\n")}
+
+IMPORTANT: When updating dependencies, keep ALL existing dependencies — only replace "${nodeId}" with the last sub-node ID. Fetch the node first if you need to see its current deps.` : "**Step 2 — No downstream rewiring needed** (no nodes depend on this one)."}
+
+**Step ${downstreamDeps.length > 0 ? "3" : "2"} — Mark original node as skipped:**
+curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"status": "skipped"}'
+
+Guidelines for decomposition:
+- Each sub-node should be independently testable and completable
+- Descriptions should be specific and actionable for an AI coding agent
+- Preserve the intent and scope of the original node — don't add or remove work
+- If the task naturally has only 2 parts, use 2 sub-nodes (don't force 3)`;
+
+    // Fire and forget — enqueue and apply results when done
+    const splitBefore = new Date();
+    const splitCwd = blueprint.projectCwd;
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await runClaudeInteractiveGen(prompt, splitCwd || undefined);
+        captureRelatedSession(splitCwd, splitBefore, nodeId, blueprintId, "split");
+      } finally {
+        removePendingTask(blueprintId, nodeId, "split");
+      }
+    }).catch(err => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      updateMacroNode(blueprintId, nodeId, {
+        error: `Split failed: ${errMsg.slice(0, 200)}`,
+      });
+      log.error(`Split node ${nodeId} failed: ${errMsg}`);
     });
 
     res.json({ status: "queued", nodeId });
@@ -629,6 +904,16 @@ planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, re
   }
 });
 
+// GET /api/blueprints/:blueprintId/nodes/:nodeId/related-sessions
+planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/related-sessions", (req, res) => {
+  try {
+    const sessions = getRelatedSessionsForNode(req.params.nodeId);
+    res.json(sessions);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // POST /api/blueprints/:blueprintId/nodes/:nodeId/executions
 planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, res) => {
   try {
@@ -665,6 +950,17 @@ planRouter.get("/api/blueprints/:id/queue", (req, res) => {
   try {
     const info = getQueueInfo(req.params.id);
     res.json(info);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// ─── Global queue status ──────────────────────────────────────
+
+// GET /api/global-status — aggregate queue info across all blueprints
+planRouter.get("/api/global-status", (_req, res) => {
+  try {
+    res.json(getGlobalQueueInfo());
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -712,6 +1008,34 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/run", (req, res) => {
     executeNode(req.params.id, req.params.nodeId)
       .catch(err => log.error(`Node ${req.params.nodeId} execution failed: ${err.message}`));
     res.json({ status: "queued", nodeId: req.params.nodeId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /api/blueprints/:id/nodes/:nodeId/unqueue — cancel a queued node, reverting it to pending
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/unqueue", (req, res) => {
+  try {
+    const bp = getBlueprint(req.params.id);
+    if (!bp) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const nd = bp.nodes.find((n) => n.id === req.params.nodeId);
+    if (!nd) { res.status(404).json({ error: "Node not found" }); return; }
+    if (nd.status === "running") {
+      res.status(409).json({ error: "Cannot unqueue a running node" }); return;
+    }
+    if (nd.status !== "queued") {
+      res.status(400).json({ error: `Node status is "${nd.status}", must be "queued" to unqueue` }); return;
+    }
+
+    // Remove from in-memory queue and pending tasks
+    removeQueuedTask(req.params.id, req.params.nodeId);
+    removePendingTask(req.params.id, req.params.nodeId, "run");
+    // Revert SQLite status to pending
+    updateMacroNode(req.params.id, req.params.nodeId, { status: "pending" });
+
+    log.info(`Unqueued node ${req.params.nodeId.slice(0, 8)} in blueprint ${req.params.id.slice(0, 8)}`);
+    res.json({ status: "pending" });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });
@@ -932,6 +1256,41 @@ planRouter.post("/api/blueprints/:id/executions/:execId/task-summary", (req, res
   }
 });
 
+// POST /api/blueprints/:id/executions/:execId/report-status — callback for explicit execution status reporting
+// Called by Claude at the end of node execution to authoritatively report done/failed/blocked status
+planRouter.post("/api/blueprints/:id/executions/:execId/report-status", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const execId = req.params.execId;
+
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const execution = getExecution(execId);
+    if (!execution || execution.blueprintId !== blueprintId) {
+      res.status(404).json({ error: "Execution not found" }); return;
+    }
+
+    const { status, reason } = req.body as {
+      status?: string;
+      reason?: string;
+    };
+
+    const validStatuses: ReportedStatus[] = ["done", "failed", "blocked"];
+    if (!status || !validStatuses.includes(status as ReportedStatus)) {
+      res.status(400).json({ error: "Missing or invalid status field. Must be one of: done, failed, blocked" }); return;
+    }
+
+    setExecutionReportedStatus(execId, status as ReportedStatus, reason);
+
+    log.info(`Status reported for execution ${execId.slice(0, 8)}: ${status}${reason ? ` (reason: ${reason.slice(0, 100)})` : ""}`);
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Report status failed: ${err instanceof Error ? err.message : err}`);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // POST /api/blueprints/:id/nodes/:nodeId/evaluate — evaluate completed node and apply graph mutations
 // Fire-and-forget: returns immediately with {status:"queued"}, applies mutations in background
 planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluate", (req, res) => {
@@ -1010,7 +1369,6 @@ planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
           ? ` [depends on: ${n.dependencies.map((d) => nodeIdMap[d]?.title ?? d).join(", ")}]`
           : "";
         let line = `  ${i + 1}. (id: ${n.id}) [${n.status}] ${n.title}${depsStr}`;
-        if (n.description) line += ` — ${n.description}`;
         if (n.error) line += ` (ERROR: ${n.error})`;
         return line;
       })
@@ -1057,7 +1415,7 @@ The body is a JSON ARRAY of node updates. Each element has:
 - "id": (REQUIRED) the node ID
 - "title": updated title string
 - "description": updated description string
-- "status": one of "pending", "done", "skipped" (set "done" if fully implemented, "skipped" if redundant)
+- "status": one of "pending", "done", "skipped", "blocked" (set "done" if fully implemented, "skipped" if redundant, "pending" if a previously blocked node's blocker is resolved, "blocked" if a blocker still persists)
 - "dependencies": array of node ID strings (only use valid IDs from the list above)
 - "error": error message string (set to "" to clear)
 
@@ -1066,8 +1424,9 @@ Guidelines:
 2. If fully implemented → set status to "done".
 3. If partially implemented → keep "pending", describe what remains.
 4. If redundant/obsolete → set to "skipped", explain why in description.
-5. Update dependencies if needed (remove invalid, add missing).
-6. You MUST make ONE batch API call with ALL node updates — do NOT call individual endpoints.
+5. If blocked and blocker is resolved → set to "pending". If blocker persists → keep "blocked" and update description.
+6. Update dependencies if needed (remove invalid, add missing).
+7. You MUST make ONE batch API call with ALL node updates — do NOT call individual endpoints.
 
 Example (updates all nodes in one call):
 curl -X PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch -H "Content-Type: application/json" -d '[{"id":"node-id-1", "title":"...", "description":"...", "status":"done"}, {"id":"node-id-2", "title":"...", "status":"skipped"}]'`;
@@ -1075,13 +1434,27 @@ curl -X PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch -
     // Fire and forget via blueprint queue — Claude Code will directly update DB via API
     // withTimeout prevents indefinite hangs if the CLI process never exits
     const REEVALUATE_TIMEOUT = 32 * 60 * 1000; // 32 min (30 min exec + 2 min grace)
+    const reevAllBefore = new Date();
+    const reevAllCwd = blueprint.projectCwd;
+    const reevAllNodeIds = nonDoneNodes.map(n => n.id);
     enqueueBlueprintTask(blueprintId, async () => {
       try {
         await withTimeout(
-          runClaudeInteractive(prompt, blueprint.projectCwd || undefined),
+          runClaudeInteractive(prompt, reevAllCwd || undefined),
           REEVALUATE_TIMEOUT,
           "Reevaluate-all timed out after 32 minutes",
         );
+        // Capture session for all reevaluated nodes (single session covers all)
+        if (reevAllCwd) {
+          const sessionId = detectNewSession(reevAllCwd, reevAllBefore);
+          if (sessionId) {
+            const now = new Date().toISOString();
+            for (const nid of reevAllNodeIds) {
+              createRelatedSession(nid, blueprintId, sessionId, "reevaluate_all", reevAllBefore.toISOString(), now);
+            }
+            log.debug(`Captured reevaluate-all session ${sessionId.slice(0, 8)} for ${reevAllNodeIds.length} nodes`);
+          }
+        }
       } finally {
         // Always clean up pending tasks, whether success, error, or timeout
         for (const n of nonDoneNodes) {

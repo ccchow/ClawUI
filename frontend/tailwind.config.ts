@@ -22,7 +22,7 @@ const config: Config = {
         text: {
           primary: "#e2e8f0",
           secondary: "#94a3b8",
-          muted: "#64748b",
+          muted: "#708096",
         },
         border: {
           primary: "#1e293b",

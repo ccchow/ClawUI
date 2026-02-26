@@ -13,12 +13,16 @@ export function MarkdownEditor({
   placeholder = "Description (supports Markdown and image paste)",
   minHeight = "60px",
   className = "",
+  disabled = false,
+  actions,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   minHeight?: string;
   className?: string;
+  disabled?: boolean;
+  actions?: React.ReactNode;
 }) {
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const [uploading, setUploading] = useState(false);
@@ -80,11 +84,11 @@ export function MarkdownEditor({
   return (
     <div className={className} onClick={(e) => e.stopPropagation()}>
       {/* Mode toggle tabs */}
-      <div className="flex items-center gap-1 mb-1">
+      <div className="flex items-center gap-1 mb-1 flex-wrap">
         <button
           type="button"
           onClick={() => setMode("edit")}
-          className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
+          className={`px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md text-[11px] font-medium transition-colors ${
             mode === "edit"
               ? "bg-bg-tertiary text-text-primary"
               : "text-text-muted hover:text-text-secondary"
@@ -95,7 +99,7 @@ export function MarkdownEditor({
         <button
           type="button"
           onClick={() => setMode("preview")}
-          className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
+          className={`px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md text-[11px] font-medium transition-colors ${
             mode === "preview"
               ? "bg-bg-tertiary text-text-primary"
               : "text-text-muted hover:text-text-secondary"
@@ -104,10 +108,15 @@ export function MarkdownEditor({
           Preview
         </button>
         {uploading && (
-          <span className="text-[11px] text-accent-blue flex items-center gap-1 ml-auto">
+          <span className="text-[11px] text-accent-blue flex items-center gap-1">
             <span className="inline-block w-3 h-3 border-2 border-accent-blue/30 border-t-accent-blue rounded-full animate-spin" />
             Pasting image...
           </span>
+        )}
+        {actions && (
+          <div className="flex items-center gap-2 ml-auto">
+            {actions}
+          </div>
         )}
       </div>
 
@@ -123,8 +132,9 @@ export function MarkdownEditor({
             autoResize(e.target);
           }}
           onPaste={handlePaste}
+          readOnly={disabled}
           placeholder={placeholder}
-          className={`w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 resize-y font-mono`}
+          className={`w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 resize-y font-mono${disabled ? " opacity-60 cursor-not-allowed" : ""}`}
           style={{ minHeight }}
         />
       ) : (

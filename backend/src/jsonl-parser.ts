@@ -35,6 +35,72 @@ export interface ProjectInfo {
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
 /**
+ * Decode a Claude project directory name back to the original filesystem path.
+ *
+ * Claude CLI encodes paths by replacing both '/' and '.' (leading dot in hidden
+ * dirs) with '-'. This makes naive decoding ambiguous — e.g., a hyphen in a
+ * directory name is indistinguishable from a path separator. This function uses
+ * filesystem lookups to reconstruct the actual path via backtracking.
+ *
+ * Examples:
+ *   -Users-leizhou-Git-ClawUI           → /Users/leizhou/Git/ClawUI
+ *   -Users-leizhou--openclaw-workspace  → /Users/leizhou/.openclaw/workspace
+ *   -Users-leizhou-Git-my-project       → /Users/leizhou/Git/my-project
+ */
+export function decodeProjectPath(encoded: string): string | undefined {
+  const stripped = encoded.replace(/^-+/, "");
+  if (!stripped) return "/";
+
+  const parts = stripped.split("-");
+  return walkFs("/", parts, 0);
+}
+
+/**
+ * Recursively reconstruct a filesystem path from dash-separated parts.
+ * Tries progressively longer segments (to handle hyphens in directory names)
+ * and also tries prepending '.' (to handle hidden directories encoded as --).
+ */
+function walkFs(current: string, parts: string[], startIdx: number): string | undefined {
+  if (startIdx >= parts.length) return current;
+
+  // Consecutive empty parts (from -- in encoded name) signal a dot-prefixed directory
+  let dotPrefix = "";
+  let actualStart = startIdx;
+  while (actualStart < parts.length && parts[actualStart] === "") {
+    dotPrefix += ".";
+    actualStart++;
+  }
+
+  if (actualStart >= parts.length) return undefined;
+
+  // Try progressively longer segments (longest first for greedy match)
+  for (let endIdx = parts.length; endIdx > actualStart; endIdx--) {
+    const segment = dotPrefix + parts.slice(actualStart, endIdx).join("-");
+
+    const testPath = join(current, segment);
+    if (existsSync(testPath)) {
+      const result = walkFs(testPath, parts, endIdx);
+      if (result) return result;
+    }
+  }
+
+  // If we had a dotPrefix, also try interpreting the empty parts as regular
+  // hyphen boundaries (fallback for edge cases)
+  if (dotPrefix) {
+    for (let endIdx = parts.length; endIdx > startIdx; endIdx--) {
+      const segment = parts.slice(startIdx, endIdx).join("-");
+      const testPath = join(current, segment);
+      if (existsSync(testPath)) {
+        const result = walkFs(testPath, parts, endIdx);
+        if (result) return result;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Look up the original working directory for a session by finding which project contains it.
  * Returns the decoded project path (e.g., "/Users/you/Git/MyProject").
  */
@@ -45,8 +111,11 @@ export function getSessionCwd(sessionId: string): string | undefined {
     if (!entry.isDirectory()) continue;
     const jsonlPath = join(CLAUDE_PROJECTS_DIR, entry.name, `${sessionId}.jsonl`);
     if (existsSync(jsonlPath)) {
-      const decoded = "/" + entry.name.replace(/-/g, "/").replace(/^\/+/, "");
-      return decoded;
+      // Use filesystem-aware decoding first
+      const decoded = decodeProjectPath(entry.name);
+      if (decoded && existsSync(decoded)) return decoded;
+      // Fallback: return undefined rather than an invalid path
+      return undefined;
     }
   }
   return undefined;
@@ -250,6 +319,8 @@ export function parseTimelineRaw(filePath: string): TimelineNode[] {
 
 // ─── Session failure analysis ─────────────────────────────────
 
+export type ContextPressure = "none" | "moderate" | "high" | "critical";
+
 export interface SessionAnalysis {
   failureReason: FailureReason;
   detail: string;
@@ -257,12 +328,18 @@ export interface SessionAnalysis {
   peakTokens: number;
   lastApiError: string | null;
   messageCount: number;
+  contextPressure: ContextPressure;
+  /** True if the last event in the session was a compaction (session likely died at the context limit) */
+  endedAfterCompaction: boolean;
+  /** Number of successful assistant responses after the last compaction (0 = died immediately) */
+  responsesAfterLastCompact: number;
 }
 
 /**
  * Analyze a session's JSONL file to detect why it may have failed.
- * Checks for: API errors (output token limit, content filter), context compaction events,
- * and high token usage that suggests context pressure.
+ * Checks for: API errors (output token limit, content filter, overloaded),
+ * context compaction events, token usage patterns, and whether the session
+ * died right after hitting the context limit.
  *
  * Returns null if the session file doesn't exist.
  */
@@ -295,8 +372,11 @@ export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null 
   let peakTokens = 0;
   let lastApiError: string | null = null;
   let messageCount = 0;
+  let lastCompactLineIdx = -1;
+  let responsesAfterLastCompact = 0;
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     let obj: Record<string, unknown>;
     try {
       obj = JSON.parse(line);
@@ -309,10 +389,17 @@ export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null 
     // Detect context compaction events
     if (obj.type === "system" && obj.subtype === "compact_boundary") {
       compactCount++;
+      lastCompactLineIdx = i;
+      responsesAfterLastCompact = 0;
       const meta = obj.compactMetadata as { preTokens?: number } | undefined;
       if (meta?.preTokens && meta.preTokens > peakTokens) {
         peakTokens = meta.preTokens;
       }
+    }
+
+    // Count successful assistant responses after the last compaction
+    if (lastCompactLineIdx >= 0 && obj.type === "assistant" && !obj.isApiErrorMessage) {
+      responsesAfterLastCompact++;
     }
 
     // Track API errors
@@ -344,6 +431,19 @@ export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null 
     }
   }
 
+  // Did the session end right after (or during) a compaction?
+  const endedAfterCompaction = lastCompactLineIdx >= 0 && responsesAfterLastCompact <= 1;
+
+  // Determine context pressure level
+  let contextPressure: ContextPressure = "none";
+  if (compactCount >= 3 || (compactCount >= 2 && endedAfterCompaction)) {
+    contextPressure = "critical";
+  } else if (compactCount >= 2 || (compactCount >= 1 && peakTokens > 150_000)) {
+    contextPressure = "high";
+  } else if (compactCount >= 1 || peakTokens > 120_000) {
+    contextPressure = "moderate";
+  }
+
   // Determine failure reason
   let failureReason: FailureReason = null;
   let detail = "";
@@ -352,17 +452,38 @@ export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null 
     if (lastApiError.includes("exceeded") && lastApiError.includes("output token maximum")) {
       failureReason = "output_token_limit";
       detail = `Session ended with output token limit error. ${lastApiError}`;
-    } else if (lastApiError.includes("context") || lastApiError.includes("input") && lastApiError.includes("token")) {
+    } else if (
+      // Explicit context/input token errors
+      (lastApiError.includes("context") && lastApiError.includes("token")) ||
+      (lastApiError.includes("input") && lastApiError.includes("token")) ||
+      lastApiError.includes("context window") ||
+      lastApiError.includes("maximum context length") ||
+      lastApiError.includes("context_length_exceeded") ||
+      lastApiError.includes("max_tokens") ||
+      // Overloaded API errors during context pressure
+      (lastApiError.includes("overloaded") && compactCount >= 1)
+    ) {
       failureReason = "context_exhausted";
       detail = `Session ended with context error: ${lastApiError}`;
+    } else if (lastApiError.includes("overloaded")) {
+      failureReason = "error";
+      detail = `API overloaded: ${lastApiError}`;
     } else {
       failureReason = "error";
       detail = `API error: ${lastApiError}`;
     }
+  } else if (endedAfterCompaction && compactCount >= 2) {
+    // Session compacted multiple times and died right after the last compaction
+    failureReason = "context_exhausted";
+    detail = `Session compacted ${compactCount} times and ended immediately after the last compaction (peak ${peakTokens} tokens). Context was full.`;
   } else if (compactCount >= 3) {
     // Multiple compactions suggest heavy context pressure — session may have degraded
     failureReason = "context_exhausted";
     detail = `Session compacted ${compactCount} times (peak ${peakTokens} tokens). Context pressure likely degraded performance.`;
+  } else if (compactCount >= 2 && peakTokens > 150_000) {
+    // Two compactions with very high peak tokens
+    failureReason = "context_exhausted";
+    detail = `Session compacted ${compactCount} times with peak ${peakTokens} tokens — near context limit.`;
   }
 
   return {
@@ -372,5 +493,8 @@ export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null 
     peakTokens,
     lastApiError,
     messageCount,
+    contextPressure,
+    endedAfterCompaction,
+    responsesAfterLastCompact,
   };
 }

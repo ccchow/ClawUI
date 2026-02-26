@@ -179,7 +179,8 @@ export default function SessionPage() {
   const [lastRefresh, setLastRefresh] = useState<number>(0);
   const [refreshLabel, setRefreshLabel] = useState("just now");
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const nodeCountRef = useRef(0);
+  // Fingerprint for poll dedup: detects both count changes and content replacement (synthetic → real nodes)
+  const pollFingerprintRef = useRef("");
 
   // Session enrichment meta
   const [sessionMeta, setSessionMeta] = useState<{
@@ -187,6 +188,7 @@ export default function SessionPage() {
     tags?: string[];
     notes?: string;
     starred?: boolean;
+    archived?: boolean;
   }>({});
 
   // Blueprint context (if this session was created by a plan execution)
@@ -201,10 +203,13 @@ export default function SessionPage() {
     async () => {
       try {
         const n = await getTimeline(id);
-        // Only update state if node count changed (avoids re-render churn)
-        if (n.length !== nodeCountRef.current) {
+        // Fingerprint includes count + last node ID to detect both new nodes
+        // and content replacement (e.g., synthetic optimistic → real parsed nodes)
+        const last = n[n.length - 1];
+        const fp = `${n.length}-${last?.id ?? ""}`;
+        if (fp !== pollFingerprintRef.current) {
           setNodes(n);
-          nodeCountRef.current = n.length;
+          pollFingerprintRef.current = fp;
         }
         setLastRefresh(Date.now());
       } catch {
@@ -217,7 +222,7 @@ export default function SessionPage() {
   // Consolidated initial load: fetch nodes + meta + blueprint context together
   useEffect(() => {
     let cancelled = false;
-    nodeCountRef.current = 0;
+    pollFingerprintRef.current = "";
     setLoading(true);
 
     async function loadAll() {
@@ -239,8 +244,10 @@ export default function SessionPage() {
 
       // Batch all state updates together
       if (nodesResult.status === "fulfilled") {
-        setNodes(nodesResult.value);
-        nodeCountRef.current = nodesResult.value.length;
+        const initNodes = nodesResult.value;
+        const last = initNodes[initNodes.length - 1];
+        setNodes(initNodes);
+        pollFingerprintRef.current = `${initNodes.length}-${last?.id ?? ""}`;
         setLastRefresh(Date.now());
       } else {
         setError(
@@ -331,31 +338,19 @@ export default function SessionPage() {
           content: prompt,
         },
       ];
-      nodeCountRef.current = updated.length;
+      pollFingerprintRef.current = `${updated.length}-${thinkingNodeId}`;
       return updated;
     });
 
     const startTime = Date.now();
     try {
       const data = await runPrompt(id, prompt);
-      const elapsed = Date.now() - startTime;
 
-      // Replace thinking node with actual response
-      setNodes((prev) => {
-        const updated = prev.map((n) =>
-          n.id === thinkingNodeId
-            ? {
-                id: `result-${Date.now()}`,
-                type: "assistant" as const,
-                timestamp: new Date().toISOString(),
-                title: (data.output || "").slice(0, 120),
-                content: data.output || "(empty response)",
-              }
-            : n
-        );
-        nodeCountRef.current = updated.length;
-        return updated;
-      });
+      // Backend synced the JSONL after run — fetch real parsed timeline
+      const realNodes = await getTimeline(id);
+      const lastReal = realNodes[realNodes.length - 1];
+      setNodes(realNodes);
+      pollFingerprintRef.current = `${realNodes.length}-${lastReal?.id ?? ""}`;
       setLastRefresh(Date.now());
       setSuggestions(data.suggestions || []);
     } catch (e) {
@@ -376,6 +371,8 @@ export default function SessionPage() {
         )
       );
       setError(e instanceof Error ? e.message : String(e));
+      // Reset fingerprint so next poll replaces synthetic nodes with real data
+      pollFingerprintRef.current = "";
     } finally {
       setRunning(false);
     }
@@ -386,7 +383,7 @@ export default function SessionPage() {
       <div className="text-center py-20">
         <p className="text-accent-red text-lg mb-2">Failed to load session</p>
         <p className="text-text-muted text-sm">{error}</p>
-        <Link href="/" className="text-accent-blue text-sm mt-4 inline-block hover:underline">
+        <Link href="/sessions" className="text-accent-blue text-sm mt-4 inline-block hover:underline">
           Back to sessions
         </Link>
       </div>
@@ -394,11 +391,11 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="pb-12">
+    <div className="pb-12 animate-fade-in">
       {/* Header */}
       <div className="mb-6">
         <Link
-          href="/"
+          href="/sessions"
           className="text-sm text-text-muted hover:text-text-secondary transition-colors mb-2 inline-block"
         >
           ← Back to sessions
@@ -411,6 +408,52 @@ export default function SessionPage() {
           <span className="text-xs text-text-muted">
             {nodes.length} nodes
           </span>
+
+          {/* Star toggle */}
+          <button
+            onClick={() => {
+              const newStarred = !sessionMeta.starred;
+              handleMetaChange({ starred: newStarred });
+              updateSessionMeta(id, { starred: newStarred }).catch(() => {
+                handleMetaChange({ starred: !newStarred });
+              });
+            }}
+            className={`flex-shrink-0 p-1 rounded transition-all active:scale-[0.9] ${
+              sessionMeta.starred
+                ? "text-accent-amber"
+                : "text-text-muted/30 hover:text-accent-amber/60"
+            }`}
+            title={sessionMeta.starred ? "Unstar" : "Star"}
+          >
+            <svg className="w-4 h-4" viewBox="0 0 16 16" fill={sessionMeta.starred ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2">
+              <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
+            </svg>
+          </button>
+
+          {/* Archive toggle */}
+          <button
+            onClick={() => {
+              const newArchived = !sessionMeta.archived;
+              handleMetaChange({ archived: newArchived });
+              updateSessionMeta(id, { archived: newArchived }).catch(() => {
+                handleMetaChange({ archived: !newArchived });
+              });
+            }}
+            className={`flex-shrink-0 p-1 rounded transition-all active:scale-[0.9] ${
+              sessionMeta.archived
+                ? "text-text-muted hover:text-text-secondary"
+                : "text-text-muted/30 hover:text-text-muted/60"
+            }`}
+            title={sessionMeta.archived ? "Unarchive" : "Archive"}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              {sessionMeta.archived ? (
+                <><rect x="2" y="2" width="12" height="4" rx="1" /><path d="M3 6v7a1 1 0 001 1h8a1 1 0 001-1V6" /><path d="M8 9v3M6 11l2 -2 2 2" /></>
+              ) : (
+                <><rect x="2" y="2" width="12" height="4" rx="1" /><path d="M3 6v7a1 1 0 001 1h8a1 1 0 001-1V6" /><path d="M8 9v3M6 10l2 2 2-2" /></>
+              )}
+            </svg>
+          </button>
 
           {/* Tags in header */}
           {sessionMeta.tags && sessionMeta.tags.length > 0 && (
@@ -439,9 +482,11 @@ export default function SessionPage() {
             <button
               onClick={() => fetchNodes()}
               title="Refresh now"
-              className="text-xs text-text-muted hover:text-text-primary transition-colors px-1.5 py-0.5 rounded hover:bg-bg-tertiary"
+              className="text-xs text-text-muted hover:text-text-primary transition-all active:scale-[0.9] px-1.5 py-1 rounded hover:bg-bg-tertiary"
             >
-              ↻
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 8a6 6 0 1 1-6-6" /><polyline points="14 2 14 6 10 6" />
+              </svg>
             </button>
           </div>
         </div>

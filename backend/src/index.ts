@@ -5,7 +5,7 @@ import planRouter from "./plan-routes.js";
 import { initDb, syncAll } from "./db.js";
 import { initPlanTables } from "./plan-db.js";
 import { requeueOrphanedNodes, smartRecoverStaleExecutions } from "./plan-executor.js";
-import { PORT } from "./config.js";
+import { PORT, EXPECT_PATH, CLAUDE_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
 
@@ -48,6 +48,8 @@ const HOST = "127.0.0.1";
 
 app.listen(PORT, HOST, () => {
   log.info(`ClawUI backend locked to http://${HOST}:${PORT}`);
+  log.info(`Claude CLI: ${CLAUDE_PATH}`);
+  log.info(`Expect binary: ${EXPECT_PATH}`);
   log.info("");
   log.info("========================================================");
   log.info("  ClawUI Secure Dashboard Ready");

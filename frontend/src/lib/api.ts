@@ -94,6 +94,10 @@ export function getTimeline(sessionId: string): Promise<TimelineNode[]> {
   return fetchJSON(`${API_BASE}/sessions/${sessionId}/timeline`);
 }
 
+export function getLastSessionMessage(sessionId: string): Promise<TimelineNode> {
+  return fetchJSON(`${API_BASE}/sessions/${sessionId}/last-message`);
+}
+
 export interface RunResult {
   output: string;
   suggestions: Suggestion[];
@@ -177,6 +181,8 @@ export interface Artifact {
 
 export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
 
+export type ContextPressure = "none" | "moderate" | "high" | "critical";
+
 export interface NodeExecution {
   id: string;
   nodeId: string;
@@ -189,6 +195,9 @@ export interface NodeExecution {
   contextTokensUsed?: number;
   parentExecutionId?: string;
   failureReason?: FailureReason;
+  compactCount?: number;
+  peakTokens?: number;
+  contextPressure?: ContextPressure;
   startedAt: string;
   completedAt?: string;
 }
@@ -228,6 +237,7 @@ export interface Blueprint {
   description: string;
   projectCwd?: string;
   status: BlueprintStatus;
+  archivedAt?: string;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -235,10 +245,11 @@ export interface Blueprint {
 
 // --- Blueprint APIs ---
 
-export function listBlueprints(filters?: { status?: string; projectCwd?: string }): Promise<Blueprint[]> {
+export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean }): Promise<Blueprint[]> {
   const params = new URLSearchParams();
   if (filters?.status) params.set("status", filters.status);
   if (filters?.projectCwd) params.set("projectCwd", filters.projectCwd);
+  if (filters?.includeArchived) params.set("includeArchived", "true");
   const qs = params.toString();
   return fetchJSON(`${API_BASE}/blueprints${qs ? `?${qs}` : ""}`);
 }
@@ -276,6 +287,18 @@ export function deleteBlueprint(id: string): Promise<{ ok: boolean }> {
   });
 }
 
+export function archiveBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/archive`, {
+    method: "POST",
+  });
+}
+
+export function unarchiveBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/unarchive`, {
+    method: "POST",
+  });
+}
+
 export function approveBlueprint(id: string): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/approve`, {
     method: "POST",
@@ -284,7 +307,7 @@ export function approveBlueprint(id: string): Promise<Blueprint> {
 
 export function enrichNode(
   blueprintId: string,
-  data: { title: string; description?: string }
+  data: { title: string; description?: string; nodeId?: string }
 ): Promise<{ title: string; description: string }> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/enrich-node`, {
     method: "POST",
@@ -421,6 +444,27 @@ export function getNodeExecutions(
   );
 }
 
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate";
+
+export interface RelatedSession {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  sessionId: string;
+  type: RelatedSessionType;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export function getRelatedSessions(
+  blueprintId: string,
+  nodeId: string
+): Promise<RelatedSession[]> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/related-sessions`
+  );
+}
+
 export function runNextNode(
   blueprintId: string
 ): Promise<NodeExecution | { message: string }> {
@@ -442,7 +486,7 @@ export function runAllNodes(
 // --- Queue Status API ---
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split";
   nodeId?: string;
   queuedAt: string;
 }
@@ -453,8 +497,46 @@ export interface QueueInfo {
   pendingTasks: PendingTask[];
 }
 
+export function unqueueNode(blueprintId: string, nodeId: string): Promise<{ status: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/unqueue`,
+    { method: "POST" }
+  );
+}
+
+export function splitNode(
+  blueprintId: string,
+  nodeId: string
+): Promise<{ status: string; nodeId: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/split`,
+    { method: "POST" }
+  );
+}
+
 export function getQueueStatus(blueprintId: string): Promise<QueueInfo> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/queue`);
+}
+
+// ─── Global queue status ──────────────────────────────────────
+
+export interface GlobalQueueTask {
+  blueprintId: string;
+  type: string;
+  nodeId?: string;
+  nodeTitle?: string;
+  blueprintTitle?: string;
+  sessionId?: string;
+}
+
+export interface GlobalQueueInfo {
+  active: boolean;
+  totalPending: number;
+  tasks: GlobalQueueTask[];
+}
+
+export function getGlobalStatus(): Promise<GlobalQueueInfo> {
+  return fetchJSON(`${API_BASE}/global-status`);
 }
 
 // ─── Dev Tools ────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import {
   getRecentRestartFailedExecutions,
   getExecutionBySession,
   recoverStaleExecutions,
+  createRelatedSession,
 } from "./plan-db.js";
 import { syncSession } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, StaleExecution, FailureReason } from "./plan-db.js";
@@ -27,7 +28,7 @@ import { analyzeSessionHealth } from "./jsonl-parser.js";
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split";
   nodeId?: string;
   queuedAt: string;
 }
@@ -64,13 +65,106 @@ export function getQueueInfo(blueprintId: string): QueueInfo {
   };
 }
 
-import { CLAUDE_PATH } from "./config.js";
+export interface GlobalQueueTask {
+  blueprintId: string;
+  type: string;
+  nodeId?: string;
+  nodeTitle?: string;
+  blueprintTitle?: string;
+  sessionId?: string;
+}
+
+export interface GlobalQueueInfo {
+  active: boolean;
+  totalPending: number;
+  tasks: GlobalQueueTask[];
+}
+
+export function getGlobalQueueInfo(): GlobalQueueInfo {
+  const tasks: GlobalQueueTask[] = [];
+  // Include currently running blueprints (pending task is removed when execution starts)
+  for (const blueprintId of blueprintRunning) {
+    tasks.push({ blueprintId, type: "running", nodeId: blueprintRunningNodeId.get(blueprintId) });
+  }
+  // Include queued/pending tasks
+  for (const [blueprintId, pending] of blueprintPendingTasks) {
+    for (const t of pending) {
+      tasks.push({ blueprintId, type: t.type, nodeId: t.nodeId });
+    }
+  }
+  const active = tasks.length > 0;
+
+  // Enrich tasks with titles and session IDs from SQLite
+  const blueprintCache = new Map<string, Blueprint | null>();
+  for (const task of tasks) {
+    // Look up blueprint (cached per blueprint)
+    if (!blueprintCache.has(task.blueprintId)) {
+      try {
+        blueprintCache.set(task.blueprintId, getBlueprint(task.blueprintId));
+      } catch {
+        blueprintCache.set(task.blueprintId, null);
+      }
+    }
+    const blueprint = blueprintCache.get(task.blueprintId);
+    if (blueprint) {
+      task.blueprintTitle = blueprint.title;
+      if (task.nodeId) {
+        const node = blueprint.nodes.find((n) => n.id === task.nodeId);
+        if (node) {
+          task.nodeTitle = node.title;
+          // Find latest running execution's sessionId
+          const runningExec = node.executions?.find((e) => e.status === "running");
+          if (runningExec?.sessionId) {
+            task.sessionId = runningExec.sessionId;
+          } else if (node.executions?.length) {
+            // Fallback: latest execution with a sessionId
+            const latest = [...node.executions].reverse().find((e) => e.sessionId);
+            if (latest?.sessionId) task.sessionId = latest.sessionId;
+          }
+        }
+      }
+    }
+  }
+
+  return { active, totalPending: tasks.length, tasks };
+}
+
+/**
+ * Remove a queued task from the in-memory blueprint queue by nodeId.
+ * Returns false if the task is not found or is currently running.
+ */
+export function removeQueuedTask(blueprintId: string, nodeId: string): { removed: boolean; running: boolean } {
+  // If the blueprint is currently running, check if this node's task is the active one
+  // (the active task has already been shifted from the queue, so if it's not in the queue
+  // and the blueprint is running, it might be the active one — but we can't be sure which
+  // node is active. We rely on the caller checking node.status !== "running" before calling.)
+  const queue = blueprintQueues.get(blueprintId);
+  if (!queue) return { removed: false, running: false };
+  const idx = queue.findIndex(item => item.nodeId === nodeId);
+  if (idx === -1) return { removed: false, running: false };
+  const [removed] = queue.splice(idx, 1);
+  removed.resolve(null as unknown as never);
+  return { removed: true, running: false };
+}
+
+import { CLAUDE_PATH, EXPECT_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("plan-executor");
 const recoveryLog = createLogger("recovery");
 
 const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
+
+/**
+ * Build a clean environment for spawning Claude CLI subprocesses.
+ * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
+ * error when the backend itself was started from within a Claude Code session.
+ */
+function cleanEnvForClaude(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  return env;
+}
 
 // ─── Failure classification ──────────────────────────────────
 
@@ -90,7 +184,8 @@ function classifyFailure(
   // 1. Check CLI error for timeout patterns
   const isTimeout = /killed|timeout|timed out|SIGTERM|ETIMEDOUT/i.test(errorMsg);
 
-  // 2. Check CLI output for specific error patterns
+  // 2. Check CLI output and error message for context-related patterns
+  const combinedText = [errorMsg, output || ""].join("\n");
   if (output) {
     if (output.includes("exceeded") && output.includes("output token maximum")) {
       return {
@@ -98,6 +193,17 @@ function classifyFailure(
         detail: "Claude's response exceeded the output token limit. The task may need to be broken into smaller steps.",
       };
     }
+  }
+  // Check for context-full CLI error patterns (may appear in error or output)
+  if (
+    /context.?window|context.?length.?exceeded|maximum context length/i.test(combinedText) ||
+    /input.*token.*limit|max_tokens_exceeded/i.test(combinedText) ||
+    /conversation is too long|too many tokens/i.test(combinedText)
+  ) {
+    return {
+      reason: "context_exhausted",
+      detail: `Context window exceeded: ${errorMsg.slice(0, 200)}`,
+    };
   }
 
   // 3. Analyze the JSONL session file for deeper diagnostics
@@ -115,6 +221,13 @@ function classifyFailure(
         return {
           reason: "context_exhausted",
           detail: analysis.detail,
+        };
+      }
+      // Session ended right after compaction — strong signal of context exhaustion
+      if (analysis.endedAfterCompaction && analysis.compactCount >= 1) {
+        return {
+          reason: "context_exhausted",
+          detail: `Session compacted ${analysis.compactCount} time(s) and ended immediately after (peak ${analysis.peakTokens} tokens). Context was likely full.`,
         };
       }
       // High compaction count even without a specific error suggests context pressure
@@ -169,12 +282,39 @@ function classifyHungFailure(
           detail: analysis.detail || `Session compacted ${analysis.compactCount} times — context exhaustion likely caused the hang.`,
         };
       }
+      // Session ended right after compaction with no output — context full
+      if (analysis.endedAfterCompaction && analysis.compactCount >= 1) {
+        return {
+          reason: "context_exhausted",
+          detail: `Session compacted ${analysis.compactCount} time(s) and produced no output after last compaction (peak ${analysis.peakTokens} tokens). Context was likely full.`,
+        };
+      }
     }
   }
   return {
     reason: "hung",
     detail: "Execution produced no meaningful output (Claude may have hung or timed out)",
   };
+}
+
+/**
+ * Store context health metrics from JSONL session analysis on an execution record.
+ * Called after execution completes (success or failure) when a sessionId is available.
+ */
+function storeContextHealth(executionId: string, sessionId: string): void {
+  try {
+    const analysis = analyzeSessionHealth(sessionId);
+    if (analysis) {
+      updateExecution(executionId, {
+        compactCount: analysis.compactCount,
+        peakTokens: analysis.peakTokens,
+        contextPressure: analysis.contextPressure,
+        contextTokensUsed: analysis.peakTokens || undefined,
+      });
+    }
+  } catch (err) {
+    log.warn(`Failed to store context health for execution ${executionId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 /**
@@ -200,19 +340,21 @@ interface QueueItem<T = unknown> {
   task: () => Promise<T>;
   resolve: (val: T) => void;
   reject: (err: Error) => void;
+  nodeId?: string;
 }
 
 const blueprintQueues = new Map<string, QueueItem[]>();
 const blueprintRunning = new Set<string>();
+const blueprintRunningNodeId = new Map<string, string | undefined>();
 
 /**
  * Enqueue any async task for serial execution within a blueprint.
  * All Claude-calling operations (run, reevaluate, enrich, generate) should use this.
  */
-export function enqueueBlueprintTask<T>(blueprintId: string, task: () => Promise<T>): Promise<T> {
+export function enqueueBlueprintTask<T>(blueprintId: string, task: () => Promise<T>, nodeId?: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const queue = blueprintQueues.get(blueprintId) ?? [];
-    queue.push({ task, resolve: resolve as (val: unknown) => void, reject });
+    queue.push({ task, resolve: resolve as (val: unknown) => void, reject, nodeId });
     blueprintQueues.set(blueprintId, queue);
     log.debug(`Enqueued task for blueprint ${blueprintId.slice(0, 8)}, queue depth: ${queue.length}`);
     drainQueue(blueprintId);
@@ -229,6 +371,7 @@ async function drainQueue(blueprintId: string): Promise<void> {
 
   while (queue.length > 0) {
     const item = queue.shift()!;
+    blueprintRunningNodeId.set(blueprintId, item.nodeId);
     try {
       const result = await item.task();
       item.resolve(result);
@@ -238,6 +381,7 @@ async function drainQueue(blueprintId: string): Promise<void> {
   }
 
   blueprintRunning.delete(blueprintId);
+  blueprintRunningNodeId.delete(blueprintId);
   blueprintQueues.delete(blueprintId);
 }
 
@@ -301,13 +445,13 @@ catch {wait}
     writeFileSync(tmpExpect, fullScript, "utf-8");
 
     execFile(
-      "/usr/bin/expect",
+      EXPECT_PATH,
       [tmpExpect],
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
         cwd: cwd || process.cwd(),
-        env: { ...process.env },
+        env: cleanEnvForClaude(),
       },
       (error, stdout) => {
         try { unlinkSync(tmpExpect); } catch { /* ignore */ }
@@ -373,13 +517,13 @@ close $of
     writeFileSync(tmpExpect, expectScript, "utf-8");
 
     const child = execFile(
-      "/usr/bin/expect",
+      EXPECT_PATH,
       [tmpExpect],
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
         cwd: cwd || process.cwd(),
-        env: { ...process.env },
+        env: cleanEnvForClaude(),
       },
       (error, _stdout, _stderr) => {
         // Read output from file (avoids TTY echo contamination)
@@ -461,13 +605,13 @@ close $of
     writeFileSync(tmpExpect, expectScript, "utf-8");
 
     const child = execFile(
-      "/usr/bin/expect",
+      EXPECT_PATH,
       [tmpExpect],
       {
         timeout: EXEC_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
         cwd: cwd || process.cwd(),
-        env: { ...process.env },
+        env: cleanEnvForClaude(),
       },
       (error, _stdout, _stderr) => {
         let clean = "";
@@ -513,6 +657,7 @@ function buildNodePrompt(
   const authParam = getAuthParam();
   const blockerUrl = `${apiBase}/api/blueprints/${blueprint.id}/executions/${executionId}/report-blocker?${authParam}`;
   const summaryUrl = `${apiBase}/api/blueprints/${blueprint.id}/executions/${executionId}/task-summary?${authParam}`;
+  const statusUrl = `${apiBase}/api/blueprints/${blueprint.id}/executions/${executionId}/report-status?${authParam}`;
 
   const total = blueprint.nodes.length;
   let prompt = `You are executing step ${node.order + 1}/${total} of a development plan: "${blueprint.title}"\n\n`;
@@ -543,15 +688,24 @@ function buildNodePrompt(
   prompt += `## Instructions
 - Complete this step thoroughly. Focus only on THIS step.
 - DO NOT ask for confirmation or clarification. Just write the code directly.
+- You have access to additional MCP tools (e.g. Playwright for browser testing, Serena for semantic code analysis, Context7 for library docs, Linear for issue tracking) via ToolSearch. Use \`ToolSearch\` to discover and load them when built-in tools are insufficient for the task.
 - If you encounter a blocker you cannot resolve, report it by running this curl command:
 
 curl -s -X POST '${blockerUrl}' -H 'Content-Type: application/json' -d '{"type": "<one of: missing_dependency, unclear_requirement, access_issue, technical_limitation>", "description": "<describe the actual problem>", "suggestion": "<what the human could do to help>"}'
 
 - After completing, verify your changes by running the project's appropriate check commands (typecheck, lint, build, or tests as applicable).
 - IMPORTANT: After completing and verifying, run the skill command /claude-md-management:revise-claude-md to update CLAUDE.md with any learnings from this step. Do NOT ask for confirmation — apply updates directly without user interaction.
-- IMPORTANT: After ALL work above is complete (including CLAUDE.md updates), report your task completion summary by running this curl command as the LAST thing you do:
+- IMPORTANT: After ALL work above is complete (including CLAUDE.md updates), report your task completion summary by running this curl command:
 
-curl -s -X POST '${summaryUrl}' -H 'Content-Type: application/json' -d '{"summary": "<2-3 sentence summary of what was accomplished in this step>"}'`;
+curl -s -X POST '${summaryUrl}' -H 'Content-Type: application/json' -d '{"summary": "<2-3 sentence summary of what was accomplished in this step>"}'
+
+- IMPORTANT: As the ABSOLUTE LAST action, report your execution status. If the task was completed successfully:
+
+curl -s -X POST '${statusUrl}' -H 'Content-Type: application/json' -d '{"status": "done"}'
+
+  If the task cannot be completed (e.g., tests don't pass, build broken, requirements unclear), report failure instead:
+
+curl -s -X POST '${statusUrl}' -H 'Content-Type: application/json' -d '{"status": "failed", "reason": "<why the task could not be completed>"}'`;
   return prompt;
 }
 
@@ -862,11 +1016,22 @@ export async function evaluateNodeCompletion(
   const prompt = buildEvaluationPrompt(blueprint, node, latestArtifact.content, dependents, blueprintId, nodeId);
 
   // Call Claude in interactive mode — evaluation result is applied via the callback endpoint
+  const evalBefore = new Date();
   try {
     await runClaudeInteractiveGen(prompt, cwd);
   } catch (err) {
     log.error(`Evaluation Claude call failed for node ${nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
     return null;
+  }
+
+  // Capture the evaluation session
+  if (cwd) {
+    const evalSessionId = detectNewSession(cwd, evalBefore);
+    if (evalSessionId) {
+      const now = new Date().toISOString();
+      createRelatedSession(nodeId, blueprintId, evalSessionId, "evaluate", evalBefore.toISOString(), now);
+      log.debug(`Captured evaluate session ${evalSessionId.slice(0, 8)} for node ${nodeId.slice(0, 8)}`);
+    }
   }
 
   log.info(`Evaluation for node ${nodeId.slice(0, 8)} "${node.title}" completed (result applied via callback)`);
@@ -890,7 +1055,7 @@ export async function executeNode(
   return enqueueBlueprintTask(blueprintId, async () => {
     removePendingTask(blueprintId, nodeId, "run");
     return executeNodeInternal(blueprintId, nodeId);
-  });
+  }, nodeId);
 }
 
 async function executeNodeInternal(
@@ -997,10 +1162,79 @@ async function executeNodeInternal(
       }
     }
 
-    // Re-read execution from DB to check for API callback data (blocker_info, task_summary)
+    // Re-read execution from DB to check for API callback data (blocker_info, task_summary, reported_status)
     const updatedExec = getExecution(execution.id);
     const dbBlockerInfo = updatedExec?.blockerInfo;
     const dbTaskSummary = updatedExec?.taskSummary;
+    const dbReportedStatus = updatedExec?.reportedStatus;
+    const dbReportedReason = updatedExec?.reportedReason;
+
+    // ── Authoritative status: if Claude explicitly reported status via API callback, use it ──
+    if (dbReportedStatus) {
+      log.info(`Node ${nodeId.slice(0, 8)} reported status via API: ${dbReportedStatus}${dbReportedReason ? ` (reason: ${dbReportedReason.slice(0, 100)})` : ""}`);
+
+      if (dbReportedStatus === "done") {
+        const taskCompleteSummary = dbTaskSummary || extractTaskCompleteSummary(output) || null;
+        const outputSummary = taskCompleteSummary
+          ? taskCompleteSummary.slice(0, 2000)
+          : output.slice(-2000);
+
+        updateExecution(execution.id, {
+          status: "done",
+          outputSummary,
+          completedAt: new Date().toISOString(),
+          ...(sessionId ? { sessionId } : {}),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "done",
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+
+        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        try {
+          await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+        } catch (evalErr) {
+          log.error(`Post-completion evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+        }
+        return updateExecution(execution.id, {})!;
+      }
+
+      if (dbReportedStatus === "failed") {
+        const reason = dbReportedReason || "Task reported as failed by Claude";
+        updateExecution(execution.id, {
+          status: "failed",
+          outputSummary: reason,
+          failureReason: "error",
+          completedAt: new Date().toISOString(),
+          ...(sessionId ? { sessionId } : {}),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "failed",
+          error: reason,
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+        return updateExecution(execution.id, {})!;
+      }
+
+      if (dbReportedStatus === "blocked") {
+        const reason = dbReportedReason || "Task reported as blocked by Claude";
+        updateExecution(execution.id, {
+          status: "done",
+          outputSummary: `BLOCKER: ${reason}\n\n${output.slice(-1500)}`,
+          completedAt: new Date().toISOString(),
+          ...(sessionId ? { sessionId } : {}),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "blocked",
+          error: `Blocker: ${reason}`,
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        return updateExecution(execution.id, {})!;
+      }
+    }
+
+    // ── Fallback: no reported_status — use inference logic for backward compatibility ──
 
     // Check for blocker: prefer DB callback, fall back to output marker parsing (deprecated)
     let blockerInfo: string | null = null;
@@ -1144,6 +1378,11 @@ async function executeNodeInternal(
     });
 
     return updateExecution(execution.id, {})!;
+  } finally {
+    // Store context health metrics from JSONL analysis (runs on both success and failure)
+    if (sessionId) {
+      storeContextHealth(execution.id, sessionId);
+    }
   }
 }
 
@@ -1192,6 +1431,70 @@ export async function resumeNodeSession(
     // Re-read execution from DB to check for API callback data
     const updatedExec = getExecution(execution.id);
     const dbTaskSummary = updatedExec?.taskSummary;
+    const dbReportedStatus = updatedExec?.reportedStatus;
+    const dbReportedReason = updatedExec?.reportedReason;
+
+    // ── Authoritative status: if Claude explicitly reported status via API callback, use it ──
+    if (dbReportedStatus) {
+      log.info(`Resumed node ${nodeId.slice(0, 8)} reported status via API: ${dbReportedStatus}${dbReportedReason ? ` (reason: ${dbReportedReason.slice(0, 100)})` : ""}`);
+
+      if (dbReportedStatus === "done") {
+        const taskCompleteSummary = dbTaskSummary || extractTaskCompleteSummary(output) || null;
+        const outSummary = taskCompleteSummary
+          ? taskCompleteSummary.slice(0, 2000)
+          : output.slice(-2000);
+        updateExecution(execution.id, {
+          status: "done",
+          outputSummary: outSummary,
+          completedAt: new Date().toISOString(),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "done",
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        try {
+          await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+        } catch (evalErr) {
+          log.error(`Post-resume evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+        }
+        return;
+      }
+
+      if (dbReportedStatus === "failed") {
+        const reason = dbReportedReason || "Task reported as failed by Claude";
+        updateExecution(execution.id, {
+          status: "failed",
+          outputSummary: reason,
+          failureReason: "error",
+          completedAt: new Date().toISOString(),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "failed",
+          error: reason,
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+        return;
+      }
+
+      if (dbReportedStatus === "blocked") {
+        const reason = dbReportedReason || "Task reported as blocked by Claude";
+        updateExecution(execution.id, {
+          status: "done",
+          outputSummary: `BLOCKER: ${reason}\n\n${output.slice(-1500)}`,
+          completedAt: new Date().toISOString(),
+        });
+        updateMacroNode(blueprintId, nodeId, {
+          status: "blocked",
+          error: `Blocker: ${reason}`,
+          actualMinutes: Math.round(elapsed * 10) / 10,
+        });
+        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        return;
+      }
+    }
+
+    // ── Fallback: no reported_status — use inference logic for backward compatibility ──
 
     // Guard: if output is too short, Claude likely hung
     if (output.length < 50) {
@@ -1253,6 +1556,9 @@ export async function resumeNodeSession(
       status: "failed",
       error: detail,
     });
+  } finally {
+    // Store context health metrics from JSONL analysis
+    storeContextHealth(execution.id, resumeSessionId);
   }
 }
 
@@ -1354,7 +1660,7 @@ export function requeueOrphanedNodes(): void {
     enqueueBlueprintTask(blueprintId, async () => {
       removePendingTask(blueprintId, nodeId, "run");
       return executeNodeInternal(blueprintId, nodeId);
-    }).catch((err) => {
+    }, nodeId).catch((err) => {
       log.error(`Re-queued node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
     });
   }

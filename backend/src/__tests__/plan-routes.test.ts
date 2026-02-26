@@ -2,6 +2,23 @@ import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import express from "express";
 import request from "supertest";
 
+// Mock node:fs for projectCwd validation in blueprint creation
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    existsSync: vi.fn((p: string) => {
+      // Allow /test and /test/CLAUDE.md to pass validation
+      if (p === "/test" || p === "/test/CLAUDE.md") return true;
+      return actual.existsSync(p);
+    }),
+    statSync: vi.fn((p: string) => {
+      if (p === "/test") return { isDirectory: (): boolean => true };
+      return actual.statSync(p);
+    }),
+  };
+});
+
 // Mock plan-db
 vi.mock("../plan-db.js", () => ({
   createBlueprint: vi.fn(
@@ -263,6 +280,7 @@ describe("plan-routes", () => {
       expect(listBlueprints).toHaveBeenCalledWith({
         status: "draft",
         projectCwd: "/test",
+        includeArchived: false,
       });
     });
   });

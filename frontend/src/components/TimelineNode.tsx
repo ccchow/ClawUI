@@ -137,7 +137,9 @@ function CollapsibleSection({
         }}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:bg-bg-hover/50 transition-colors"
       >
-        <span>{open ? "▼" : "▶"}</span>
+        <svg className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`} viewBox="0 0 16 16" fill="currentColor">
+          <path d="M6.427 4.427l3.396 3.396a.25.25 0 010 .354l-3.396 3.396A.25.25 0 016 11.396V4.604a.25.25 0 01.427-.177z" />
+        </svg>
         <span>{label}</span>
         <span className="ml-auto opacity-50">{content.length} chars</span>
       </button>
@@ -183,7 +185,7 @@ export function ToolPairNode({
       <div
         className={`rounded-lg border-l-2 p-3 cursor-pointer transition-all hover:bg-bg-hover/30 ${
           bookmarked
-            ? "border-amber-400 bg-amber-400/5"
+            ? "border-accent-amber bg-accent-amber/5"
             : "border-accent-amber bg-accent-amber/5"
         }`}
         onClick={() => setExpanded(!expanded)}
@@ -201,16 +203,18 @@ export function ToolPairNode({
           </span>
           <button
             onClick={handleBookmark}
-            className={`text-sm transition-colors ${
-              bookmarked ? "text-amber-400" : "text-text-muted/30 hover:text-amber-400/60"
+            className={`p-1 rounded transition-all active:scale-[0.9] ${
+              bookmarked ? "text-accent-amber" : "text-text-muted/30 hover:text-accent-amber/60"
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
-            {bookmarked ? "🔖" : "📑"}
+            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill={bookmarked ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5">
+              <path d="M4 2h8a1 1 0 011 1v11.5l-5-3-5 3V3a1 1 0 011-1z" />
+            </svg>
           </button>
-          <span className="text-xs text-text-muted">
-            {expanded ? "▼" : "▶"}
-          </span>
+          <svg className={`w-3 h-3 text-text-muted transition-transform ${expanded ? "rotate-90" : ""}`} viewBox="0 0 16 16" fill="currentColor">
+            <path d="M6.427 4.427l3.396 3.396a.25.25 0 010 .354l-3.396 3.396A.25.25 0 016 11.396V4.604a.25.25 0 01.427-.177z" />
+          </svg>
         </div>
 
         {/* Collapsed: summary + short result preview */}
@@ -346,17 +350,19 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
           </span>
           <button
             onClick={handleBookmark}
-            className={`text-sm transition-colors ${
-              bookmarked ? "text-amber-400" : "text-text-muted/30 hover:text-amber-400/60"
+            className={`p-1 rounded transition-all active:scale-[0.9] ${
+              bookmarked ? "text-accent-amber" : "text-text-muted/30 hover:text-accent-amber/60"
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
-            {bookmarked ? "🔖" : "📑"}
+            <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill={bookmarked ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5">
+              <path d="M4 2h8a1 1 0 011 1v11.5l-5-3-5 3V3a1 1 0 011-1z" />
+            </svg>
           </button>
           {showExpand && (
-            <span className="text-xs text-text-muted">
-              {expanded ? "▼" : "▶"}
-            </span>
+            <svg className={`w-3 h-3 text-text-muted transition-transform ${expanded ? "rotate-90" : ""}`} viewBox="0 0 16 16" fill="currentColor">
+              <path d="M6.427 4.427l3.396 3.396a.25.25 0 010 .354l-3.396 3.396A.25.25 0 016 11.396V4.604a.25.25 0 01.427-.177z" />
+            </svg>
           )}
         </div>
 

@@ -216,7 +216,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
         <button
           onClick={handleCopy}
           title="Copy to clipboard"
-          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/10"
+          className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/10"
         >
           {copied ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

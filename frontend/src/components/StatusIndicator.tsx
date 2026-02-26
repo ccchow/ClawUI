@@ -14,7 +14,16 @@ const statusColors: Record<string, string> = {
 };
 
 const statusLabels: Record<string, string> = {
+  pending: "Pending",
+  running: "Running",
+  done: "Completed",
+  failed: "Failed",
+  blocked: "Blocked",
+  skipped: "Skipped",
   queued: "Waiting in queue",
+  draft: "Draft",
+  approved: "Approved",
+  paused: "Paused",
 };
 
 export function StatusIndicator({
@@ -30,6 +39,8 @@ export function StatusIndicator({
 
   return (
     <span
+      role="img"
+      aria-label={label}
       className={`inline-block rounded-full flex-shrink-0 ${sizeClass} ${colorClass}`}
       title={label}
     />

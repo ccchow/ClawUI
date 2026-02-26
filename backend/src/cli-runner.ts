@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { CLAUDE_PATH } from "./config.js";
+import { CLAUDE_PATH, EXPECT_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("cli-runner");
@@ -11,6 +11,17 @@ const log = createLogger("cli-runner");
 const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exactly this marker on its own line: ---SUGGESTIONS--- followed by a JSON array of 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. No markdown code blocks around it.`;
 
 const EXEC_TIMEOUT = 180_000; // 3 minutes
+
+/**
+ * Build a clean environment for spawning Claude CLI subprocesses.
+ * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
+ * error when the backend itself was started from within a Claude Code session.
+ */
+function cleanEnvForClaude(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  return env;
+}
 
 export interface Suggestion {
   title: string;
@@ -54,11 +65,11 @@ expect eof
     log.debug(`Spawning expect script: ${tmpExpect}, session: ${sessionId}, cwd: ${cwd || process.cwd()}`);
 
     let childPid: number | undefined;
-    const child = execFile("/usr/bin/expect", [tmpExpect], {
+    const child = execFile(EXPECT_PATH, [tmpExpect], {
       timeout: EXEC_TIMEOUT,
       maxBuffer: 10 * 1024 * 1024,
       cwd: cwd || process.cwd(),
-      env: { ...process.env },
+      env: cleanEnvForClaude(),
     }, (error, stdout, stderr) => {
       log.debug(`Expect process exited: pid=${childPid}, exitCode=${error ? error.code ?? "error" : 0}`);
       // Clean up expect script

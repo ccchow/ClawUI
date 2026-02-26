@@ -343,6 +343,7 @@ function TimeGroupSection({
       {/* Group header */}
       <button
         onClick={() => setCollapsed(!collapsed)}
+        aria-expanded={!collapsed}
         className="flex items-center gap-2 w-full text-left py-2 px-3 rounded-lg hover:bg-bg-hover/30 transition-colors group"
       >
         <span className="text-xs text-text-muted font-mono">
@@ -443,18 +444,25 @@ export function Timeline({ nodes }: { nodes: TimelineNode[] }) {
       </div>
 
       {/* Timeline with time groups */}
-      <div className="relative">
-        {/* Vertical line */}
-        <div className="absolute left-5 top-0 bottom-0 w-px bg-border-primary" />
+      {totalFiltered === 0 ? (
+        <div className="text-center py-12 text-text-muted border border-dashed border-border-primary rounded-xl">
+          <p className="text-sm mb-1">All message types are hidden.</p>
+          <p className="text-xs text-text-muted/70">Enable at least one filter above to see the timeline.</p>
+        </div>
+      ) : (
+        <div className="relative">
+          {/* Vertical line */}
+          <div className="absolute left-5 top-0 bottom-0 w-px bg-border-primary" />
 
-        {[...timeGroups].reverse().map((group) => (
-          <TimeGroupSection
-            key={group.id}
-            group={group}
-            filters={filters}
-          />
-        ))}
-      </div>
+          {[...timeGroups].reverse().map((group) => (
+            <TimeGroupSection
+              key={group.id}
+              group={group}
+              filters={filters}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

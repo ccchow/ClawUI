@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession } from "@/lib/api";
+import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
 import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
 import { MarkdownEditor } from "./MarkdownEditor";
@@ -38,13 +38,22 @@ export function MacroNodeCard({
   const [running, setRunning] = useState(false);
   const isLast = isLastDisplayed ?? (index === total - 1);
   const canRun = blueprintId && (node.status === "pending" || node.status === "failed");
-  const canManage = blueprintId && (node.status === "pending" || node.status === "failed");
+  const canManage = blueprintId && (node.status === "pending" || node.status === "failed" || node.status === "skipped");
   const isQueued = node.status === "queued";
 
   // Check if there's a pending reevaluate task for this node (from queue API)
   const reevaluateQueued = pendingTasks?.some(
     (t) => t.nodeId === node.id && t.type === "reevaluate"
   ) ?? false;
+
+  // Queue position: only count "run" tasks, derive position from array order
+  const queuePosition = isQueued
+    ? (pendingTasks?.filter(t => t.type === "run").findIndex(t => t.nodeId === node.id) ?? -1) + 1
+    : 0;
+
+  // Unqueue confirmation state
+  const [showUnqueueConfirm, setShowUnqueueConfirm] = useState(false);
+  const [unqueuing, setUnqueuing] = useState(false);
 
   // Inline edit state
   const [isEditing, setIsEditing] = useState(false);
@@ -70,6 +79,21 @@ export function MacroNodeCard({
 
   // Warning state (e.g. dependency not met)
   const [warning, setWarning] = useState<string | null>(null);
+
+  // Mobile overflow menu state
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [mobileMenuOpen]);
 
   const handleRun = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -147,8 +171,9 @@ export function MacroNodeCard({
     e.stopPropagation();
     if (!blueprintId) return;
     setSkipping(true);
+    const newStatus = node.status === "skipped" ? "pending" : "skipped";
     try {
-      await updateMacroNode(blueprintId, node.id, { status: "skipped" });
+      await updateMacroNode(blueprintId, node.id, { status: newStatus });
       onNodeUpdated?.();
     } catch {
       // ignore
@@ -181,14 +206,10 @@ export function MacroNodeCard({
       const result = await enrichNode(blueprintId, {
         title: editTitle.trim(),
         description: editDescription.trim() || undefined,
+        nodeId: node.id,
       });
       setEditTitle(result.title);
       setEditDescription(result.description);
-      // Auto-save enriched data to DB so it persists across page reloads
-      await updateMacroNode(blueprintId, node.id, {
-        title: result.title,
-        description: result.description,
-      });
       onNodeUpdated?.();
     } catch {
       // ignore enrichment errors silently
@@ -226,7 +247,7 @@ export function MacroNodeCard({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-xs text-text-muted font-mono flex-shrink-0">
-                #{index + 1}
+                #{node.order + 1}
               </span>
               {isEditing ? (
                 <input
@@ -234,7 +255,8 @@ export function MacroNodeCard({
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
-                  className="flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30"
+                  readOnly={enriching}
+                  className={`flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
                   autoFocus
                 />
               ) : blueprintId ? (
@@ -250,12 +272,12 @@ export function MacroNodeCard({
                   {node.title}
                 </span>
               )}
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full capitalize flex-shrink-0 hidden sm:inline ${
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full capitalize flex-shrink-0 ${
                 node.status === "queued" || reevaluateQueued
                   ? "bg-accent-amber/20 text-accent-amber"
                   : "bg-bg-tertiary text-text-muted"
               }`}>
-                {running ? "running" : reevaluateQueued ? "re-evaluating (queued)" : node.status === "queued" ? "queued" : node.status}
+                {running ? "running" : reevaluateQueued ? "re-eval" : node.status === "queued" ? (queuePosition > 0 ? `queued #${queuePosition}` : "queued") : node.status}
               </span>
             </div>
             {!expanded && !isEditing && node.description && (
@@ -265,23 +287,25 @@ export function MacroNodeCard({
             )}
           </div>
           <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
-            {/* Edit / Delete / Skip / Re-evaluate buttons — hidden on very small screens */}
+            {/* Desktop management buttons — hidden on mobile */}
             {canManage && !isEditing && (
               <>
                 <button
                   onClick={handleEditStart}
                   title="Edit node"
+                  aria-label="Edit node"
                   className="p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm1.414 1.06a.25.25 0 0 0-.354 0L3.463 11.098a.25.25 0 0 0-.064.108l-.631 2.208 2.208-.63a.25.25 0 0 0 .108-.064l8.609-8.61a.25.25 0 0 0 0-.353l-1.086-1.086-.18.18Z" />
                   </svg>
                 </button>
-                {node.status === "pending" && (
+                {(node.status === "pending" || node.status === "skipped") && (
                   <button
                     onClick={handleSkip}
                     disabled={skipping}
-                    title="Skip node"
+                    title={node.status === "skipped" ? "Unskip node" : "Skip node"}
+                    aria-label={node.status === "skipped" ? "Unskip node" : "Skip node"}
                     className="p-1.5 rounded-md text-text-muted hover:text-accent-yellow hover:bg-accent-yellow/10 transition-colors disabled:opacity-50 hidden sm:block"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
@@ -292,6 +316,7 @@ export function MacroNodeCard({
                 <button
                   onClick={handleDeleteClick}
                   title="Delete node"
+                  aria-label="Delete node"
                   className="p-1.5 rounded-md text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
@@ -300,12 +325,13 @@ export function MacroNodeCard({
                 </button>
               </>
             )}
-            {/* Re-evaluate button — available for all non-running, non-queued nodes */}
+            {/* Desktop re-evaluate button — hidden on mobile */}
             {blueprintId && node.status !== "running" && node.status !== "queued" && !isEditing && (
               <button
                 onClick={handleReevaluate}
                 disabled={reevaluating || reevaluateQueued}
                 title={reevaluateQueued ? "Re-evaluation queued, waiting..." : "Re-evaluate node with AI"}
+                aria-label="Reevaluate node"
                 className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 hidden sm:block"
               >
                 {reevaluating || reevaluateQueued ? (
@@ -318,13 +344,91 @@ export function MacroNodeCard({
                 )}
               </button>
             )}
-            {isQueued && !isEditing && (
-              <span className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium flex items-center gap-1.5">
+            {/* Mobile overflow menu — visible only on mobile */}
+            {blueprintId && !isEditing && (canManage || (node.status !== "running" && node.status !== "queued")) && (
+              <div className="relative sm:hidden" ref={mobileMenuRef}>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setMobileMenuOpen(!mobileMenuOpen); }}
+                  className="p-2 -m-0.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors"
+                  title="More actions"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                    <circle cx="8" cy="3" r="1.5" />
+                    <circle cx="8" cy="8" r="1.5" />
+                    <circle cx="8" cy="13" r="1.5" />
+                  </svg>
+                </button>
+                {mobileMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-border-primary bg-bg-secondary shadow-lg py-1" onClick={(e) => e.stopPropagation()}>
+                    {canManage && (
+                      <>
+                        <button onClick={(e) => { handleEditStart(e); setMobileMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors">
+                          Edit
+                        </button>
+                        {(node.status === "pending" || node.status === "skipped") && (
+                          <button onClick={(e) => { handleSkip(e); setMobileMenuOpen(false); }} disabled={skipping} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
+                            {node.status === "skipped" ? "Unskip" : "Skip"}
+                          </button>
+                        )}
+                        <button onClick={(e) => { handleDeleteClick(e); setMobileMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs text-accent-red hover:bg-accent-red/10 transition-colors">
+                          Delete
+                        </button>
+                      </>
+                    )}
+                    {node.status !== "running" && node.status !== "queued" && (
+                      <button onClick={(e) => { handleReevaluate(e); setMobileMenuOpen(false); }} disabled={reevaluating || reevaluateQueued} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
+                        {reevaluating || reevaluateQueued ? "Re-evaluating..." : "Re-evaluate"}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {isQueued && !isEditing && !showUnqueueConfirm && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowUnqueueConfirm(true); }}
+                className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:bg-accent-amber/30 transition-colors active:scale-[0.97]"
+                aria-label="Unqueue node"
+                title="Click to unqueue"
+              >
                 <svg className="w-3 h-3 animate-pulse" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 1 0 .496-.868L8 7.71V3.5z"/>
                   <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
                 </svg>
-                <span className="hidden sm:inline">Queued</span>
+                <span className="hidden sm:inline">Queued{queuePosition > 0 ? ` (#${queuePosition})` : ""}</span>
+                <svg className="w-2.5 h-2.5 opacity-60" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+                </svg>
+              </button>
+            )}
+            {isQueued && !isEditing && showUnqueueConfirm && (
+              <span className="flex items-center gap-1 animate-fade-in">
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!blueprintId) return;
+                    setUnqueuing(true);
+                    try {
+                      await unqueueNode(blueprintId, node.id);
+                      onRefresh?.();
+                    } catch {
+                      /* ignore — next poll will update */
+                    } finally {
+                      setUnqueuing(false);
+                      setShowUnqueueConfirm(false);
+                    }
+                  }}
+                  disabled={unqueuing}
+                  className="px-2 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
+                >
+                  {unqueuing ? "..." : "Yes"}
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowUnqueueConfirm(false); }}
+                  className="px-2 py-1 rounded-lg bg-bg-tertiary text-text-muted text-xs font-medium hover:bg-bg-tertiary/80 transition-colors active:scale-[0.97]"
+                >
+                  Cancel
+                </button>
               </span>
             )}
             {canRun && !isEditing && (
@@ -332,7 +436,8 @@ export function MacroNodeCard({
                 <button
                   onClick={handleRun}
                   disabled={running}
-                  className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                  aria-label="Run node"
+                  className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                 >
                   {running ? (
                     <>
@@ -360,7 +465,7 @@ export function MacroNodeCard({
               </span>
             )}
             {!isEditing && (
-              <span className={`text-text-muted text-xs transition-transform ${expanded ? "rotate-180" : ""}`}>
+              <span aria-expanded={expanded} className={`text-text-muted text-xs transition-transform ${expanded ? "rotate-180" : ""}`}>
                 ▼
               </span>
             )}
@@ -396,11 +501,12 @@ export function MacroNodeCard({
               value={editDescription}
               onChange={setEditDescription}
               placeholder="Description (supports Markdown and image paste)"
+              disabled={enriching}
             />
             <div className="flex gap-2">
               <button
                 onClick={handleEditSave}
-                disabled={!editTitle.trim() || saving}
+                disabled={!editTitle.trim() || saving || enriching}
                 className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {saving ? "Saving..." : "Save"}
@@ -408,13 +514,14 @@ export function MacroNodeCard({
               <button
                 onClick={handleEnrich}
                 disabled={!editTitle.trim() || enriching}
-                className="px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
+                {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
               </button>
               <button
                 onClick={handleEditCancel}
-                className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors"
+                disabled={enriching}
+                className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Cancel
               </button>
@@ -498,6 +605,7 @@ export function MacroNodeCard({
                               disabled={resumingExecId === exec.id || running}
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-green-600/15 text-green-500 hover:bg-green-600/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Resume this session"
+                              aria-label="Resume failed session"
                             >
                               {resumingExecId === exec.id ? (
                                 <AISparkle size="xs" />

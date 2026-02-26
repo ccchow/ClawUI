@@ -22,18 +22,26 @@ export function SessionList({
   const [allTags, setAllTags] = useState<string[]>([]);
   // Optimistic star overrides: sessionId -> starred value
   const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
+  // Optimistic archive overrides: sessionId -> archived value
+  const [archiveOverrides, setArchiveOverrides] = useState<Record<string, boolean>>({});
 
-  // Derive effective sessions from props + optimistic star overrides
+  // Derive effective sessions from props + optimistic overrides
   const effectiveSessions = useMemo(() => {
-    if (Object.keys(starOverrides).length === 0) return sessions;
-    return sessions.map((s) =>
-      s.sessionId in starOverrides ? { ...s, starred: starOverrides[s.sessionId] } : s
-    );
-  }, [sessions, starOverrides]);
+    const hasStarOverrides = Object.keys(starOverrides).length > 0;
+    const hasArchiveOverrides = Object.keys(archiveOverrides).length > 0;
+    if (!hasStarOverrides && !hasArchiveOverrides) return sessions;
+    return sessions.map((s) => {
+      let updated = s;
+      if (s.sessionId in starOverrides) updated = { ...updated, starred: starOverrides[s.sessionId] };
+      if (s.sessionId in archiveOverrides) updated = { ...updated, archived: archiveOverrides[s.sessionId] };
+      return updated;
+    });
+  }, [sessions, starOverrides, archiveOverrides]);
 
   // Clear overrides when sessions prop updates (server caught up)
   useEffect(() => {
     setStarOverrides({});
+    setArchiveOverrides({});
   }, [sessions]);
 
   // Load available tags
@@ -105,6 +113,18 @@ export function SessionList({
     }
   };
 
+  const handleToggleArchive = async (e: React.MouseEvent, session: SessionMeta) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const newArchived = !session.archived;
+    setArchiveOverrides((prev) => ({ ...prev, [session.sessionId]: newArchived }));
+    try {
+      await updateSessionMeta(session.sessionId, { archived: newArchived });
+    } catch {
+      setArchiveOverrides((prev) => ({ ...prev, [session.sessionId]: !newArchived }));
+    }
+  };
+
   // Collect tags visible in current sessions for the dropdown
   const visibleTags = useMemo(() => {
     const tagSet = new Set<string>();
@@ -131,10 +151,24 @@ export function SessionList({
           onClick={() =>
             setSort((s) => (s === "newest" ? "most-messages" : "newest"))
           }
-          className="px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-secondary text-sm hover:bg-bg-tertiary transition-colors whitespace-nowrap"
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-secondary text-sm hover:bg-bg-tertiary transition-all active:scale-[0.98] whitespace-nowrap"
           title={`Sort by ${sort === "newest" ? "most messages" : "newest first"}`}
         >
-          {sort === "newest" ? "🕐 Newest" : "💬 Most msgs"}
+          {sort === "newest" ? (
+            <>
+              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="8" cy="8" r="6.5" /><path d="M8 4.5V8l2.5 1.5" />
+              </svg>
+              Newest
+            </>
+          ) : (
+            <>
+              <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2 3h8M2 7h5M2 11h3M12 4v8M10 10l2 2 2-2" />
+              </svg>
+              Most msgs
+            </>
+          )}
         </button>
       </div>
 
@@ -142,13 +176,16 @@ export function SessionList({
       <div className="flex items-center gap-2 mb-4 flex-wrap">
         <button
           onClick={() => setStarredFilter(!starredFilter)}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-2 sm:py-1 rounded-lg border text-xs transition-all active:scale-[0.97] ${
             starredFilter
-              ? "text-yellow-400 border-yellow-400/40 bg-yellow-400/10"
+              ? "text-accent-amber border-accent-amber/40 bg-accent-amber/10"
               : "text-text-muted border-border-primary hover:bg-bg-tertiary"
           }`}
         >
-          ⭐ Starred
+          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z" />
+          </svg>
+          Starred
         </button>
 
         {visibleTags.length > 0 && (
@@ -168,13 +205,16 @@ export function SessionList({
 
         <button
           onClick={() => setShowArchived(!showArchived)}
-          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs transition-all ${
+          className={`flex items-center gap-1.5 px-2.5 py-2 sm:py-1 rounded-lg border text-xs transition-all active:scale-[0.97] ${
             showArchived
               ? "text-text-secondary border-border-hover bg-bg-tertiary"
               : "text-text-muted border-border-primary hover:bg-bg-tertiary"
           }`}
         >
-          {showArchived ? "📦 Showing archived" : "📦 Archived"}
+          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="2" width="12" height="4" rx="1" /><path d="M3 6v7a1 1 0 001 1h8a1 1 0 001-1V6" /><path d="M6.5 9h3" />
+          </svg>
+          {showArchived ? "Showing archived" : "Archived"}
         </button>
 
         {(starredFilter || tagFilter || showArchived) && (
@@ -200,9 +240,25 @@ export function SessionList({
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-text-muted">
-          {query || starredFilter || tagFilter
-            ? "No sessions matching current filters"
-            : "No sessions found for this project"}
+          {query || starredFilter || tagFilter ? (
+            "No sessions matching current filters"
+          ) : (
+            <div className="flex flex-col items-center gap-3">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted/40">
+                <rect x="6" y="8" width="36" height="28" rx="3" />
+                <line x1="6" y1="14" x2="42" y2="14" />
+                <line x1="14" y1="22" x2="22" y2="22" />
+                <line x1="14" y1="28" x2="30" y2="28" />
+                <circle cx="10" cy="11" r="1" fill="currentColor" />
+                <circle cx="14" cy="11" r="1" fill="currentColor" />
+                <circle cx="18" cy="11" r="1" fill="currentColor" />
+              </svg>
+              <p className="text-sm">No sessions found for this project</p>
+              <p className="text-xs text-text-muted/70">
+                Sessions appear here when you use Claude Code.
+              </p>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-2">
@@ -210,7 +266,7 @@ export function SessionList({
             <Link
               key={s.sessionId}
               href={`/session/${s.sessionId}`}
-              className={`block rounded-xl border border-border-primary bg-bg-secondary p-4 hover:bg-bg-tertiary hover:border-border-hover transition-all ${
+              className={`block rounded-xl border border-border-primary bg-bg-secondary p-4 hover:bg-bg-tertiary hover:border-border-hover transition-all active:scale-[0.995] ${
                 s.archived ? "opacity-60" : ""
               }`}
             >
@@ -220,14 +276,37 @@ export function SessionList({
                     {/* Star button */}
                     <button
                       onClick={(e) => handleToggleStar(e, s)}
-                      className={`flex-shrink-0 text-sm transition-colors ${
+                      className={`flex-shrink-0 p-2 -m-1 rounded-lg transition-all active:scale-[0.9] ${
                         s.starred
-                          ? "text-yellow-400"
-                          : "text-text-muted/30 hover:text-yellow-400/60"
+                          ? "text-accent-amber"
+                          : "text-text-muted/30 hover:text-accent-amber/60"
                       }`}
                       title={s.starred ? "Unstar" : "Star"}
+                      aria-label={s.starred ? "Unstar session" : "Star session"}
                     >
-                      {s.starred ? "★" : "☆"}
+                      <svg className="w-4 h-4" viewBox="0 0 16 16" fill={s.starred ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2">
+                        <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
+                      </svg>
+                    </button>
+
+                    {/* Archive button */}
+                    <button
+                      onClick={(e) => handleToggleArchive(e, s)}
+                      className={`flex-shrink-0 p-2 -m-1 rounded-lg transition-all active:scale-[0.9] ${
+                        s.archived
+                          ? "text-text-muted hover:text-text-secondary"
+                          : "text-text-muted/30 hover:text-text-muted/60"
+                      }`}
+                      title={s.archived ? "Unarchive" : "Archive"}
+                      aria-label={s.archived ? "Unarchive session" : "Archive session"}
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                        {s.archived ? (
+                          <><rect x="2" y="2" width="12" height="4" rx="1" /><path d="M3 6v7a1 1 0 001 1h8a1 1 0 001-1V6" /><path d="M8 9v3M6 11l2 -2 2 2" /></>
+                        ) : (
+                          <><rect x="2" y="2" width="12" height="4" rx="1" /><path d="M3 6v7a1 1 0 001 1h8a1 1 0 001-1V6" /><path d="M8 9v3M6 10l2 2 2-2" /></>
+                        )}
+                      </svg>
                     </button>
 
                     {/* Alias or slug */}
@@ -240,18 +319,28 @@ export function SessionList({
                       {s.sessionId.slice(0, 8)}
                     </span>
 
-                    {/* Tags */}
+                    {/* Tags — show first tag on mobile, all on desktop */}
                     {s.tags && s.tags.length > 0 && (
-                      <div className="flex gap-1 flex-wrap hidden sm:flex">
-                        {s.tags.map((tag) => (
-                          <span
-                            key={tag}
-                            className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue"
-                          >
-                            {tag}
+                      <>
+                        <div className="flex gap-1 flex-wrap sm:hidden">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue">
+                            {s.tags[0]}
                           </span>
-                        ))}
-                      </div>
+                          {s.tags.length > 1 && (
+                            <span className="text-[10px] text-text-muted">+{s.tags.length - 1}</span>
+                          )}
+                        </div>
+                        <div className="gap-1 flex-wrap hidden sm:flex">
+                          {s.tags.map((tag) => (
+                            <span
+                              key={tag}
+                              className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      </>
                     )}
                   </div>
                   {s.macroNodeTitle && (

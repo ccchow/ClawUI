@@ -12,12 +12,14 @@ export default function NewBlueprintPage() {
   const [projectCwd, setProjectCwd] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cwdError, setCwdError] = useState<string | null>(null);
 
   const handleCreate = async (autoGenerate = false) => {
     if (!title.trim()) return;
 
     setSubmitting(true);
     setError(null);
+    setCwdError(null);
     try {
       const bp = await createBlueprint({
         title: title.trim(),
@@ -26,7 +28,12 @@ export default function NewBlueprintPage() {
       });
       router.push(autoGenerate ? `/blueprints/${bp.id}?generate=true` : `/blueprints/${bp.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("CLAUDE.md") || msg.includes("directory") || msg.includes("not a directory")) {
+        setCwdError(msg);
+      } else {
+        setError(msg);
+      }
       setSubmitting(false);
     }
   };
@@ -81,10 +88,12 @@ export default function NewBlueprintPage() {
             id="projectCwd"
             type="text"
             value={projectCwd}
-            onChange={(e) => setProjectCwd(e.target.value)}
+            onChange={(e) => { setProjectCwd(e.target.value); setCwdError(null); }}
             placeholder="/path/to/project"
             className="w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 font-mono"
           />
+          <p className="text-text-muted text-xs mt-1">Absolute path to a Claude Code project (must contain CLAUDE.md)</p>
+          {cwdError && <p className="text-red-500 text-sm mt-1">{cwdError}</p>}
         </div>
 
         {error && (

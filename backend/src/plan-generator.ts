@@ -4,13 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getBlueprint, getArtifactsForNode } from "./plan-db.js";
-import { CLAUDE_PATH, PORT } from "./config.js";
+import { CLAUDE_PATH, EXPECT_PATH, PORT } from "./config.js";
 import { LOCAL_AUTH_TOKEN } from "./auth.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("plan-generator");
 
 const INTERACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 min
+
+/**
+ * Build a clean environment for spawning Claude CLI subprocesses.
+ * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
+ * error when the backend itself was started from within a Claude Code session.
+ */
+function cleanEnvForClaude(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  return env;
+}
 
 /**
  * Run Claude in text output mode (no tool use). Used for simple tasks that
@@ -56,11 +67,11 @@ close $of
 `;
     writeFileSync(expectFile, expectScript, "utf-8");
 
-    execFile("/usr/bin/expect", [expectFile], {
+    execFile(EXPECT_PATH, [expectFile], {
       timeout: 200_000,
       maxBuffer: 10 * 1024 * 1024,
       cwd: cwd || process.cwd(),
-      env: { ...process.env },
+      env: cleanEnvForClaude(),
     }, (error) => {
       // Read output from file (avoids TTY echo contamination)
       let output = "";
@@ -115,13 +126,13 @@ catch {wait}
     writeFileSync(tmpExpect, fullScript, "utf-8");
 
     execFile(
-      "/usr/bin/expect",
+      EXPECT_PATH,
       [tmpExpect],
       {
         timeout: INTERACTIVE_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
         cwd: cwd || process.cwd(),
-        env: { ...process.env },
+        env: cleanEnvForClaude(),
       },
       (error, stdout) => {
         try { unlinkSync(tmpExpect); } catch { /* ignore */ }
@@ -175,9 +186,9 @@ export async function generatePlan(blueprintId: string, userInstruction?: string
       const outputArtifacts = getArtifactsForNode(n.id, "output");
       const latestArtifact = outputArtifacts.length > 0 ? outputArtifacts[outputArtifacts.length - 1] : null;
       const summary = latestArtifact
-        ? `Handoff: ${latestArtifact.content.slice(0, 300)}`
-        : (n.description || "").slice(0, 200);
-      return `  [id: ${n.id}] [${n.status}] ${n.title} — ${summary}`;
+        ? ` — Handoff: ${latestArtifact.content.slice(0, 300)}`
+        : "";
+      return `  [id: ${n.id}] [${n.status}] ${n.title}${summary}`;
     });
     nodesContext += `\n\nCompleted nodes (DO NOT touch these — use their IDs as dependencies for new nodes when relevant):\n${doneLines.join("\n")}`;
   }
@@ -185,7 +196,7 @@ export async function generatePlan(blueprintId: string, userInstruction?: string
     nodesContext += `\n\nCurrently running (DO NOT touch):\n${runningNodes.map(n => `  [id: ${n.id}] [running] ${n.title}`).join("\n")}`;
   }
   if (pendingNodes.length > 0) {
-    nodesContext += `\n\nPending nodes (DO NOT modify or remove — only add new nodes that complement these):\n${pendingNodes.map(n => `  [id: ${n.id}] [${n.status}] ${n.title} — ${n.description || ""}`).join("\n")}`;
+    nodesContext += `\n\nPending nodes (DO NOT modify or remove — only add new nodes that complement these):\n${pendingNodes.map(n => `  [id: ${n.id}] [${n.status}] ${n.title}`).join("\n")}`;
   }
 
   const apiBase = getApiBase();
