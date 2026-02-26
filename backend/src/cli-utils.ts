@@ -100,8 +100,10 @@ export function resolveClaudeCliJs(claudePath: string): string | null {
   try {
     if (existsSync(cmdPath)) {
       const content = readFileSync(cmdPath, "utf-8");
-      // Look for pattern: "%~dp0\node_modules\@anthropic-ai\claude-code\cli.js"
-      const match = content.match(/"%~dp0\\([^"]+\.js)"/);
+      // Look for patterns in the .cmd shim:
+      //   Old npm: "%~dp0\node_modules\...\cli.js"
+      //   New npm: "%dp0%\node_modules\...\cli.js"
+      const match = content.match(/"(?:%~dp0|%dp0%)\\([^"]+\.js)"/);
       if (match) {
         const cmdDir = join(cmdPath, "..");
         const cliJs = join(cmdDir, match[1]);

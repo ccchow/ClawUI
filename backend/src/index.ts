@@ -92,7 +92,32 @@ const app = express();
 // CORS: allow any localhost origin (3000 for stable, 3100 for dev)
 // External access via Tailscale serve proxy
 app.use(cors({ origin: /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/ }));
-app.use(express.json({ limit: "10mb" }));
+// JSON body parser with Windows backslash recovery.
+// Claude CLI curl callbacks may include Windows paths with unescaped backslashes
+// (e.g., C:\src\file.ts where \s and \f are invalid JSON escapes). When standard
+// JSON.parse fails, retry after escaping lone backslashes.
+app.use(express.json({
+  limit: "10mb",
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  reviver: undefined as any, // use default
+}));
+app.use((err: Error & { type?: string; status?: number; body?: string }, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err.type === "entity.parse.failed" && err.body) {
+    try {
+      // Fix lone backslashes: replace \ not followed by a valid JSON escape char
+      const fixed = err.body.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+      req.body = JSON.parse(fixed);
+      return next();
+    } catch {
+      // Still can't parse — fall through to error response
+    }
+  }
+  if (err.status === 400 && err.type === "entity.parse.failed") {
+    res.status(400).json({ error: "Invalid JSON in request body" });
+    return;
+  }
+  next(err);
+});
 
 // Increase timeout for long-running Claude CLI calls
 app.use((_req, res, next) => {
@@ -120,7 +145,7 @@ app.listen(PORT, HOST, () => {
   log.info("");
   log.info("========================================================");
   log.info("  ClawUI Secure Dashboard Ready");
-  log.info("  Local:     http://localhost:3000");
+  log.info(`  Local:     http://localhost:3000/?auth=${LOCAL_AUTH_TOKEN}`);
   if (process.stdout.isTTY) {
     log.info(`  Tailscale: http://<your-tailscale-ip>:3000/?auth=${LOCAL_AUTH_TOKEN}`);
   } else {

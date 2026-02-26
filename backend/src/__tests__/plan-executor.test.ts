@@ -563,19 +563,50 @@ describe("Node status transitions", () => {
 // ─── Session Detection ───────────────────────────────────────
 
 describe("Session detection (CWD encoding)", () => {
-  it("encodes CWD path correctly", () => {
-    const cwd = "/home/testuser/projects/TestProject";
-    const encoded = cwd.replace(/\//g, "-");
-    expect(encoded).toBe("-home-testuser-projects-TestProject");
+  // Re-implement encodeProjectPath from cli-utils.ts for isolated testing
+  function encodeProjectPath(projectCwd: string): string {
+    return projectCwd
+      .replace(/:/g, "-")
+      .replace(/[\\/]/g, "-");
+  }
+
+  describe("Unix paths", () => {
+    it("encodes CWD path correctly", () => {
+      expect(encodeProjectPath("/home/testuser/projects/TestProject"))
+        .toBe("-home-testuser-projects-TestProject");
+    });
+
+    it("handles root path", () => {
+      expect(encodeProjectPath("/")).toBe("-");
+    });
+
+    it("handles deeply nested paths", () => {
+      expect(encodeProjectPath("/home/user/projects/my-app/packages/core"))
+        .toBe("-home-user-projects-my-app-packages-core");
+    });
   });
 
-  it("handles root path", () => {
-    expect("/".replace(/\//g, "-")).toBe("-");
-  });
+  describe("Windows paths", () => {
+    it("encodes Windows path with backslashes and drive letter", () => {
+      expect(encodeProjectPath("C:\\Users\\user\\projects\\MyApp"))
+        .toBe("C--Users-user-projects-MyApp");
+    });
 
-  it("handles deeply nested paths", () => {
-    const cwd = "/home/user/projects/my-app/packages/core";
-    expect(cwd.replace(/\//g, "-")).toBe("-home-user-projects-my-app-packages-core");
+    it("handles mixed separators on Windows", () => {
+      expect(encodeProjectPath("C:/Users/user"))
+        .toBe("C--Users-user");
+    });
+
+    it("handles single-letter drive roots", () => {
+      expect(encodeProjectPath("D:\\")).toBe("D--");
+      expect(encodeProjectPath("Q:\\src")).toBe("Q--src");
+    });
+
+    it("encodes drive colon separately from backslashes", () => {
+      // Verify that C: becomes C- (colon→dash) and \ becomes - (slash→dash)
+      // So C:\ → C-- (one from colon, one from backslash)
+      expect(encodeProjectPath("C:\\")).toBe("C--");
+    });
   });
 });
 
