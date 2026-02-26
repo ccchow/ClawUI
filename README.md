@@ -1,11 +1,11 @@
 ![CI](https://github.com/ccchow/ClawUI/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-# ClawUI: The Visual Orchestrator for Claude Code
+# ClawUI: A Claude Code Orchestrator with User/Agent Interface
 
 > **Turn your linear Claude Code CLI into a macro-planning Node Graph.**
 
-ClawUI is a next-generation visual dashboard and orchestration engine for Claude Code. It solves the biggest pain points of complex AI coding tasks: context window explosion and terminal scroll fatigue.
+ClawUI is a visual agentic workflow planner and orchestration engine for Claude Code. It solves the biggest pain points of complex AI coding tasks: context window explosion and terminal scroll fatigue.
 
 By upgrading your CLI experience with a **Blueprint DAG (Directed Acyclic Graph) System** and **Proactive Next Actions**, ClawUI transforms Claude Code from a simple chat interface into an autonomous, long-term project manager.
 
