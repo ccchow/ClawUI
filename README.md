@@ -11,9 +11,13 @@ By upgrading your CLI experience with a **Blueprint DAG (Directed Acyclic Graph)
 
 ## Screenshots
 
-| Dashboard Overview | Blueprint DAG View | Session Detail |
-|---|---|---|
-| ![Dashboard Overview](docs/images/dashboard-overview.png) | ![Blueprint DAG](docs/images/blueprint-desktop.png) | ![Session Detail](docs/images/dashboard-session-detail.png) |
+| Blueprint List | Task Node List |
+|---|---|
+| ![Blueprint List](docs/images/blueprint-list.png) | ![Task Node List](docs/images/task-node-list.png) |
+
+| Task Node Detail | Claude Code Session |
+|---|---|
+| ![Task Node Detail](docs/images/task-node.png) | ![Claude Code Session](docs/images/claude-code-session.png) |
 
 ## ✨ Why ClawUI?
 
