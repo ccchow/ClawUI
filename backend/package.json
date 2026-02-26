@@ -1,12 +1,12 @@
 {
   "name": "clawui-backend",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "license": "MIT",
-  "author": "Anthropic",
+  "author": "ccchow",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/ClawUI.git"
+    "url": "https://github.com/ccchow/ClawUI.git"
   },
   "description": "ClawUI backend — Express server for session indexing and blueprint execution",
   "type": "module",

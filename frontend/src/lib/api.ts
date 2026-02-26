@@ -316,6 +316,16 @@ export function enrichNode(
   });
 }
 
+export function smartPickDependencies(
+  blueprintId: string,
+  nodeId: string
+): Promise<{ status: string; nodeId: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/smart-dependencies`,
+    { method: "POST" }
+  );
+}
+
 export function reevaluateNode(
   blueprintId: string,
   nodeId: string
@@ -444,7 +454,7 @@ export function getNodeExecutions(
   );
 }
 
-export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate";
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps";
 
 export interface RelatedSession {
   id: string;
@@ -486,7 +496,7 @@ export function runAllNodes(
 // --- Queue Status API ---
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps";
   nodeId?: string;
   queuedAt: string;
 }

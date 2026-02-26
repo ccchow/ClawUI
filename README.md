@@ -1,4 +1,4 @@
-![CI](https://github.com/anthropics/ClawUI/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/ccchow/ClawUI/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 # ClawUI: The Visual Orchestrator for Claude Code
@@ -56,7 +56,7 @@ A beautiful, Linear-style vertical timeline for every interaction:
 
 ```bash
 # Clone the repository and install dependencies
-git clone https://github.com/anthropics/ClawUI.git
+git clone https://github.com/ccchow/ClawUI.git
 cd ClawUI
 npm install
 

@@ -28,7 +28,7 @@ import { analyzeSessionHealth } from "./jsonl-parser.js";
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps";
   nodeId?: string;
   queuedAt: string;
 }

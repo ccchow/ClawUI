@@ -1,17 +1,17 @@
 {
   "name": "clawui",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "license": "MIT",
   "description": "Visual timeline UI for Claude Code sessions with blueprint-based task orchestration",
   "author": "ccchow",
-  "homepage": "https://github.com/anthropics/ClawUI#readme",
+  "homepage": "https://github.com/ccchow/ClawUI#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/ClawUI.git"
+    "url": "https://github.com/ccchow/ClawUI.git"
   },
   "bugs": {
-    "url": "https://github.com/anthropics/ClawUI/issues"
+    "url": "https://github.com/ccchow/ClawUI/issues"
   },
   "keywords": [
     "claude",

@@ -54,8 +54,11 @@ export function MarkdownEditor({
     [value, onChange, autoResize]
   );
 
+  const [pasteError, setPasteError] = useState<string | null>(null);
+
   const handlePaste = useCallback(
     async (e: React.ClipboardEvent) => {
+      if (disabled) return;
       const items = e.clipboardData?.items;
       if (!items) return;
 
@@ -65,12 +68,22 @@ export function MarkdownEditor({
           const file = item.getAsFile();
           if (!file) continue;
 
+          // 5MB size limit for pasted images
+          if (file.size > 5 * 1024 * 1024) {
+            setPasteError("Image too large (max 5MB)");
+            setTimeout(() => setPasteError(null), 4000);
+            return;
+          }
+
           setUploading(true);
+          setPasteError(null);
           try {
             const dataUrl = await fileToDataUrl(file);
             insertAtCursor(`![image](${dataUrl})`);
           } catch (err) {
             console.error("Image paste failed:", err);
+            setPasteError("Failed to paste image");
+            setTimeout(() => setPasteError(null), 4000);
           } finally {
             setUploading(false);
           }
@@ -78,15 +91,17 @@ export function MarkdownEditor({
         }
       }
     },
-    [insertAtCursor]
+    [disabled, insertAtCursor]
   );
 
   return (
     <div className={className} onClick={(e) => e.stopPropagation()}>
       {/* Mode toggle tabs */}
-      <div className="flex items-center gap-1 mb-1 flex-wrap">
+      <div className="flex items-center gap-1 mb-1 flex-wrap" role="tablist">
         <button
           type="button"
+          role="tab"
+          aria-selected={mode === "edit"}
           onClick={() => setMode("edit")}
           className={`px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md text-[11px] font-medium transition-colors ${
             mode === "edit"
@@ -98,6 +113,8 @@ export function MarkdownEditor({
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={mode === "preview"}
           onClick={() => setMode("preview")}
           className={`px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md text-[11px] font-medium transition-colors ${
             mode === "preview"
@@ -111,6 +128,11 @@ export function MarkdownEditor({
           <span className="text-[11px] text-accent-blue flex items-center gap-1">
             <span className="inline-block w-3 h-3 border-2 border-accent-blue/30 border-t-accent-blue rounded-full animate-spin" />
             Pasting image...
+          </span>
+        )}
+        {pasteError && (
+          <span className="text-[11px] text-accent-red animate-fade-in">
+            {pasteError}
           </span>
         )}
         {actions && (
@@ -132,7 +154,8 @@ export function MarkdownEditor({
             autoResize(e.target);
           }}
           onPaste={handlePaste}
-          readOnly={disabled}
+          disabled={disabled}
+          aria-label={placeholder}
           placeholder={placeholder}
           className={`w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 resize-y font-mono${disabled ? " opacity-60 cursor-not-allowed" : ""}`}
           style={{ minHeight }}
@@ -143,7 +166,7 @@ export function MarkdownEditor({
           style={{ minHeight }}
         >
           {value.trim() ? (
-            <MarkdownContent content={value} />
+            <MarkdownContent content={value} maxHeight="none" />
           ) : (
             <span className="text-text-muted italic">Nothing to preview</span>
           )}

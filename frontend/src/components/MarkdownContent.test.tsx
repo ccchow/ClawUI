@@ -100,7 +100,8 @@ describe("MarkdownContent", () => {
 
   it("handles empty content", () => {
     const { container } = render(<MarkdownContent content="" />);
-    expect(container.firstChild).toBeInTheDocument();
+    // Empty content returns null — no wrapper div
+    expect(container.firstChild).toBeNull();
   });
 
   it("renders multiple paragraphs", () => {
@@ -117,5 +118,46 @@ describe("MarkdownContent", () => {
     const content = ["```", "some code", "```"].join("\n");
     render(<MarkdownContent content={content} />);
     expect(screen.getByTitle("Copy to clipboard")).toBeInTheDocument();
+  });
+
+  it("renders blockquotes", () => {
+    const { container } = render(<MarkdownContent content="> This is a quote" />);
+    const bq = container.querySelector("blockquote");
+    expect(bq).toBeInTheDocument();
+    expect(bq?.textContent).toBe("This is a quote");
+  });
+
+  it("renders horizontal rules", () => {
+    const content = ["Above", "---", "Below"].join("\n");
+    const { container } = render(<MarkdownContent content={content} />);
+    expect(container.querySelector("hr")).toBeInTheDocument();
+  });
+
+  it("renders strikethrough text", () => {
+    render(<MarkdownContent content="This is ~~deleted~~ text" />);
+    const del = screen.getByText("deleted");
+    expect(del.tagName).toBe("DEL");
+  });
+
+  it("renders with maxHeight prop", () => {
+    const { container } = render(
+      <MarkdownContent content="Hello" maxHeight="200px" />
+    );
+    const div = container.firstChild as HTMLElement;
+    expect(div.style.maxHeight).toBe("200px");
+  });
+
+  it("renders with maxHeight=none", () => {
+    const { container } = render(
+      <MarkdownContent content="Hello" maxHeight="none" />
+    );
+    const div = container.firstChild as HTMLElement;
+    expect(div.style.maxHeight).toBe("");
+  });
+
+  it("copy button has aria-label", () => {
+    const content = ["```", "code", "```"].join("\n");
+    render(<MarkdownContent content={content} />);
+    expect(screen.getByLabelText("Copy to clipboard")).toBeInTheDocument();
   });
 });

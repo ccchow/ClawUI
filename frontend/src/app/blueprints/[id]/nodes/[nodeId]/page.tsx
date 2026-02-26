@@ -24,6 +24,7 @@ import {
   resumeNodeSession,
   unqueueNode,
   splitNode,
+  smartPickDependencies,
 } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -74,6 +75,7 @@ export default function NodeDetailPage() {
   const [showUnqueueConfirm, setShowUnqueueConfirm] = useState(false);
   const [unqueuing, setUnqueuing] = useState(false);
   const [splitting, setSplitting] = useState(false);
+  const [smartDepsOptimistic, setSmartDepsOptimistic] = useState(false);
   const [showSplitConfirm, setShowSplitConfirm] = useState(false);
   const [showNodeSwitcher, setShowNodeSwitcher] = useState(false);
   const nodeSwitcherRef = useRef<HTMLDivElement>(null);
@@ -163,6 +165,26 @@ export default function NodeDetailPage() {
     (t) => t.nodeId === nodeId && t.type === "reevaluate"
   );
   const hasPendingTasks = pendingTasks.some((t) => t.nodeId === nodeId);
+  const smartDepsQueued = pendingTasks.some(
+    (t) => t.nodeId === nodeId && t.type === "smart_deps"
+  );
+  const smartDepsLoading = smartDepsOptimistic || smartDepsQueued;
+
+  // Reset optimistic flag once polling confirms the task (or it completes)
+  useEffect(() => {
+    if (smartDepsQueued) setSmartDepsOptimistic(false);
+  }, [smartDepsQueued]);
+
+  // Sync edit fields when reevaluate completes (node data updated via polling)
+  const prevReevalQueuedRef = useRef(false);
+  useEffect(() => {
+    const wasQueued = prevReevalQueuedRef.current;
+    prevReevalQueuedRef.current = reevaluateQueued;
+    // Reevaluate just completed: force-close edit mode so fresh content is visible
+    if (wasQueued && !reevaluateQueued && editing && node) {
+      setEditing(false);
+    }
+  }, [reevaluateQueued, editing, node]);
 
   // Detect status transition from running/queued → done/failed/blocked and start post-completion polling
   useEffect(() => {
@@ -525,8 +547,8 @@ export default function NodeDetailPage() {
             <input
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
-              readOnly={enriching}
-              className={`text-xl font-semibold flex-1 min-w-0 bg-bg-tertiary border border-accent-blue rounded-lg px-2 py-1 text-text-primary focus:outline-none${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
+              readOnly={enriching || reevaluating || reevaluateQueued}
+              className={`text-xl font-semibold flex-1 min-w-0 bg-bg-tertiary border border-accent-blue rounded-lg px-2 py-1 text-text-primary focus:outline-none${enriching || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
               placeholder="Node title"
             />
           ) : (
@@ -570,7 +592,7 @@ export default function NodeDetailPage() {
               onChange={setEditDesc}
               placeholder="Description (supports Markdown and image paste)"
               minHeight="120px"
-              disabled={enriching}
+              disabled={enriching || reevaluating || reevaluateQueued}
               actions={
                 <>
                   <button
@@ -590,21 +612,21 @@ export default function NodeDetailPage() {
                       } catch { /* ignore */ }
                       setSaving(false);
                     }}
-                    disabled={!editTitle.trim() || saving || enriching}
+                    disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {saving ? "Saving..." : "Save"}
                   </button>
                   <button
                     onClick={handleEnrich}
-                    disabled={!editTitle.trim() || enriching}
+                    disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
                     className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
                   </button>
                   <button
                     onClick={() => setEditing(false)}
-                    disabled={enriching}
+                    disabled={enriching || reevaluating || reevaluateQueued}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Cancel
@@ -865,7 +887,7 @@ export default function NodeDetailPage() {
           </div>
         )}
         {showDeleteConfirm && (
-          <div className="mt-3 p-3 rounded-lg bg-accent-red/10 border border-accent-red/30">
+          <div className="mt-3 p-3 rounded-lg bg-accent-red/10 border border-accent-red/30 animate-fade-in">
             <p className="text-sm text-accent-red mb-2">Are you sure? This cannot be undone.</p>
             <div className="flex gap-2">
               <button
@@ -919,13 +941,36 @@ export default function NodeDetailPage() {
         <section>
           {blueprint.nodes.filter((n) => n.id !== node.id).length > 0 ? (
             <div>
-              <button
-                onClick={() => setDepsExpanded((v) => !v)}
-                className="flex items-center gap-1 text-xs text-text-muted mb-1 hover:text-text-secondary transition-colors"
-              >
-                <span className={`transition-transform ${depsExpanded ? "rotate-90" : ""}`}>▶</span>
-                Dependencies{depNodes.length > 0 && <span className="text-accent-blue ml-1">({depNodes.length} selected)</span>}
-              </button>
+              <div className="flex items-center gap-2 mb-1">
+                <button
+                  onClick={() => setDepsExpanded((v) => !v)}
+                  className="flex items-center gap-1 text-xs text-text-muted hover:text-text-secondary transition-colors"
+                >
+                  <span className={`transition-transform ${depsExpanded ? "rotate-90" : ""}`}>▶</span>
+                  Dependencies{depNodes.length > 0 && <span className="text-accent-blue ml-1">({depNodes.length} selected)</span>}
+                </button>
+                {["pending", "failed", "blocked"].includes(node.status) && blueprint.nodes.filter((n) => n.id !== node.id && n.status !== "skipped").length > 0 && (
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (smartDepsLoading) return;
+                      setSmartDepsOptimistic(true);
+                      try {
+                        await smartPickDependencies(blueprintId, node.id);
+                        loadData(); // Refresh pending tasks to activate polling
+                      } catch {
+                        setSmartDepsOptimistic(false);
+                      }
+                    }}
+                    disabled={smartDepsLoading}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-accent-purple/20 text-accent-purple text-[10px] font-medium hover:bg-accent-purple/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="AI-pick dependencies"
+                    aria-label="AI-pick dependencies"
+                  >
+                    {smartDepsLoading ? <><AISparkle size="xs" /> Picking…</> : "✨ Auto"}
+                  </button>
+                )}
+              </div>
               <div className={`flex gap-1.5 ${depsExpanded ? "flex-wrap" : "overflow-hidden max-h-[28px]"}`}>
                 {blueprint.nodes
                   .filter((n) => n.id !== node.id)
@@ -942,7 +987,9 @@ export default function NodeDetailPage() {
                     return (
                       <button
                         key={n.id}
+                        disabled={smartDepsLoading}
                         onClick={async () => {
+                          if (smartDepsLoading) return;
                           const newDeps = isDep
                             ? node.dependencies.filter((d) => d !== n.id)
                             : [...node.dependencies, n.id];
@@ -961,6 +1008,10 @@ export default function NodeDetailPage() {
                           } catch { /* ignore */ }
                         }}
                         className={`flex-shrink-0 flex items-center gap-1.5 px-2 py-1 rounded-md text-xs border transition-colors ${
+                          smartDepsLoading
+                            ? "opacity-50 cursor-not-allowed"
+                            : ""
+                        } ${
                           isSkipped
                             ? "border-border-primary bg-bg-tertiary/50 text-text-muted opacity-60"
                             : isDep
@@ -1026,8 +1077,8 @@ export default function NodeDetailPage() {
                       )}
                     </div>
                     {a.content && (
-                      <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-96 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:max-h-none [&_.space-y-3]:text-xs">
-                        <MarkdownContent content={a.content} />
+                      <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-96 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs">
+                        <MarkdownContent content={a.content} maxHeight="none" />
                       </div>
                     )}
                   </div>
@@ -1253,8 +1304,8 @@ export default function NodeDetailPage() {
                         Prompt Sent
                       </button>
                       {expandedInputs.has(exec.id) && (
-                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-64 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:max-h-none [&_.space-y-3]:text-xs">
-                          <MarkdownContent content={exec.inputContext} />
+                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-64 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs">
+                          <MarkdownContent content={exec.inputContext} maxHeight="none" />
                         </div>
                       )}
                     </div>
@@ -1274,8 +1325,8 @@ export default function NodeDetailPage() {
                         Output Summary
                       </button>
                       {!collapsedOutputs.has(exec.id) && (
-                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-64 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:max-h-none [&_.space-y-3]:text-xs">
-                          <MarkdownContent content={exec.outputSummary} />
+                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-64 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs">
+                          <MarkdownContent content={exec.outputSummary} maxHeight="none" />
                         </div>
                       )}
                     </div>
@@ -1343,47 +1394,70 @@ export default function NodeDetailPage() {
           </section>
         )}
 
-        {/* Output Artifacts */}
-        {node.outputArtifacts.length > 0 && (
-          <section>
-            <h2 className="text-sm font-medium text-text-primary mb-2">
-              Output Artifacts
-            </h2>
-            <div className="space-y-2">
-              {node.outputArtifacts.map((a) => {
-                const targetNode = blueprint.nodes.find(
-                  (n) => n.id === a.targetNodeId
-                );
-                return (
-                  <div
-                    key={a.id}
-                    className="rounded-lg border border-border-primary bg-bg-secondary p-3"
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-accent-green">&#8594;</span>
-                      <span className="text-xs font-medium text-text-secondary capitalize">
-                        {a.type.replace(/_/g, " ")}
-                      </span>
-                      {targetNode && (
-                        <Link
-                          href={`/blueprints/${blueprintId}/nodes/${targetNode.id}`}
-                          className="text-xs text-text-muted hover:text-accent-blue transition-colors"
-                        >
-                          to {targetNode.title}
-                        </Link>
+        {/* Output Artifacts — merge duplicates with identical content */}
+        {node.outputArtifacts.length > 0 && (() => {
+          // Group by content+type to merge artifacts that differ only by targetNodeId
+          const merged = node.outputArtifacts.reduce<
+            { id: string; type: string; content: string; targetNodeIds: string[] }[]
+          >((acc, a) => {
+            const existing = acc.find(
+              (g) => g.content === a.content && g.type === a.type
+            );
+            if (existing) {
+              if (a.targetNodeId) existing.targetNodeIds.push(a.targetNodeId);
+            } else {
+              acc.push({
+                id: a.id,
+                type: a.type,
+                content: a.content,
+                targetNodeIds: a.targetNodeId ? [a.targetNodeId] : [],
+              });
+            }
+            return acc;
+          }, []);
+
+          return (
+            <section>
+              <h2 className="text-sm font-medium text-text-primary mb-2">
+                Output Artifacts
+              </h2>
+              <div className="space-y-2">
+                {merged.map((g) => {
+                  const targetNodes = g.targetNodeIds
+                    .map((tid) => blueprint.nodes.find((n) => n.id === tid))
+                    .filter(Boolean);
+                  return (
+                    <div
+                      key={g.id}
+                      className="rounded-lg border border-border-primary bg-bg-secondary p-3"
+                    >
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span className="text-accent-green">&#8594;</span>
+                        <span className="text-xs font-medium text-text-secondary capitalize">
+                          {g.type.replace(/_/g, " ")}
+                        </span>
+                        {targetNodes.map((tn) => (
+                          <Link
+                            key={tn!.id}
+                            href={`/blueprints/${blueprintId}/nodes/${tn!.id}`}
+                            className="text-xs text-text-muted hover:text-accent-blue transition-colors"
+                          >
+                            to {tn!.title}
+                          </Link>
+                        ))}
+                      </div>
+                      {g.content && (
+                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-96 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs">
+                          <MarkdownContent content={g.content} maxHeight="none" />
+                        </div>
                       )}
                     </div>
-                    {a.content && (
-                      <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-96 overflow-y-auto [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:max-h-none [&_.space-y-3]:text-xs">
-                        <MarkdownContent content={a.content} />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })()}
       </div>
     </div>
   );

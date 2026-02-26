@@ -7,6 +7,22 @@ import { type Blueprint, type BlueprintStatus, listBlueprints, archiveBlueprint 
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 
+/** Strip markdown syntax for plain-text preview */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/gm, "")     // headings
+    .replace(/\*\*([^*]+)\*\*/g, "$1") // bold
+    .replace(/\*([^*]+)\*/g, "$1")     // italic
+    .replace(/~~([^~]+)~~/g, "$1")     // strikethrough
+    .replace(/`([^`]+)`/g, "$1")       // inline code
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "[image]") // images
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
+    .replace(/^>\s?/gm, "")           // blockquotes
+    .replace(/^[-*_]{3,}\s*$/gm, "")  // horizontal rules
+    .replace(/\n+/g, " ")             // collapse newlines
+    .trim();
+}
+
 const STATUS_FILTERS: { label: string; value: BlueprintStatus | "all" }[] = [
   { label: "Approved", value: "approved" },
   { label: "Running", value: "running" },
@@ -288,7 +304,7 @@ export default function BlueprintsPage() {
                     </div>
                     {bp.description && (
                       <p className="text-sm text-text-muted truncate">
-                        {bp.description}
+                        {stripMarkdown(bp.description)}
                       </p>
                     )}
                     {bp.projectCwd && (

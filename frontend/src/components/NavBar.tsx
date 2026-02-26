@@ -170,7 +170,7 @@ export function NavBar() {
   return (
     <header className="sticky top-0 z-50 border-b border-border-primary bg-bg-primary/80 backdrop-blur-sm">
       <div className="mx-auto max-w-5xl px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 flex-wrap">
-        <Link href="/blueprints" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+        <Link href="/blueprints" aria-label="ClawUI home" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <span className="text-xl">🐾</span>
           <span className="font-semibold text-lg hidden sm:inline">ClawUI</span>
         </Link>

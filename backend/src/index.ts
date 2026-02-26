@@ -29,7 +29,9 @@ setInterval(() => {
 
 const app = express();
 
-app.use(cors({ origin: "http://127.0.0.1:3000" }));
+// CORS: allow any localhost origin (3000 for stable, 3100 for dev)
+// External access via Tailscale serve proxy
+app.use(cors({ origin: /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/ }));
 app.use(express.json({ limit: "10mb" }));
 
 // Increase timeout for long-running Claude CLI calls

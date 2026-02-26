@@ -13,7 +13,7 @@ export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
 export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
 export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
 export type ReportedStatus = "done" | "failed" | "blocked" | null;
-export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate";
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps";
 
 // Layer 1: Blueprint (was "Plan")
 export interface Blueprint {

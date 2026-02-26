@@ -287,6 +287,7 @@ function MergedGroupNode({ items, type }: { items: DisplayItem[]; type: string }
       <div className="absolute left-[14px] top-3 w-3 h-3 rounded-full bg-bg-tertiary ring-2 ring-bg-primary z-10" />
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className={`w-full text-left rounded-lg border-l-2 ${colorClass} bg-bg-secondary/50 px-3 py-2 hover:bg-bg-hover/30 transition-all`}
       >
         <div className="flex items-center gap-2">

@@ -558,6 +558,102 @@ Guidelines for decomposition:
   }
 });
 
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies — AI-powered dependency selection
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies", (req, res) => {
+  try {
+    const blueprintId = req.params.blueprintId;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const nodeId = req.params.nodeId;
+    const node = blueprint.nodes.find((n) => n.id === nodeId);
+    if (!node) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+    if (!["pending", "failed", "blocked"].includes(node.status)) {
+      res.status(400).json({ error: "Smart dependencies only available for pending/failed/blocked nodes" });
+      return;
+    }
+
+    const siblingNodes = blueprint.nodes.filter((n) => n.id !== nodeId && n.status !== "skipped");
+    if (siblingNodes.length === 0) {
+      res.status(400).json({ error: "No other nodes to depend on" });
+      return;
+    }
+
+    addPendingTask(blueprintId, { type: "smart_deps", nodeId, queuedAt: new Date().toISOString() });
+
+    // Build node list for context (titles + statuses + IDs, no descriptions)
+    const nodesContext = siblingNodes
+      .map((n) => {
+        let line = `  - ID: ${n.id} | #${n.order + 1} [${n.status}] "${n.title}"`;
+        if (n.status === "done" && n.outputArtifacts.length > 0) {
+          line += ` — Handoff: ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 200)}`;
+        }
+        return line;
+      })
+      .join("\n");
+
+    const apiBase = getApiBase();
+    const authParam = getAuthParam();
+
+    const prompt = `You are analyzing a development blueprint to determine the correct dependencies for a specific task node.
+
+Blueprint: "${blueprint.title}"
+${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
+${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
+
+Target node (the node that needs dependencies):
+- Title: "${node.title}"
+- Description: "${node.description || "(none)"}"
+- Current dependencies: ${node.dependencies.length > 0 ? node.dependencies.map((d) => {
+      const dn = blueprint.nodes.find((n) => n.id === d);
+      return dn ? `"${dn.title}"` : d;
+    }).join(", ") : "(none)"}
+
+Available nodes that could be dependencies:
+${nodesContext}
+
+Your task: Pick the most relevant dependencies for the target node — nodes whose output or completion is logically required before this node can start. Consider:
+1. Data flow: Does this node need output/artifacts from another node?
+2. Code dependencies: Does this node modify code that another node creates?
+3. Logical ordering: Must another task complete first for this one to make sense?
+
+Rules:
+- Pick 0-3 dependencies (only pick ones that are truly needed)
+- Prefer "done" nodes as dependencies when they provide relevant context
+- Do NOT pick nodes that are independent/parallel work
+- If no dependencies are needed, use an empty array
+
+IMPORTANT: Do NOT output JSON in chat. Instead, update the node directly by calling the ClawUI API using curl:
+
+curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"dependencies": ["nodeId1", "nodeId2"]}'
+
+Replace the nodeId values with actual IDs from the available nodes list above. Use an empty array if no dependencies are needed.`;
+
+    const smartDepsBefore = new Date();
+    const smartDepsCwd = blueprint.projectCwd;
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await runClaudeInteractiveGen(prompt, smartDepsCwd || undefined);
+        captureRelatedSession(smartDepsCwd, smartDepsBefore, nodeId, blueprintId, "smart_deps");
+      } finally {
+        removePendingTask(blueprintId, nodeId, "smart_deps");
+      }
+    }).catch(err => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error(`Smart dependencies for node ${nodeId} failed: ${errMsg}`);
+    });
+
+    res.json({ status: "queued", nodeId });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // PUT /api/blueprints/:blueprintId/nodes/batch — batch update multiple nodes
 planRouter.put("/api/blueprints/:blueprintId/nodes/batch", (req, res) => {
   try {

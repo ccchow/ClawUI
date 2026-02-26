@@ -18,6 +18,7 @@ import {
 } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/format-time";
 import { Timeline } from "@/components/Timeline";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
 import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
@@ -153,15 +154,15 @@ function SessionInfoHeader({
             rows={3}
           />
         ) : meta.notes ? (
-          <p
-            className="text-sm text-text-secondary whitespace-pre-wrap cursor-pointer hover:text-text-primary transition-colors"
+          <div
+            className="cursor-pointer hover:text-text-primary transition-colors"
             onClick={() => {
               setEditingNotes(true);
               setTimeout(() => notesRef.current?.focus(), 0);
             }}
           >
-            {meta.notes}
-          </p>
+            <MarkdownContent content={meta.notes} maxHeight="200px" />
+          </div>
         ) : null}
       </div>
     </div>

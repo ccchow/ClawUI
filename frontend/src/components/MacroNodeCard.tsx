@@ -9,6 +9,22 @@ import { MarkdownEditor } from "./MarkdownEditor";
 import { AISparkle } from "./AISparkle";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
 
+/** Strip markdown syntax for plain-text preview */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "[image]")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^>\s?/gm, "")
+    .replace(/^[-*_]{3,}\s*$/gm, "")
+    .replace(/\n+/g, " ")
+    .trim();
+}
+
 export function MacroNodeCard({
   node,
   pendingTasks,
@@ -83,6 +99,19 @@ export function MacroNodeCard({
   // Mobile overflow menu state
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
+
+  // Track reevaluateQueued transitions to sync edit fields when reevaluate completes
+  const prevReevalQueuedRef = useRef(false);
+  useEffect(() => {
+    const wasQueued = prevReevalQueuedRef.current;
+    prevReevalQueuedRef.current = reevaluateQueued;
+    // Reevaluate just completed: force-close edit mode so fresh content is visible
+    if (wasQueued && !reevaluateQueued && isEditing) {
+      setIsEditing(false);
+      setEditTitle(node.title);
+      setEditDescription(node.description || "");
+    }
+  }, [reevaluateQueued, isEditing, node.title, node.description]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return;
@@ -239,7 +268,7 @@ export function MacroNodeCard({
 
       {/* Card */}
       <div
-        className="flex-1 min-w-0 mb-2 rounded-xl border border-border-primary bg-bg-secondary hover:border-border-hover transition-colors cursor-pointer overflow-hidden"
+        className="flex-1 min-w-0 mb-2 rounded-xl border border-border-primary bg-bg-secondary hover:border-border-hover transition-colors cursor-pointer"
         onClick={() => !isEditing && setExpanded(!expanded)}
       >
         {/* Collapsed header */}
@@ -255,14 +284,14 @@ export function MacroNodeCard({
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
-                  readOnly={enriching}
-                  className={`flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
+                  readOnly={enriching || reevaluating || reevaluateQueued}
+                  className={`flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30${enriching || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
                   autoFocus
                 />
               ) : blueprintId ? (
                 <Link
                   href={`/blueprints/${blueprintId}/nodes/${node.id}`}
-                  className="font-medium text-text-primary truncate block hover:text-accent-blue transition-colors min-w-0"
+                  className="font-medium text-text-primary truncate block hover:text-accent-blue transition-colors min-w-0 py-2 sm:py-0 -my-2 sm:my-0"
                   onClick={(e) => e.stopPropagation()}
                 >
                   {node.title}
@@ -282,7 +311,7 @@ export function MacroNodeCard({
             </div>
             {!expanded && !isEditing && node.description && (
               <p className="text-sm text-text-muted mt-1 line-clamp-1">
-                {node.description}
+                {stripMarkdown(node.description)}
               </p>
             )}
           </div>
@@ -351,6 +380,7 @@ export function MacroNodeCard({
                   onClick={(e) => { e.stopPropagation(); setMobileMenuOpen(!mobileMenuOpen); }}
                   className="p-2 -m-0.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors"
                   title="More actions"
+                  aria-label="More actions"
                 >
                   <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
                     <circle cx="8" cy="3" r="1.5" />
@@ -465,16 +495,21 @@ export function MacroNodeCard({
               </span>
             )}
             {!isEditing && (
-              <span aria-expanded={expanded} className={`text-text-muted text-xs transition-transform ${expanded ? "rotate-180" : ""}`}>
+              <button
+                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+                aria-expanded={expanded}
+                aria-label={expanded ? "Collapse node" : "Expand node"}
+                className={`p-1 -m-0.5 rounded text-text-muted text-xs transition-transform hover:bg-bg-tertiary ${expanded ? "rotate-180" : ""}`}
+              >
                 ▼
-              </span>
+              </button>
             )}
           </div>
         </div>
 
         {/* Delete confirmation dialog */}
         {showDeleteConfirm && (
-          <div className="mx-4 mb-3 p-3 rounded-lg bg-accent-red/10 border border-accent-red/30" onClick={(e) => e.stopPropagation()}>
+          <div className="mx-4 mb-3 p-3 rounded-lg bg-accent-red/10 border border-accent-red/30 animate-fade-in" onClick={(e) => e.stopPropagation()}>
             <p className="text-sm text-accent-red mb-2">Are you sure? This cannot be undone.</p>
             <div className="flex gap-2">
               <button
@@ -501,26 +536,26 @@ export function MacroNodeCard({
               value={editDescription}
               onChange={setEditDescription}
               placeholder="Description (supports Markdown and image paste)"
-              disabled={enriching}
+              disabled={enriching || reevaluating || reevaluateQueued}
             />
             <div className="flex gap-2">
               <button
                 onClick={handleEditSave}
-                disabled={!editTitle.trim() || saving || enriching}
+                disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
                 className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {saving ? "Saving..." : "Save"}
               </button>
               <button
                 onClick={handleEnrich}
-                disabled={!editTitle.trim() || enriching}
+                disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
                 className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
               </button>
               <button
                 onClick={handleEditCancel}
-                disabled={enriching}
+                disabled={enriching || reevaluating || reevaluateQueued}
                 className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Cancel

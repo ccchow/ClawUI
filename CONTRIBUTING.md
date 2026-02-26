@@ -7,14 +7,14 @@ Thank you for your interest in contributing to ClawUI! This guide will help you 
 - **Node.js 20+** (LTS recommended)
 - **npm 10+** (comes with Node.js 20)
 - **Claude Code CLI** — required for interactive continuation and blueprint execution features
-- **macOS or Linux** — the `expect` TTY wrapper depends on `/usr/bin/expect`
+- **macOS or Linux** — the `expect` TTY wrapper is auto-detected (configurable via `EXPECT_PATH` env var)
 
 ## Getting Started
 
 1. **Fork and clone** the repository:
 
    ```bash
-   git clone https://github.com/anthropics/ClawUI.git
+   git clone https://github.com/ccchow/ClawUI.git
    cd ClawUI
    ```
 
@@ -135,7 +135,7 @@ cd frontend && npx vitest run    # Frontend tests
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/anthropics/ClawUI/issues) to report bugs or request features. Include:
+Use [GitHub Issues](https://github.com/ccchow/ClawUI/issues) to report bugs or request features. Include:
 
 - Steps to reproduce (for bugs)
 - Expected vs actual behavior

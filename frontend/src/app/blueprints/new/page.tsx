@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createBlueprint } from "@/lib/api";
+import { MarkdownEditor } from "@/components/MarkdownEditor";
 
 export default function NewBlueprintPage() {
   const router = useRouter();
@@ -39,7 +40,7 @@ export default function NewBlueprintPage() {
   };
 
   return (
-    <div>
+    <div className="animate-fade-in">
       <Link
         href="/blueprints"
         className="text-sm text-text-muted hover:text-text-secondary transition-colors mb-4 inline-block"
@@ -67,16 +68,14 @@ export default function NewBlueprintPage() {
         </div>
 
         <div>
-          <label htmlFor="description" className="block text-sm text-text-secondary mb-1">
+          <label className="block text-sm text-text-secondary mb-1">
             Description
           </label>
-          <textarea
-            id="description"
+          <MarkdownEditor
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="High-level goal and context for this blueprint..."
-            rows={4}
-            className="w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 resize-y"
+            onChange={setDescription}
+            placeholder="High-level goal and context for this blueprint (supports Markdown and image paste)..."
+            minHeight="100px"
           />
         </div>
 

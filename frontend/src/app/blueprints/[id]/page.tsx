@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MacroNodeCard } from "@/components/MacroNodeCard";
+import { MarkdownContent } from "@/components/MarkdownContent";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { computeDepLayout } from "@/components/DependencyGraph";
@@ -651,8 +652,8 @@ export default function BlueprintDetailPage() {
             rows={2}
           />
         ) : (
-          <p
-            className={`text-sm text-text-secondary mb-3 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
+          <div
+            className={`text-sm mb-3 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
             onClick={() => {
               if (generating || enriching || reevaluating) return;
               setDescValue(blueprint.description || "");
@@ -661,8 +662,12 @@ export default function BlueprintDetailPage() {
             }}
             title={generating || enriching || reevaluating ? "Editing disabled during AI operation" : "Click to edit"}
           >
-            {blueprint.description || <span className="text-text-muted italic">Click to add description...</span>}
-          </p>
+            {blueprint.description ? (
+              <MarkdownContent content={blueprint.description} maxHeight="200px" />
+            ) : (
+              <p className="text-text-muted italic">Click to add description...</p>
+            )}
+          </div>
         )}
         {blueprint.projectCwd && (
           <p className="text-xs text-text-muted font-mono mb-3 truncate">

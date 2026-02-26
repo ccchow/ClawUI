@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 
 /**
  * Lightweight markdown renderer — no external deps.
@@ -8,7 +8,7 @@ import React, { useState, useCallback } from "react";
  */
 
 interface Block {
-  type: "code" | "heading" | "list" | "paragraph";
+  type: "code" | "heading" | "list" | "paragraph" | "blockquote" | "hr";
   content: string;
   lang?: string;
   level?: number; // heading level 1-6
@@ -68,6 +68,24 @@ function parseBlocks(text: string): Block[] {
       continue;
     }
 
+    // Horizontal rule: ---, ***, ___
+    if (/^[-*_]{3,}\s*$/.test(line.trim())) {
+      blocks.push({ type: "hr", content: "" });
+      i++;
+      continue;
+    }
+
+    // Blockquote: > lines
+    if (line.match(/^>\s?/)) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && lines[i].match(/^>\s?/)) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      blocks.push({ type: "blockquote", content: quoteLines.join("\n") });
+      continue;
+    }
+
     // Blank line — skip
     if (line.trim() === "") {
       i++;
@@ -82,7 +100,9 @@ function parseBlocks(text: string): Block[] {
       !lines[i].trimStart().startsWith("```") &&
       !lines[i].match(/^#{1,6}\s+/) &&
       !lines[i].match(/^(\s*)[*\-+]\s+/) &&
-      !lines[i].match(/^(\s*)\d+[.)]\s+/)
+      !lines[i].match(/^(\s*)\d+[.)]\s+/) &&
+      !lines[i].match(/^>\s?/) &&
+      !/^[-*_]{3,}\s*$/.test(lines[i].trim())
     ) {
       paraLines.push(lines[i]);
       i++;
@@ -109,9 +129,9 @@ function resolveImageUrl(src: string): string {
 /** Parse inline markdown: bold, italic, inline code, images, links */
 function renderInline(text: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  // Order: code, images (before links to avoid conflict), bold, italic, links
+  // Order: code, images (before links to avoid conflict), bold, strikethrough, italic, links
   const pattern =
-    /(`[^`]+`)|(\*\*[^*]+\*\*)|(!\[[^\]]*\]\([^)]+\))|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
+    /(`[^`]+`)|(\*\*[^*]+\*\*)|(!\[[^\]]*\]\([^)]+\))|(~~[^~]+~~)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
 
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -158,13 +178,20 @@ function renderInline(text: string): React.ReactNode[] {
         );
       }
     } else if (match[4]) {
+      // Strikethrough
+      nodes.push(
+        <del key={key++} className="text-text-muted line-through">
+          {m.slice(2, -2)}
+        </del>
+      );
+    } else if (match[5]) {
       // Italic
       nodes.push(
         <em key={key++} className="italic text-text-secondary">
           {m.slice(1, -1)}
         </em>
       );
-    } else if (match[5]) {
+    } else if (match[6]) {
       // Link: [text](url)
       const linkMatch = m.match(/\[([^\]]+)\]\(([^)]+)\)/);
       if (linkMatch) {
@@ -202,7 +229,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
     navigator.clipboard.writeText(content).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    }).catch(() => { /* clipboard not available */ });
   }, [content]);
 
   return (
@@ -216,6 +243,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
         <button
           onClick={handleCopy}
           title="Copy to clipboard"
+          aria-label={copied ? "Copied" : "Copy to clipboard"}
           className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-white/10"
         >
           {copied ? (
@@ -237,11 +265,26 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
   );
 }
 
-export function MarkdownContent({ content }: { content: string }) {
-  const blocks = parseBlocks(content);
+export function MarkdownContent({
+  content,
+  maxHeight = "600px",
+  className = "",
+}: {
+  content: string;
+  maxHeight?: string | "none";
+  className?: string;
+}) {
+  const blocks = useMemo(() => parseBlocks(content), [content]);
+
+  if (blocks.length === 0) return null;
+
+  const heightStyle = maxHeight === "none" ? undefined : { maxHeight };
 
   return (
-    <div className="space-y-3 text-sm text-text-primary leading-relaxed max-h-[600px] overflow-y-auto">
+    <div
+      className={`space-y-3 text-sm text-text-primary leading-relaxed ${maxHeight !== "none" ? "overflow-y-auto" : ""} ${className}`}
+      style={heightStyle}
+    >
       {blocks.map((block, i) => {
         switch (block.type) {
           case "code":
@@ -279,6 +322,19 @@ export function MarkdownContent({ content }: { content: string }) {
               </ListTag>
             );
           }
+
+          case "blockquote":
+            return (
+              <blockquote
+                key={i}
+                className="border-l-2 border-accent-blue/40 pl-3 text-text-secondary italic"
+              >
+                {renderInline(block.content)}
+              </blockquote>
+            );
+
+          case "hr":
+            return <hr key={i} className="border-border-primary" />;
 
           case "paragraph":
           default:

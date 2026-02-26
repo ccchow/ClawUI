@@ -135,6 +135,7 @@ function CollapsibleSection({
           e.stopPropagation();
           setOpen(!open);
         }}
+        aria-expanded={open}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:bg-bg-hover/50 transition-colors"
       >
         <svg className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`} viewBox="0 0 16 16" fill="currentColor">
@@ -207,6 +208,7 @@ export function ToolPairNode({
               bookmarked ? "text-accent-amber" : "text-text-muted/30 hover:text-accent-amber/60"
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
+            aria-label={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill={bookmarked ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5">
               <path d="M4 2h8a1 1 0 011 1v11.5l-5-3-5 3V3a1 1 0 011-1z" />
@@ -354,6 +356,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
               bookmarked ? "text-accent-amber" : "text-text-muted/30 hover:text-accent-amber/60"
             }`}
             title={bookmarked ? "Remove bookmark" : "Bookmark"}
+            aria-label={bookmarked ? "Remove bookmark" : "Bookmark"}
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill={bookmarked ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5">
               <path d="M4 2h8a1 1 0 011 1v11.5l-5-3-5 3V3a1 1 0 011-1z" />
