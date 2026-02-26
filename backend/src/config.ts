@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
 /**
@@ -73,7 +73,13 @@ export const EXPECT_PATH = resolveExpectPath();
 
 export const PORT = parseInt(process.env.PORT || "3001", 10);
 
-export const CLAWUI_DB_DIR = process.env.CLAWUI_DB_DIR || ".clawui";
+/** Raw value — may be relative (e.g. ".clawui") or absolute (e.g. "/Users/x/.clawui"). */
+const CLAWUI_DB_DIR_RAW = process.env.CLAWUI_DB_DIR || ".clawui";
+
+/** Resolved absolute path to the data directory. */
+export const CLAWUI_DB_DIR = isAbsolute(CLAWUI_DB_DIR_RAW)
+  ? CLAWUI_DB_DIR_RAW
+  : join(import.meta.dirname, "..", "..", CLAWUI_DB_DIR_RAW);
 
 export const NEXT_PUBLIC_API_PORT = process.env.NEXT_PUBLIC_API_PORT || "3001";
 

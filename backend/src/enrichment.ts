@@ -5,8 +5,7 @@ import { CLAWUI_DB_DIR } from "./config.js";
 
 const log = createLogger("enrichment");
 
-const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const CLAWUI_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR);
+const CLAWUI_DIR = CLAWUI_DB_DIR;
 const ENRICHMENTS_PATH = join(CLAWUI_DIR, "enrichments.json");
 
 export interface SessionEnrichment {

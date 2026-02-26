@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.2.2",
+  "version": "0.2.3",
   "license": "MIT",
   "bin": {
     "claw-ui": "./bin/claw-ui.mjs"
@@ -42,6 +42,15 @@
     "build:frontend": "cd frontend && npm run build",
     "start:backend": "npm run start --workspace=backend",
     "lint": "npm run lint --workspace=backend"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "glob": "^11.0.0",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

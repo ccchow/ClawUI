@@ -1657,8 +1657,7 @@ planRouter.post("/api/blueprints/:id/generate", (req, res) => {
 
 // ─── Image upload for node descriptions ──────────────────────
 
-const PROJECT_ROOT = join(import.meta.dirname, "..", "..");
-const UPLOADS_DIR = join(PROJECT_ROOT, CLAWUI_DB_DIR, "uploads");
+const UPLOADS_DIR = join(CLAWUI_DB_DIR, "uploads");
 
 // Serve uploaded images statically
 planRouter.use("/api/uploads", express.static(UPLOADS_DIR));
