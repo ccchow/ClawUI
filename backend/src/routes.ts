@@ -231,7 +231,9 @@ router.post("/api/dev/redeploy", (_req, res) => {
     log.info(`Deploy output: ${deployStdout.trim()}`);
 
     // Start stable in detached mode (nohup + disown so it survives this process)
-    execFile("/bin/bash", ["-c", `nohup ${startScript} > /tmp/clawui-stable.log 2>&1 &`], { cwd: projectRoot }, (startErr) => {
+    // Shell-escape the path to prevent command injection if path contains special characters
+    const escapedStartScript = startScript.replace(/'/g, "'\\''");
+    execFile("/bin/bash", ["-c", `nohup '${escapedStartScript}' > /tmp/clawui-stable.log 2>&1 &`], { cwd: projectRoot }, (startErr) => {
       if (startErr) {
         log.error(`Start failed: ${startErr.message}`);
         res.status(500).json({ error: "Start failed", details: startErr.message });
