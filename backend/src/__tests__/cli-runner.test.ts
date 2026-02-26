@@ -1,18 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { EventEmitter } from "node:events";
 
-// We test the exported parseSuggestions logic and the runPrompt interface.
-// Since the actual CLI execution requires /usr/bin/expect and the Claude binary,
-// we mock the child_process module.
-
-// The module has private functions (runClaude, parseSuggestions) and exports runPrompt.
-// We need to test parseSuggestions behavior through runPrompt, or test it
-// by extracting and testing the parsing logic.
-
-// Approach: mock execFile so runClaude resolves with controlled output,
-// then test runPrompt end-to-end behavior.
+// Mock child_process. On Windows, runClaude uses spawn; on Unix, execFile.
+const mockExecFile = vi.fn();
+const mockSpawn = vi.fn();
 
 vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+  execFile: mockExecFile,
+  spawn: mockSpawn,
 }));
 
 // Mock fs operations used for temp files
@@ -25,26 +20,77 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+const IS_WIN = process.platform === "win32";
+
+/**
+ * Create a mock child process for spawn that emits stdout data then closes.
+ */
+function createMockSpawnChild(stdout: string, exitCode: number = 0) {
+  const child = new EventEmitter() as any;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end: vi.fn() };
+  child.pid = 12345;
+
+  // Emit data and close asynchronously so listeners can be set up
+  process.nextTick(() => {
+    if (stdout) child.stdout.emit("data", Buffer.from(stdout));
+    child.emit("close", exitCode);
+  });
+
+  return child;
+}
+
+/**
+ * Set up mocks to simulate CLI output.
+ */
+function mockCliOutput(output: string, exitCode: number = 0) {
+  if (IS_WIN) {
+    mockSpawn.mockImplementation(() => createMockSpawnChild(output, exitCode));
+  } else {
+    mockExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        callback(null, output, "");
+        return {} as any;
+      }
+    );
+  }
+}
+
+function mockCliError() {
+  if (IS_WIN) {
+    mockSpawn.mockImplementation(() => {
+      const child = new EventEmitter() as any;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdin = { end: vi.fn() };
+      child.pid = 12345;
+      process.nextTick(() => {
+        child.emit("close", 1);
+      });
+      return child;
+    });
+  } else {
+    mockExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        callback(new Error("command failed"), "", "stderr output");
+        return {} as any;
+      }
+    );
+  }
+}
+
 describe("cli-runner", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("runPrompt appends suggestion suffix and parses suggestions", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
-    // Make execFile invoke the callback with output containing suggestions
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        const output = `spawn /path/to/claude --args
-Here is the response content.
+    const output = `Here is the response content.
 ---SUGGESTIONS---
 [{"title":"Next step","description":"Do something","prompt":"do it"}]`;
-        callback(null, output, "");
-        return {} as any;
-      }
-    );
+    const fullOutput = IS_WIN ? output : `spawn /path/to/claude --args\n${output}`;
+    mockCliOutput(fullOutput);
 
     const { runPrompt } = await import("../cli-runner.js");
     const result = await runPrompt("session-123", "test prompt");
@@ -56,17 +102,9 @@ Here is the response content.
   });
 
   it("runPrompt handles output without suggestions", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        const output = `spawn /path/to/claude --args
-Just a plain response without suggestions.`;
-        callback(null, output, "");
-        return {} as any;
-      }
-    );
+    const output = "Just a plain response without suggestions.";
+    const fullOutput = IS_WIN ? output : `spawn /path/to/claude --args\n${output}`;
+    mockCliOutput(fullOutput);
 
     const { runPrompt } = await import("../cli-runner.js");
     const result = await runPrompt("session-123", "test prompt");
@@ -78,17 +116,9 @@ Just a plain response without suggestions.`;
   });
 
   it("runPrompt strips ANSI escape codes", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        const output = `spawn /path/to/claude --args
-\x1B[32mColored\x1B[0m text here`;
-        callback(null, output, "");
-        return {} as any;
-      }
-    );
+    const output = "\x1B[32mColored\x1B[0m text here";
+    const fullOutput = IS_WIN ? output : `spawn /path/to/claude --args\n${output}`;
+    mockCliOutput(fullOutput);
 
     const { runPrompt } = await import("../cli-runner.js");
     const result = await runPrompt("session-123", "test prompt");
@@ -96,42 +126,26 @@ Just a plain response without suggestions.`;
   });
 
   it("runPrompt rejects on CLI error with no output", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        callback(new Error("command failed"), "", "stderr output");
-        return {} as any;
-      }
-    );
+    mockCliError();
 
     const { runPrompt } = await import("../cli-runner.js");
     await expect(runPrompt("session-123", "test")).rejects.toThrow(
-      "Claude CLI error"
+      /Claude CLI/
     );
   });
 
   it("runPrompt limits suggestions to 3", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
     const suggestions = Array.from({ length: 5 }, (_, i) => ({
       title: `s${i}`,
       description: `d${i}`,
       prompt: `p${i}`,
     }));
 
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        const output = `spawn /path/to/claude
-Response.
+    const output = `Response.
 ---SUGGESTIONS---
 ${JSON.stringify(suggestions)}`;
-        callback(null, output, "");
-        return {} as any;
-      }
-    );
+    const fullOutput = IS_WIN ? output : `spawn /path/to/claude\n${output}`;
+    mockCliOutput(fullOutput);
 
     const { runPrompt } = await import("../cli-runner.js");
     const result = await runPrompt("session-123", "test");
@@ -139,19 +153,11 @@ ${JSON.stringify(suggestions)}`;
   });
 
   it("runPrompt handles malformed suggestion JSON gracefully", async () => {
-    const { execFile } = await import("node:child_process");
-    const mockedExecFile = vi.mocked(execFile);
-
-    mockedExecFile.mockImplementation(
-      (_cmd: any, _args: any, _opts: any, callback: any) => {
-        const output = `spawn /path/to/claude
-Response text.
+    const output = `Response text.
 ---SUGGESTIONS---
 not valid json at all`;
-        callback(null, output, "");
-        return {} as any;
-      }
-    );
+    const fullOutput = IS_WIN ? output : `spawn /path/to/claude\n${output}`;
+    mockCliOutput(fullOutput);
 
     const { runPrompt } = await import("../cli-runner.js");
     const result = await runPrompt("session-123", "test");
