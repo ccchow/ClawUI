@@ -89,6 +89,17 @@ cd backend && npx vitest run     # Backend tests
 cd frontend && npx vitest run    # Frontend tests
 ```
 
+## Contributing with ClawUI Itself
+
+ClawUI can serve as its own development environment. Instead of manually coding changes, you can use ClawUI's Blueprint system to plan, execute, and review your contribution — all orchestrated by Claude Code:
+
+1. **Start ClawUI** and create a new Blueprint with this repo's path as the project directory.
+2. **Describe your change** (e.g., *"add CSV export to session timeline"*) — ClawUI decomposes it into dependency-aware task nodes grounded in the actual codebase.
+3. **Run the Blueprint** — nodes execute in order, each in an isolated Claude Code session with handoff artifacts from upstream nodes.
+4. **Review the results** in the Timeline viewer, run tests, and open a PR.
+
+This workflow is especially useful if you're not yet familiar with the codebase — the Blueprint system gives Claude Code the structure to navigate the architecture on its own.
+
 ## Making Changes
 
 1. **Create a branch** from `main`:
