@@ -2,7 +2,7 @@ import { Router } from "express";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
-import { runPrompt } from "./cli-runner.js";
+import { runPrompt, validateSessionId } from "./cli-runner.js";
 import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
@@ -13,6 +13,13 @@ import { getNodeInfoForSessions } from "./plan-db.js";
 
 const log = createLogger("routes");
 
+/** Return a sanitized error message for API responses (no stack traces or internal paths). */
+function safeError(err: unknown): string {
+  if (err instanceof Error && err.message.includes("Invalid session ID")) return err.message;
+  if (err instanceof Error && err.message.includes("Missing or empty")) return err.message;
+  return "Internal server error";
+}
+
 const router = Router();
 
 // GET /api/projects — list all Claude Code projects
@@ -21,7 +28,7 @@ router.get("/api/projects", (_req, res) => {
     const projects = getProjects();
     res.json(projects);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -72,7 +79,7 @@ router.get("/api/projects/:id/sessions", (req, res) => {
 
     res.json(enriched);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -92,7 +99,7 @@ router.get("/api/sessions/:id/timeline", (req, res) => {
     }
     res.json(nodes);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -107,7 +114,7 @@ router.get("/api/sessions/:id/last-message", (req, res) => {
     }
     res.json(lastMessage);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -119,7 +126,7 @@ router.get("/api/sync", (_req, res) => {
     const elapsed = Date.now() - start;
     res.json({ ok: true, elapsed_ms: elapsed });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -127,6 +134,7 @@ router.get("/api/sync", (_req, res) => {
 router.post("/api/sessions/:id/run", async (req, res) => {
   const sessionId = req.params.id as string;
   try {
+    validateSessionId(sessionId);
     const { prompt } = req.body as { prompt?: string };
     if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
       res.status(400).json({ error: "Missing or empty 'prompt' in request body" });
@@ -145,7 +153,7 @@ router.post("/api/sessions/:id/run", async (req, res) => {
     res.json({ output, suggestions });
   } catch (err) {
     log.error(`POST /api/sessions/:id/run failed: ${String(err)}`);
-    res.status(500).json({ error: String(err) });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -158,7 +166,7 @@ router.get("/api/sessions/:id/meta", (req, res) => {
     const meta = enrichments.sessions[req.params.id as string];
     res.json(meta ?? {});
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -169,7 +177,7 @@ router.patch("/api/sessions/:id/meta", (req, res) => {
     const result = updateSessionMeta(req.params.id as string, patch);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -180,7 +188,7 @@ router.patch("/api/nodes/:id/meta", (req, res) => {
     const result = updateNodeMeta(req.params.id as string, patch);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -190,7 +198,7 @@ router.get("/api/tags", (_req, res) => {
     const tags = getAllTags();
     res.json(tags);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -202,7 +210,7 @@ router.get("/api/state", (_req, res) => {
     const state = getAppState();
     res.json(state);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -213,7 +221,7 @@ router.put("/api/state", (req, res) => {
     const state = updateAppState(patch);
     res.json(state);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -226,6 +234,10 @@ router.get("/api/dev/status", (_req, res) => {
 
 // POST /api/dev/redeploy — build and restart stable environment (dev mode only)
 router.post("/api/dev/redeploy", (_req, res) => {
+  if (!CLAWUI_DEV) {
+    res.status(403).json({ error: "Dev mode not enabled" });
+    return;
+  }
   const projectRoot = join(process.cwd(), "..");
   const deployScript = join(projectRoot, "scripts", "deploy-stable.sh");
   const startScript = join(projectRoot, "scripts", "start-stable.sh");
@@ -266,7 +278,7 @@ router.get("/api/sessions/:id/health", (req, res) => {
     }
     res.json(analysis);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 

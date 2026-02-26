@@ -203,6 +203,9 @@ export function initPlanTables(): void {
       CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_node_id);
       CREATE INDEX IF NOT EXISTS idx_executions_node ON node_executions(node_id);
       CREATE INDEX IF NOT EXISTS idx_executions_session ON node_executions(session_id);
+      CREATE INDEX IF NOT EXISTS idx_executions_status ON node_executions(status);
+      CREATE INDEX IF NOT EXISTS idx_executions_blueprint ON node_executions(blueprint_id);
+      CREATE INDEX IF NOT EXISTS idx_executions_completed ON node_executions(completed_at);
       CREATE INDEX IF NOT EXISTS idx_related_sessions_node ON node_related_sessions(node_id);
       CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
     `);
@@ -477,10 +480,61 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
     .prepare('SELECT * FROM macro_nodes WHERE blueprint_id = ? ORDER BY "order" ASC')
     .all(blueprintId) as MacroNodeRow[];
 
+  if (rows.length === 0) return [];
+
+  const nodeIds = rows.map((r) => r.id);
+  const placeholders = nodeIds.map(() => "?").join(",");
+
+  // Batch-load all artifacts for these nodes (P1/P11 fix — eliminates N+1)
+  const allArtifacts = db
+    .prepare(`SELECT * FROM artifacts WHERE blueprint_id = ? ORDER BY created_at ASC`)
+    .all(blueprintId) as ArtifactRow[];
+
+  // Build maps: nodeId → { input artifacts, output artifacts }
+  const artifactsByTarget = new Map<string, ArtifactRow[]>();
+  const artifactsBySource = new Map<string, ArtifactRow[]>();
+  const untargetedBySource = new Map<string, ArtifactRow[]>();
+
+  for (const art of allArtifacts) {
+    if (art.target_node_id) {
+      const list = artifactsByTarget.get(art.target_node_id) ?? [];
+      list.push(art);
+      artifactsByTarget.set(art.target_node_id, list);
+    } else if (art.type === "handoff_summary") {
+      const list = untargetedBySource.get(art.source_node_id) ?? [];
+      list.push(art);
+      untargetedBySource.set(art.source_node_id, list);
+    }
+    const srcList = artifactsBySource.get(art.source_node_id) ?? [];
+    srcList.push(art);
+    artifactsBySource.set(art.source_node_id, srcList);
+  }
+
+  // Batch-load all executions for these nodes (P1 fix)
+  const allExecs = db
+    .prepare(`SELECT * FROM node_executions WHERE node_id IN (${placeholders}) ORDER BY started_at ASC`)
+    .all(...nodeIds) as ExecutionRow[];
+
+  const execsByNode = new Map<string, ExecutionRow[]>();
+  for (const exec of allExecs) {
+    const list = execsByNode.get(exec.node_id) ?? [];
+    list.push(exec);
+    execsByNode.set(exec.node_id, list);
+  }
+
   return rows.map((row) => {
-    const arts = getArtifactsForNodeInternal(row.id);
-    const execs = getExecutionsForNodeInternal(row.id);
-    return rowToMacroNode(row, arts.input, arts.output, execs);
+    // Compute input artifacts: targeted at this node + untargeted from deps
+    const targeted = artifactsByTarget.get(row.id) ?? [];
+    const depIds: string[] = row.dependencies ? JSON.parse(row.dependencies) : [];
+    const seenSources = new Set(targeted.map((r) => r.source_node_id));
+    const untargetedFromDeps = depIds.flatMap((depId) =>
+      (untargetedBySource.get(depId) ?? []).filter((r) => !seenSources.has(r.source_node_id))
+    );
+    const inputArts = [...targeted, ...untargetedFromDeps].map(rowToArtifact);
+    const outputArts = (artifactsBySource.get(row.id) ?? []).map(rowToArtifact);
+    const execs = (execsByNode.get(row.id) ?? []).map(rowToExecution);
+
+    return rowToMacroNode(row, inputArts, outputArts, execs);
   });
 }
 
@@ -519,7 +573,7 @@ export function getBlueprint(id: string): Blueprint | null {
   return rowToBlueprint(row, getNodesForBlueprint(id));
 }
 
-export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean }): Blueprint[] {
+export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean; limit?: number; offset?: number }): Blueprint[] {
   const db = getDb();
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -538,8 +592,17 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string;
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  let sql = `SELECT * FROM blueprints ${where} ORDER BY updated_at DESC`;
+  if (filters?.limit) {
+    sql += ` LIMIT ?`;
+    params.push(filters.limit);
+    if (filters.offset) {
+      sql += ` OFFSET ?`;
+      params.push(filters.offset);
+    }
+  }
   const rows = db
-    .prepare(`SELECT * FROM blueprints ${where} ORDER BY updated_at DESC`)
+    .prepare(sql)
     .all(...params) as BlueprintRow[];
 
   return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id)));
@@ -632,30 +695,34 @@ export function createMacroNode(
   const now = new Date().toISOString();
   const depsJson = data.dependencies?.length ? JSON.stringify(data.dependencies) : null;
 
-  // Shift existing nodes at or above this order to make room
-  db.prepare(
-    'UPDATE macro_nodes SET "order" = "order" + 1, updated_at = ? WHERE blueprint_id = ? AND "order" >= ?'
-  ).run(now, blueprintId, data.order);
+  // Atomic: shift + insert + touch parent (P6 fix)
+  const insertTransaction = db.transaction(() => {
+    // Shift existing nodes at or above this order to make room
+    db.prepare(
+      'UPDATE macro_nodes SET "order" = "order" + 1, updated_at = ? WHERE blueprint_id = ? AND "order" >= ?'
+    ).run(now, blueprintId, data.order);
 
-  db.prepare(`
-    INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    blueprintId,
-    data.order,
-    data.title,
-    data.description ?? null,
-    depsJson,
-    data.parallelGroup ?? null,
-    data.prompt ?? null,
-    data.estimatedMinutes ?? null,
-    now,
-    now,
-  );
+    db.prepare(`
+      INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      blueprintId,
+      data.order,
+      data.title,
+      data.description ?? null,
+      depsJson,
+      data.parallelGroup ?? null,
+      data.prompt ?? null,
+      data.estimatedMinutes ?? null,
+      now,
+      now,
+    );
 
-  // Touch parent blueprint
-  db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+    // Touch parent blueprint
+    db.prepare("UPDATE blueprints SET updated_at = ? WHERE id = ?").run(now, blueprintId);
+  });
+  insertTransaction();
 
   return {
     id,

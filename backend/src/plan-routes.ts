@@ -40,6 +40,17 @@ import { CLAWUI_DB_DIR } from "./config.js";
 
 const log = createLogger("plan-routes");
 
+/** Return a sanitized error message for API responses (no stack traces or internal paths). */
+function safeError(err: unknown): string {
+  if (err instanceof Error) {
+    // Allow specific user-facing error messages through
+    if (err.message.includes("not found") || err.message.includes("Invalid") || err.message.includes("Missing")) {
+      return err.message;
+    }
+  }
+  return "Internal server error";
+}
+
 /**
  * Helper to detect and record a related session after an interactive CLI call.
  * Uses the same detectNewSession pattern as executeNodeInternal.
@@ -130,7 +141,7 @@ planRouter.post("/api/blueprints", (req, res) => {
     const blueprint = createBlueprint(title.trim(), description, projectCwd);
     res.status(201).json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -143,7 +154,7 @@ planRouter.get("/api/blueprints", (req, res) => {
     const blueprints = listBlueprints({ status, projectCwd, includeArchived });
     res.json(blueprints);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -157,7 +168,7 @@ planRouter.get("/api/blueprints/:id", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -172,7 +183,7 @@ planRouter.put("/api/blueprints/:id", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -187,7 +198,7 @@ planRouter.delete("/api/blueprints/:id", (req, res) => {
     deleteBlueprint(req.params.id);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -201,7 +212,7 @@ planRouter.post("/api/blueprints/:id/archive", (req, res) => {
     }
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -215,7 +226,7 @@ planRouter.post("/api/blueprints/:id/unarchive", (req, res) => {
     }
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -338,7 +349,7 @@ Replace the placeholder values with your actual enriched title and description. 
       res.json({ title: result.title, description: result.description });
     }
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -439,7 +450,7 @@ Replace the placeholder values with your actual updated title and description. M
 
     res.json({ status: "queued", nodeId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -560,7 +571,7 @@ Guidelines for decomposition:
 
     res.json({ status: "queued", nodeId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -656,7 +667,7 @@ Replace the nodeId values with actual IDs from the available nodes list above. U
 
     res.json({ status: "queued", nodeId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -704,7 +715,7 @@ planRouter.put("/api/blueprints/:blueprintId/nodes/batch", (req, res) => {
 
     res.json({ updated: results.filter((r) => r.updated).length, total: updates.length, results });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -762,7 +773,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/batch-create", (req, res) =>
 
     res.status(201).json({ created: createdNodes.length, nodes: createdNodes });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -809,7 +820,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/insert-between", (re
     log.info(`INSERT_BETWEEN: Created node "${newNode.title}" (${newNode.id.slice(0, 8)}) between ${req.params.nodeId.slice(0, 8)} and ${dependents.length} dependent(s)`);
     res.status(201).json({ node: newNode, rewired });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -860,7 +871,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/add-sibling", (req, 
     log.info(`ADD_SIBLING: Created blocker node "${newNode.title}" (${newNode.id.slice(0, 8)}) as sibling of ${req.params.nodeId.slice(0, 8)}`);
     res.status(201).json({ node: newNode, rewired });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -897,7 +908,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
     });
     res.status(201).json(node);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -912,7 +923,7 @@ planRouter.put("/api/blueprints/:blueprintId/nodes/:nodeId", (req, res) => {
     }
     res.json(node);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -922,7 +933,7 @@ planRouter.delete("/api/blueprints/:blueprintId/nodes/:nodeId", (req, res) => {
     deleteMacroNode(req.params.blueprintId, req.params.nodeId);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -938,7 +949,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/reorder", (req, res) => {
     const blueprint = getBlueprint(req.params.blueprintId);
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -955,7 +966,7 @@ planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/artifacts", (req, res
     const artifacts = getArtifactsForNode(req.params.nodeId, direction);
     res.json(artifacts);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -980,7 +991,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/artifacts", (req, re
     );
     res.status(201).json(artifact);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -990,7 +1001,7 @@ planRouter.delete("/api/blueprints/:blueprintId/artifacts/:artifactId", (req, re
     deleteArtifact(req.params.artifactId);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1002,7 +1013,7 @@ planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, re
     const executions = getExecutionsForNode(req.params.nodeId);
     res.json(executions);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1012,7 +1023,7 @@ planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/related-sessions", (r
     const sessions = getRelatedSessionsForNode(req.params.nodeId);
     res.json(sessions);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1041,7 +1052,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, r
     );
     res.status(201).json(execution);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1053,7 +1064,7 @@ planRouter.get("/api/blueprints/:id/queue", (req, res) => {
     const info = getQueueInfo(req.params.id);
     res.json(info);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1064,7 +1075,7 @@ planRouter.get("/api/global-status", (_req, res) => {
   try {
     res.json(getGlobalQueueInfo());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1080,7 +1091,7 @@ planRouter.post("/api/blueprints/:id/approve", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1180,7 +1191,7 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/resume-session", (req, res) =
 
     res.json({ status: "queued" });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1239,7 +1250,7 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/recover-session", (req, res) 
 
     res.json({ recovered: recoveredCount > 0, recoveredCount });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1287,7 +1298,7 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluation-callback", (req, r
     res.json({ success: true, status: completionEval.status, createdNodes });
   } catch (err) {
     log.error(`Evaluation callback failed: ${err instanceof Error ? err.message : err}`);
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1323,7 +1334,7 @@ planRouter.post("/api/blueprints/:id/executions/:execId/report-blocker", (req, r
     res.json({ success: true });
   } catch (err) {
     log.error(`Report blocker failed: ${err instanceof Error ? err.message : err}`);
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1354,7 +1365,7 @@ planRouter.post("/api/blueprints/:id/executions/:execId/task-summary", (req, res
     res.json({ success: true });
   } catch (err) {
     log.error(`Task summary callback failed: ${err instanceof Error ? err.message : err}`);
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1389,7 +1400,7 @@ planRouter.post("/api/blueprints/:id/executions/:execId/report-status", (req, re
     res.json({ success: true });
   } catch (err) {
     log.error(`Report status failed: ${err instanceof Error ? err.message : err}`);
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1423,7 +1434,7 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluate", (req, res) => {
 
     res.json({ status: "queued", nodeId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1435,7 +1446,7 @@ planRouter.post("/api/blueprints/:id/run", (req, res) => {
       .catch(err => log.error(`Run-next failed: ${err.message}`));
     res.json({ status: "started" });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1569,7 +1580,7 @@ curl -X PUT '${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuth
 
     res.json({ message: "reevaluation started", blueprintId, nodeCount: nonDoneNodes.length });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1587,7 +1598,7 @@ planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
     });
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1603,7 +1614,7 @@ planRouter.get("/api/sessions/:sessionId/plan-node", (req, res) => {
     }
     res.json(node);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1617,7 +1628,7 @@ planRouter.get("/api/sessions/:sessionId/execution", (req, res) => {
     }
     res.json(execution);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1657,7 +1668,7 @@ planRouter.post("/api/blueprints/:id/generate", (req, res) => {
 
     res.json({ status: "queued", blueprintId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1700,7 +1711,7 @@ planRouter.post("/api/uploads", (req, res) => {
 
     res.json({ url: `/api/uploads/${finalName}` });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1722,7 +1733,7 @@ planRouter.post("/api/plans", (req, res) => {
     const blueprint = createBlueprint(title.trim(), description, projectCwd ?? cwd);
     res.status(201).json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1734,7 +1745,7 @@ planRouter.get("/api/plans", (req, res) => {
     const blueprints = listBlueprints({ status, projectCwd });
     res.json(blueprints);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1748,7 +1759,7 @@ planRouter.get("/api/plans/:id", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1767,7 +1778,7 @@ planRouter.put("/api/plans/:id", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1782,7 +1793,7 @@ planRouter.delete("/api/plans/:id", (req, res) => {
     deleteBlueprint(req.params.id);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1817,7 +1828,7 @@ planRouter.post("/api/plans/:planId/nodes", (req, res) => {
     });
     res.status(201).json(node);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1839,7 +1850,7 @@ planRouter.put("/api/plans/:planId/nodes/:nodeId", (req, res) => {
     }
     res.json(node);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1849,7 +1860,7 @@ planRouter.delete("/api/plans/:planId/nodes/:nodeId", (req, res) => {
     deleteMacroNode(req.params.planId, req.params.nodeId);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1868,7 +1879,7 @@ planRouter.post("/api/plans/:planId/nodes/reorder", (req, res) => {
     const blueprint = getBlueprint(req.params.planId);
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1882,7 +1893,7 @@ planRouter.post("/api/plans/:id/approve", (req, res) => {
     }
     res.json(blueprint);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1914,7 +1925,7 @@ planRouter.post("/api/plans/:id/nodes/:nodeId/evaluate", (req, res) => {
 
     res.json({ status: "queued", nodeId });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1942,7 +1953,7 @@ planRouter.post("/api/plans/:id/run", async (req, res) => {
     }
     res.json(execution);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1959,7 +1970,7 @@ planRouter.post("/api/plans/:id/run-all", (req, res) => {
     });
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1974,7 +1985,7 @@ planRouter.post("/api/plans/:id/generate", async (req, res) => {
     });
     res.json(nodes);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });
 

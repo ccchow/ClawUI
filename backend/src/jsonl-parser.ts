@@ -47,12 +47,22 @@ const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
  *   -Users-leizhou--openclaw-workspace  → /Users/leizhou/.openclaw/workspace
  *   -Users-leizhou-Git-my-project       → /Users/leizhou/Git/my-project
  */
+const decodeProjectPathCache = new Map<string, string | undefined>();
+
 export function decodeProjectPath(encoded: string): string | undefined {
+  const cached = decodeProjectPathCache.get(encoded);
+  if (cached !== undefined) return cached;
+
   const stripped = encoded.replace(/^-+/, "");
-  if (!stripped) return "/";
+  if (!stripped) {
+    decodeProjectPathCache.set(encoded, "/");
+    return "/";
+  }
 
   const parts = stripped.split("-");
-  return walkFs("/", parts, 0);
+  const result = walkFs("/", parts, 0);
+  decodeProjectPathCache.set(encoded, result);
+  return result;
 }
 
 /**
@@ -176,10 +186,10 @@ export function extractTextContent(content: unknown): string {
 }
 
 /**
- * Parse a JSONL file directly by path (for db.ts to call without searching).
+ * Parse a JSONL file directly by path or from pre-read content (avoids double file read).
  */
-export function parseTimelineRaw(filePath: string): TimelineNode[] {
-  const raw = readFileSync(filePath, "utf-8");
+export function parseTimelineRaw(filePathOrContent: string, rawContent?: string): TimelineNode[] {
+  const raw = rawContent ?? readFileSync(filePathOrContent, "utf-8");
   const lines = raw.trim().split("\n");
   const nodes: TimelineNode[] = [];
   const toolUseMap = new Map<string, { name: string; input: unknown }>();
@@ -343,18 +353,20 @@ export interface SessionAnalysis {
  *
  * Returns null if the session file doesn't exist.
  */
-export function analyzeSessionHealth(sessionId: string): SessionAnalysis | null {
-  // Find the session file across all project dirs
-  if (!existsSync(CLAUDE_PROJECTS_DIR)) return null;
+export function analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+  let filePath: string | null = knownFilePath ?? null;
 
-  let filePath: string | null = null;
-  const entries = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const candidate = join(CLAUDE_PROJECTS_DIR, entry.name, `${sessionId}.jsonl`);
-    if (existsSync(candidate)) {
-      filePath = candidate;
-      break;
+  // Only scan project dirs if no path was provided (P10 fix)
+  if (!filePath) {
+    if (!existsSync(CLAUDE_PROJECTS_DIR)) return null;
+    const entries = readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = join(CLAUDE_PROJECTS_DIR, entry.name, `${sessionId}.jsonl`);
+      if (existsSync(candidate)) {
+        filePath = candidate;
+        break;
+      }
     }
   }
 

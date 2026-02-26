@@ -65,6 +65,7 @@ export function initDb(): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_nodes_session ON timeline_nodes(session_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at DESC);
   `);
 }
 
@@ -115,26 +116,33 @@ export function syncAll(): void {
       syncSessionFile(sessionId, projectId, filePath);
     }
 
-    // Clean up stale sessions for this project
+    // Clean up stale sessions for this project — batch delete (P12 fix)
     const existingSessions = db.prepare(
       "SELECT id FROM sessions WHERE project_id = ?"
     ).all(projectId) as { id: string }[];
 
-    for (const row of existingSessions) {
-      if (!seenSessionIds.has(row.id)) {
-        db.prepare("DELETE FROM timeline_nodes WHERE session_id = ?").run(row.id);
-        db.prepare("DELETE FROM sessions WHERE id = ?").run(row.id);
-      }
+    const staleSessionIds = existingSessions
+      .filter((row) => !seenSessionIds.has(row.id))
+      .map((row) => row.id);
+
+    if (staleSessionIds.length > 0) {
+      const placeholders = staleSessionIds.map(() => "?").join(",");
+      db.prepare(`DELETE FROM timeline_nodes WHERE session_id IN (${placeholders})`).run(...staleSessionIds);
+      db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...staleSessionIds);
     }
   }
 
-  // Clean up stale projects
+  // Clean up stale projects — batch delete (P12 fix)
   const existingProjects = db.prepare("SELECT id FROM projects").all() as { id: string }[];
-  for (const row of existingProjects) {
-    if (!seenProjectIds.has(row.id)) {
-      db.prepare("DELETE FROM timeline_nodes WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?)").run(row.id);
-      db.prepare("DELETE FROM sessions WHERE project_id = ?").run(row.id);
-      db.prepare("DELETE FROM projects WHERE id = ?").run(row.id);
+  const staleProjectIds = existingProjects
+    .filter((row) => !seenProjectIds.has(row.id))
+    .map((row) => row.id);
+
+  if (staleProjectIds.length > 0) {
+    for (const projectId of staleProjectIds) {
+      db.prepare("DELETE FROM timeline_nodes WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?)").run(projectId);
+      db.prepare("DELETE FROM sessions WHERE project_id = ?").run(projectId);
+      db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
     }
   }
 }
@@ -181,9 +189,10 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string)
   let cwd: string | undefined;
   let createdAt: string | undefined;
   let updatedAt: string | undefined;
+  let raw: string | undefined;
 
   try {
-    const raw = readFileSync(filePath, "utf-8");
+    raw = readFileSync(filePath, "utf-8");
     const lines = raw.trim().split("\n");
 
     // Metadata from first lines
@@ -217,8 +226,8 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string)
   if (!createdAt) createdAt = stat.birthtime.toISOString();
   if (!updatedAt) updatedAt = stat.mtime.toISOString();
 
-  // Parse timeline nodes
-  const nodes = parseTimelineRaw(filePath);
+  // Parse timeline nodes — pass pre-read content to avoid double file read (P2 fix)
+  const nodes = parseTimelineRaw(filePath, raw);
   const nodeCount = nodes.filter((n) => n.type === "user" || n.type === "assistant").length;
 
   // Write in a transaction

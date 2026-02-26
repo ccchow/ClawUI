@@ -1,4 +1,5 @@
 import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import router from "./routes.js";
 import planRouter from "./plan-routes.js";
@@ -8,8 +9,65 @@ import { requeueOrphanedNodes, smartRecoverStaleExecutions } from "./plan-execut
 import { PORT, EXPECT_PATH, CLAUDE_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
+import { setChildPidTracker } from "./cli-runner.js";
 
 const log = createLogger("server");
+
+// ─── Lightweight rate limiter for CLI-spawning endpoints ─────
+
+/** Track in-flight CLI requests to cap concurrency. */
+let inFlightCliRequests = 0;
+const MAX_CONCURRENT_CLI = 5;
+
+function cliConcurrencyGuard(req: Request, res: Response, next: NextFunction): void {
+  if (inFlightCliRequests >= MAX_CONCURRENT_CLI) {
+    res.status(429).json({ error: "Too many concurrent CLI requests. Try again shortly." });
+    return;
+  }
+  inFlightCliRequests++;
+  res.on("finish", () => { inFlightCliRequests--; });
+  res.on("close", () => { inFlightCliRequests--; });
+  next();
+}
+
+// ─── Track child processes for cleanup on shutdown ───────────
+
+const activeChildPids = new Set<number>();
+
+export function trackChildPid(pid: number): void {
+  activeChildPids.add(pid);
+}
+
+export function untrackChildPid(pid: number): void {
+  activeChildPids.delete(pid);
+}
+
+function cleanupChildProcesses(): void {
+  for (const pid of activeChildPids) {
+    try {
+      process.kill(pid, "SIGTERM");
+      log.info(`Sent SIGTERM to child process ${pid}`);
+    } catch {
+      // Process already exited
+    }
+  }
+  activeChildPids.clear();
+}
+
+process.on("SIGTERM", () => {
+  log.info("Received SIGTERM — cleaning up child processes");
+  cleanupChildProcesses();
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  log.info("Received SIGINT — cleaning up child processes");
+  cleanupChildProcesses();
+  process.exit(0);
+});
+
+// Wire up child process tracking for clean shutdown
+setChildPidTracker(trackChildPid, untrackChildPid);
 
 // Initialize SQLite database and run initial sync
 initDb();
@@ -18,13 +76,15 @@ smartRecoverStaleExecutions();
 requeueOrphanedNodes();
 syncAll();
 
-// Background sync every 30 seconds
+// Background sync every 30 seconds — run in next tick to avoid blocking concurrent requests
 setInterval(() => {
-  try {
-    syncAll();
-  } catch {
-    // sync errors are non-fatal
-  }
+  setImmediate(() => {
+    try {
+      syncAll();
+    } catch {
+      // sync errors are non-fatal
+    }
+  });
 }, 30_000);
 
 const app = express();
@@ -43,6 +103,11 @@ app.use((_req, res, next) => {
 // Auth middleware — must be before route handlers
 app.use(requireLocalAuth);
 
+// Rate-limit CLI-spawning endpoints (session run + blueprint node execution)
+app.post("/api/sessions/:id/run", cliConcurrencyGuard);
+app.post("/api/blueprints/:id/nodes/:nodeId/run", cliConcurrencyGuard);
+app.post("/api/blueprints/:id/nodes/:nodeId/resume", cliConcurrencyGuard);
+
 app.use(router);
 app.use(planRouter);
 
@@ -56,7 +121,11 @@ app.listen(PORT, HOST, () => {
   log.info("========================================================");
   log.info("  ClawUI Secure Dashboard Ready");
   log.info("  Local:     http://localhost:3000");
-  log.info(`  Tailscale: http://<your-tailscale-ip>:3000/?auth=${LOCAL_AUTH_TOKEN}`);
+  if (process.stdout.isTTY) {
+    log.info(`  Tailscale: http://<your-tailscale-ip>:3000/?auth=${LOCAL_AUTH_TOKEN}`);
+  } else {
+    log.info(`  Tailscale: http://<your-tailscale-ip>:3000/?auth=${LOCAL_AUTH_TOKEN.slice(0, 6)}...`);
+  }
   log.info("========================================================");
   log.info("");
 });

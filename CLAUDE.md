@@ -50,12 +50,12 @@ Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
 - **logger.ts** — Structured logging: `createLogger('module')` returns `{debug, info, warn, error}`. Format: `[ISO timestamp] [LEVEL] [module] msg`. Controlled by `LOG_LEVEL` env var.
 - **db.ts** — SQLite initialization (better-sqlite3), tables: `projects`, `sessions`, `timeline_nodes`. `initDb()`, `syncAll()`, `syncSession()`, `getProjects()`, `getSessions()`, `getTimeline()`, `getLastMessage()` (single-row query for lightweight polling).
 - **jsonl-parser.ts** — Parses JSONL into `TimelineNode[]`. Types: user, assistant, tool_use, tool_result. Exports `parseTimeline()`, `parseTimelineRaw()`, `listProjects()`, `listSessions()`, `analyzeSessionHealth()`, `decodeProjectPath()`, and helpers (`cleanContent`, `summarize`, `extractTextContent`).
-- **cli-runner.ts** — Wraps `claude --dangerously-skip-permissions --resume <id> -p "prompt"` via `/usr/bin/expect` (TTY required). Appends `---SUGGESTIONS---` suffix for inline suggestions.
+- **cli-runner.ts** — Wraps `claude --dangerously-skip-permissions --resume <id> -p "prompt"` via `/usr/bin/expect` (TTY required). Appends `---SUGGESTIONS---` suffix for inline suggestions. Exports `validateSessionId()` (alphanumeric + `-_`, max 128 chars) and `setChildPidTracker()` for process lifecycle management.
 - **enrichment.ts** — Reads/writes `.clawui/enrichments.json`. `updateSessionMeta()`, `updateNodeMeta()`, `getAllTags()`.
 - **app-state.ts** — Reads/writes `.clawui/app-state.json`. `getAppState()`, `updateAppState()`, `trackSessionView()`.
 - **auth.ts** — Local auth token generation (`crypto.randomBytes(16)`) and `requireLocalAuth` Express middleware. Writes token to `.clawui/auth-token` for frontend proxy. Uses timing-safe comparison.
 - **routes.ts** — Session REST endpoints (12 endpoints).
-- **index.ts** — Server entry. Binds to `127.0.0.1`. Calls `initDb()` + `syncAll()` on startup, 30s background sync interval. Prints auth URL on startup.
+- **index.ts** — Server entry. Binds to `127.0.0.1`. Calls `initDb()` + `syncAll()` on startup, 30s background sync interval. Prints auth URL on startup. Includes CLI concurrency guard middleware (max 5 in-flight), child process SIGTERM/SIGINT cleanup, and auth token masking for non-TTY output.
 
 **Plan system files:**
 - **plan-db.ts** — Plan/Blueprint SQLite tables (`plans`, `plan_nodes`, `node_related_sessions`) + CRUD operations.
@@ -113,6 +113,17 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 - **Node numbering**: Always use `node.order + 1` (DB `order` field) for display numbers — in `MacroNodeCard`, dependency picker chips, node switcher, and bottom nav. Never use array index for numbering.
 - **Filter state persistence**: Blueprint pages persist filter state to URL search params via `window.history.replaceState` (no history pollution) + `sessionStorage` for cross-page back links. Blueprints list: `?status=running&archived=1` (key: `clawui:blueprints-filters`). Blueprint detail: `?filter=failed&sort=manual&order=oldest` (key: `clawui:blueprint-${id}-filters`). Back links (`blueprintsBackHref`, `blueprintBackHref`) read from sessionStorage to reconstruct the parent page's filter URL. Default values are omitted from URL params.
 - **Skipped node filtering**: After a node is split, its status becomes `skipped`. Dependency picker excludes skipped nodes unless already selected (shown dimmed with "(split)" label). Node switcher overlay excludes skipped nodes entirely. Input artifact source links for skipped nodes render as non-clickable text with "(split)" indicator.
+- **Session ID validation**: All endpoints accepting session IDs must call `validateSessionId()` from `cli-runner.ts` before passing to shell commands. Prevents Tcl injection via `expect` script interpolation. Regex: `/^[a-zA-Z0-9_-]{1,128}$/`.
+- **Error response sanitization**: Never expose internal error messages in API responses. Use a `safeError()` helper that returns "Internal server error" by default, only passing through known-safe messages (e.g., "Invalid session ID", "Missing or empty"). Log the real error server-side via `log.error()`.
+- **Dev-only endpoint gating**: Endpoints like `/api/dev/redeploy` must check `CLAWUI_DEV` config and return 403 if not in dev mode. Never expose admin/dev endpoints in production.
+- **CLI concurrency guard**: `index.ts` middleware caps in-flight CLI-spawning requests at 5 (`MAX_CONCURRENT_CLI`). Returns 429 when exceeded. Applied to session run and blueprint node run/resume endpoints.
+- **Child process cleanup**: `index.ts` tracks PIDs of spawned CLI processes via `setChildPidTracker()`. SIGTERM/SIGINT handlers kill all tracked children before exit. `cli-runner.ts` calls `trackPid`/`untrackPid` around `execFile` lifecycle.
+- **Batch DB queries over N+1**: `getNodesForBlueprint()` in `plan-db.ts` batch-loads all artifacts and executions in 3 queries, then partitions in-memory. Avoid per-node queries in loops.
+- **`generateArtifact()` try/catch**: All `generateArtifact()` calls in `plan-executor.ts` are wrapped in try/catch to prevent artifact generation failures from overwriting a node's "done" status. Has a 5-minute `withTimeout()` safety net.
+- **`parseTimelineRaw()` content passing**: Accepts optional `rawContent` param to avoid re-reading JSONL files already loaded by callers (e.g., `syncTimeline` in `db.ts`).
+- **`analyzeSessionHealth()` filepath param**: Accepts optional `knownFilePath` to skip redundant `findSessionFile()` when caller already has the path.
+- **`trackSessionView()` debounce**: Deduplicates disk writes — skips if same session tracked within 10s (`TRACK_DEBOUNCE_MS`).
+- **`decodeProjectPath()` memoization**: Results cached in a `Map<string, string | undefined>` since filesystem-aware backtracking is expensive and paths are immutable.
 
 ## Key Design Decisions
 
@@ -173,6 +184,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 - **Blueprint `projectCwd` validation**: `POST /api/blueprints` validates `projectCwd` against the real filesystem (`existsSync`, `isDirectory`, CLAUDE.md presence). Backend tests using fake paths like `/test` must mock `node:fs` to pass validation.
 - **JSONL session structure**: Each line is a JSON object with `type` (user/assistant/system/progress/queue-operation), `message.content` (array of blocks), `message.usage` (token counts), `isApiErrorMessage` flag. System messages have `subtype`: `compact_boundary` (context compaction with `compactMetadata.preTokens`), `turn_duration`, `stop_hook_summary`, `local_command`. Auto-compaction triggers at ~167K-174K tokens. API errors show `{input_tokens: 0, output_tokens: 0}` with error text in content.
 - **Fire-and-forget button loading state**: AI-triggered buttons that use `enqueueBlueprintTask` must NOT use promise-based `finally { setLoading(false) }` — the API returns immediately so loading clears before work starts. Instead, use an optimistic flag (`setOptimistic(true)` on click) combined with a derived loading state from `pendingTasks` polling (e.g., `const loading = optimistic || pendingTasks.some(t => t.type === "my_type")`). Clear optimistic flag once polling confirms the task exists. Call `loadData()` after the API call to trigger immediate polling.
+- **New exports need mock updates**: When adding new exports to a module (e.g., `validateSessionId` to `cli-runner.ts`), all `vi.mock()` blocks for that module in test files must include the new export — Vitest throws "[vitest] No 'exportName' export is defined on the mock" otherwise.
 
 ## Environment Variables
 
@@ -193,4 +205,4 @@ This project supports separate dev and stable environments to prevent developmen
 - **Stable**: ports 3000 (frontend) / 3001 (backend), DB in `.clawui/`, scripts: `scripts/deploy-stable.sh`, `scripts/start-stable.sh`
 - **Dev**: ports 3100 (frontend) / 3101 (backend), DB in `.clawui-dev/`, script: `scripts/start-dev.sh`
 - **Frontend dev-mode detection**: Dev UI (e.g. redeploy button) shows when either `window.location.port !== "3000"` (dev port) OR backend reports `CLAWUI_DEV=1` via `GET /api/dev/status`
-- **Dev redeploy endpoint**: `POST /api/dev/redeploy` (routes.ts) — runs deploy-stable.sh then start-stable.sh via nohup
+- **Dev redeploy endpoint**: `POST /api/dev/redeploy` (routes.ts) — runs deploy-stable.sh then start-stable.sh via nohup. Gated behind `CLAWUI_DEV` check (returns 403 in production).

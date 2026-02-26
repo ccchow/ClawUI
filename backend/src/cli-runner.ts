@@ -6,7 +6,27 @@ import { randomUUID } from "node:crypto";
 import { CLAUDE_PATH, EXPECT_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 
+// Child process tracking — populated by index.ts at startup
+let trackPid: ((pid: number) => void) | undefined;
+let untrackPid: ((pid: number) => void) | undefined;
+
+export function setChildPidTracker(track: (pid: number) => void, untrack: (pid: number) => void): void {
+  trackPid = track;
+  untrackPid = untrack;
+}
+
 const log = createLogger("cli-runner");
+
+/**
+ * Validate that a sessionId is safe for use in shell commands and file paths.
+ * Claude session IDs are UUIDs (hex + hyphens). Reject anything else to prevent
+ * Tcl code injection (expect scripts) and path traversal.
+ */
+export function validateSessionId(sessionId: string): void {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) {
+    throw new Error(`Invalid session ID: contains disallowed characters`);
+  }
+}
 
 const SUGGESTION_SUFFIX = ` Also, at the very end of your response, append exactly this marker on its own line: ---SUGGESTIONS--- followed by a JSON array of 3 suggested next steps: [{"title":"short title","description":"one sentence description","prompt":"the exact prompt to run"}]. No markdown code blocks around it.`;
 
@@ -42,6 +62,7 @@ function runClaude(
   prompt: string,
   cwd?: string
 ): Promise<string> {
+  validateSessionId(sessionId);
   return new Promise((resolve, reject) => {
     // Write prompt to temp file to avoid shell escaping issues
     const tmpFile = join(tmpdir(), `clawui-prompt-${randomUUID()}.txt`);
@@ -71,6 +92,7 @@ expect eof
       cwd: cwd || process.cwd(),
       env: cleanEnvForClaude(),
     }, (error, stdout, stderr) => {
+      if (childPid) untrackPid?.(childPid);
       log.debug(`Expect process exited: pid=${childPid}, exitCode=${error ? error.code ?? "error" : 0}`);
       // Clean up expect script
       try { unlinkSync(tmpExpect); } catch {}
@@ -97,6 +119,7 @@ expect eof
       resolve(clean);
     });
     childPid = child.pid;
+    if (childPid) trackPid?.(childPid);
   });
 }
 

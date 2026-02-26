@@ -66,15 +66,25 @@ export function updateAppState(patch: Partial<Omit<AppState, "version">>): AppSt
 
 const MAX_RECENT = 50;
 
+/** In-memory dedup: skip disk write if we just tracked this session. */
+let lastTrackedSessionId: string | null = null;
+let lastTrackedAt = 0;
+const TRACK_DEBOUNCE_MS = 10_000; // Only write once per 10s per session
+
 export function trackSessionView(sessionId: string): void {
+  const now = Date.now();
+  if (sessionId === lastTrackedSessionId && now - lastTrackedAt < TRACK_DEBOUNCE_MS) {
+    return; // Skip redundant disk write
+  }
+
   const state = getAppState();
-  const now = new Date().toISOString();
+  const isoNow = new Date().toISOString();
 
   // Remove existing entry for this session
   state.recentSessions = state.recentSessions.filter((r) => r.id !== sessionId);
 
   // Add to front
-  state.recentSessions.unshift({ id: sessionId, viewedAt: now });
+  state.recentSessions.unshift({ id: sessionId, viewedAt: isoNow });
 
   // Trim to max
   if (state.recentSessions.length > MAX_RECENT) {
@@ -83,4 +93,7 @@ export function trackSessionView(sessionId: string): void {
 
   state.ui.lastViewedSession = sessionId;
   saveAppState(state);
+
+  lastTrackedSessionId = sessionId;
+  lastTrackedAt = now;
 }

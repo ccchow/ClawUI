@@ -48,6 +48,7 @@ vi.mock("../cli-runner.js", () => ({
     output: "AI response",
     suggestions: [{ title: "Next", description: "desc", prompt: "do it" }],
   })),
+  validateSessionId: vi.fn(),
 }));
 
 vi.mock("../jsonl-parser.js", () => ({
@@ -113,7 +114,7 @@ describe("routes", () => {
 
       const res = await request(app).get("/api/projects");
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("DB error");
+      expect(res.body.error).toContain("Internal server error");
     });
   });
 

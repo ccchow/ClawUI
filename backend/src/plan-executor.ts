@@ -20,7 +20,7 @@ import {
   recoverStaleExecutions,
   createRelatedSession,
 } from "./plan-db.js";
-import { syncSession } from "./db.js";
+import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
 import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
 import { analyzeSessionHealth } from "./jsonl-parser.js";
@@ -807,9 +807,10 @@ async function generateArtifact(
     : (executionOutput.length > 4000 ? executionOutput.slice(-4000) : executionOutput);
   const summaryPrompt = `Here is the output from a coding step:\n\n---\n${tail}\n---\n\n${ARTIFACT_PROMPT}`;
 
+  const ARTIFACT_TIMEOUT = 5 * 60_000; // 5 minutes max for artifact generation (P15 fix)
   let summary: string;
   try {
-    summary = await runClaude(summaryPrompt, cwd);
+    summary = await withTimeout(runClaude(summaryPrompt, cwd), ARTIFACT_TIMEOUT, "Artifact generation");
   } catch {
     // Fallback: use last 500 chars of the response (not the prompt)
     summary = tail.slice(-500);
@@ -943,52 +944,57 @@ export function applyGraphMutations(
   const createdNodes: MacroNode[] = [];
   const rewiredDependencies: { nodeId: string; oldDeps: string[]; newDeps: string[] }[] = [];
 
-  for (const mutation of evaluation.mutations) {
-    if (mutation.action === "INSERT_BETWEEN") {
-      // Create new node depending on completedNode
-      const newNode = createMacroNode(blueprintId, {
-        title: mutation.new_node.title,
-        description: mutation.new_node.description,
-        order: completedNode.order + 1,
-        dependencies: [completedNodeId],
-      });
-      createdNodes.push(newNode);
+  // Wrap all mutations in a transaction for atomicity (P6 fix)
+  const db = getDb();
+  const mutateTransaction = db.transaction(() => {
+    for (const mutation of evaluation.mutations) {
+      if (mutation.action === "INSERT_BETWEEN") {
+        // Create new node depending on completedNode
+        const newNode = createMacroNode(blueprintId, {
+          title: mutation.new_node.title,
+          description: mutation.new_node.description,
+          order: completedNode.order + 1,
+          dependencies: [completedNodeId],
+        });
+        createdNodes.push(newNode);
 
-      // Rewire: each dependent that depended on completedNode now depends on newNode instead
-      for (const dep of dependents) {
-        const oldDeps = [...dep.dependencies];
-        const newDeps = dep.dependencies.map(d => d === completedNodeId ? newNode.id : d);
-        updateMacroNode(blueprintId, dep.id, { dependencies: newDeps });
-        rewiredDependencies.push({ nodeId: dep.id, oldDeps, newDeps });
-      }
-
-      log.info(`INSERT_BETWEEN: Created node "${newNode.title}" (${newNode.id.slice(0, 8)}) between ${completedNodeId.slice(0, 8)} and ${dependents.length} dependent(s)`);
-
-    } else if (mutation.action === "ADD_SIBLING") {
-      // Create sibling node inheriting completedNode's dependencies
-      const newNode = createMacroNode(blueprintId, {
-        title: mutation.new_node.title,
-        description: mutation.new_node.description,
-        order: completedNode.order + 1,
-        dependencies: [...completedNode.dependencies],
-      });
-      // Mark as blocked (needs human intervention)
-      updateMacroNode(blueprintId, newNode.id, { status: "blocked" });
-      createdNodes.push(newNode);
-
-      // Add newNode as a dependency for all downstream dependents
-      for (const dep of dependents) {
-        if (!dep.dependencies.includes(newNode.id)) {
+        // Rewire: each dependent that depended on completedNode now depends on newNode instead
+        for (const dep of dependents) {
           const oldDeps = [...dep.dependencies];
-          const newDeps = [...dep.dependencies, newNode.id];
+          const newDeps = dep.dependencies.map(d => d === completedNodeId ? newNode.id : d);
           updateMacroNode(blueprintId, dep.id, { dependencies: newDeps });
           rewiredDependencies.push({ nodeId: dep.id, oldDeps, newDeps });
         }
-      }
 
-      log.info(`ADD_SIBLING: Created blocker node "${newNode.title}" (${newNode.id.slice(0, 8)}) as sibling of ${completedNodeId.slice(0, 8)}`);
+        log.info(`INSERT_BETWEEN: Created node "${newNode.title}" (${newNode.id.slice(0, 8)}) between ${completedNodeId.slice(0, 8)} and ${dependents.length} dependent(s)`);
+
+      } else if (mutation.action === "ADD_SIBLING") {
+        // Create sibling node inheriting completedNode's dependencies
+        const newNode = createMacroNode(blueprintId, {
+          title: mutation.new_node.title,
+          description: mutation.new_node.description,
+          order: completedNode.order + 1,
+          dependencies: [...completedNode.dependencies],
+        });
+        // Mark as blocked (needs human intervention)
+        updateMacroNode(blueprintId, newNode.id, { status: "blocked" });
+        createdNodes.push(newNode);
+
+        // Add newNode as a dependency for all downstream dependents
+        for (const dep of dependents) {
+          if (!dep.dependencies.includes(newNode.id)) {
+            const oldDeps = [...dep.dependencies];
+            const newDeps = [...dep.dependencies, newNode.id];
+            updateMacroNode(blueprintId, dep.id, { dependencies: newDeps });
+            rewiredDependencies.push({ nodeId: dep.id, oldDeps, newDeps });
+          }
+        }
+
+        log.info(`ADD_SIBLING: Created blocker node "${newNode.title}" (${newNode.id.slice(0, 8)}) as sibling of ${completedNodeId.slice(0, 8)}`);
+      }
     }
-  }
+  });
+  mutateTransaction();
 
   return { createdNodes, rewiredDependencies };
 }
@@ -1201,7 +1207,11 @@ async function executeNodeInternal(
           actualMinutes: Math.round(elapsed * 10) / 10,
         });
 
-        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        try {
+          await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        } catch (artErr) {
+          log.error(`Artifact generation failed for node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+        }
         try {
           await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
         } catch (evalErr) {
@@ -1240,7 +1250,11 @@ async function executeNodeInternal(
           error: `Blocker: ${reason}`,
           actualMinutes: Math.round(elapsed * 10) / 10,
         });
-        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        try {
+          await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        } catch (artErr) {
+          log.error(`Artifact generation failed for blocked node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+        }
         return updateExecution(execution.id, {})!;
       }
     }
@@ -1308,7 +1322,11 @@ async function executeNodeInternal(
         actualMinutes: Math.round(elapsed * 10) / 10,
       });
 
-      await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+      try {
+        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+      } catch (artErr) {
+        log.error(`Artifact generation failed for blocked node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+      }
       return updateExecution(execution.id, {})!;
     }
 
@@ -1352,8 +1370,12 @@ async function executeNodeInternal(
       actualMinutes: Math.round(elapsed * 10) / 10,
     });
 
-    // Generate handoff artifact — pass DB task summary if available
-    await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+    // Generate handoff artifact — pass DB task summary if available (P8 fix: wrapped in try/catch)
+    try {
+      await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+    } catch (artErr) {
+      log.error(`Artifact generation failed for node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+    }
 
     // Evaluate completion and apply graph mutations if needed.
     // Runs after artifact generation so the evaluation has handoff context.
@@ -1463,7 +1485,11 @@ export async function resumeNodeSession(
           status: "done",
           actualMinutes: Math.round(elapsed * 10) / 10,
         });
-        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        try {
+          await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+        } catch (artErr) {
+          log.error(`Artifact generation failed for resumed node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+        }
         try {
           await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
         } catch (evalErr) {
@@ -1500,7 +1526,11 @@ export async function resumeNodeSession(
           error: `Blocker: ${reason}`,
           actualMinutes: Math.round(elapsed * 10) / 10,
         });
-        await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        try {
+          await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd);
+        } catch (artErr) {
+          log.error(`Artifact generation failed for blocked resumed node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+        }
         return;
       }
     }
@@ -1543,8 +1573,12 @@ export async function resumeNodeSession(
       actualMinutes: Math.round(elapsed * 10) / 10,
     });
 
-    // Generate handoff artifact
-    await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+    // Generate handoff artifact (P8 fix: wrapped in try/catch)
+    try {
+      await generateArtifact(blueprintId, nodeId, output, blueprint.projectCwd, dbTaskSummary ?? undefined);
+    } catch (artErr) {
+      log.error(`Artifact generation failed for resumed node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
+    }
 
     // Evaluate completion
     try {
