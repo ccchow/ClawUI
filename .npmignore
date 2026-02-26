@@ -6,6 +6,21 @@ docs/
 .clawui-dev/
 .worktrees/
 
+# Source (pre-built artifacts are shipped instead)
+backend/src/
+frontend/src/
+
+# Next.js build cache (not needed at runtime)
+frontend/.next/cache/
+
+# Build-time config (not needed at runtime)
+backend/tsconfig.json
+frontend/tsconfig.json
+frontend/tsconfig.tsbuildinfo
+frontend/postcss.config.mjs
+frontend/tailwind.config.ts
+tsconfig.json
+
 # Tests
 **/__tests__/
 **/*.test.*
@@ -14,9 +29,7 @@ docs/
 **/vitest.config.ts
 coverage/
 
-# Build artifacts (rebuilt by postinstall)
-backend/dist/
-frontend/.next/
+# Node modules (installed by npm)
 **/node_modules/
 
 # IDE / tooling

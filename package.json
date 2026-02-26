@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "license": "MIT",
   "bin": {
     "claw-ui": "./bin/claw-ui.mjs"
@@ -41,8 +41,7 @@
     "build:backend": "cd backend && npm run build",
     "build:frontend": "cd frontend && npm run build",
     "start:backend": "npm run start --workspace=backend",
-    "lint": "npm run lint --workspace=backend",
-    "postinstall": "npm run build"
+    "lint": "npm run lint --workspace=backend"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
