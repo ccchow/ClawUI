@@ -71,6 +71,12 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   };
   const res = await fetch(url, { ...init, headers });
   if (!res.ok) {
+    // If the backend returns 403, the auth token is stale (rotated on restart).
+    // Clear it so AuthProvider shows the unauthorized screen on next check.
+    if (res.status === 403 && typeof window !== "undefined") {
+      localStorage.removeItem("clawui_token");
+      window.location.reload();
+    }
     const body = await res.text();
     throw new Error(`API error ${res.status}: ${body}`);
   }
@@ -308,7 +314,7 @@ export function approveBlueprint(id: string): Promise<Blueprint> {
 export function enrichNode(
   blueprintId: string,
   data: { title: string; description?: string; nodeId?: string }
-): Promise<{ title: string; description: string }> {
+): Promise<{ title: string; description: string } | { status: string; nodeId: string }> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/enrich-node`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -413,7 +419,7 @@ export function getSessionExecution(
 export function runNode(
   blueprintId: string,
   nodeId: string
-): Promise<NodeExecution> {
+): Promise<{ status: string; nodeId: string }> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/run`,
     { method: "POST" }

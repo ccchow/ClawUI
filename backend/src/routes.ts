@@ -151,6 +151,17 @@ router.post("/api/sessions/:id/run", async (req, res) => {
 
 // ─── Enrichment API (Layer 3) ─────────────────────────────────
 
+// GET /api/sessions/:id/meta — read session enrichment
+router.get("/api/sessions/:id/meta", (req, res) => {
+  try {
+    const enrichments = getEnrichments();
+    const meta = enrichments.sessions[req.params.id as string];
+    res.json(meta ?? {});
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // PATCH /api/sessions/:id/meta — update session enrichment
 router.patch("/api/sessions/:id/meta", (req, res) => {
   try {

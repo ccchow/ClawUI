@@ -143,7 +143,7 @@ export function removeQueuedTask(blueprintId: string, nodeId: string): { removed
   const idx = queue.findIndex(item => item.nodeId === nodeId);
   if (idx === -1) return { removed: false, running: false };
   const [removed] = queue.splice(idx, 1);
-  removed.resolve(null as unknown as never);
+  removed.reject(new Error("Task unqueued"));
   return { removed: true, running: false };
 }
 
@@ -154,6 +154,17 @@ const log = createLogger("plan-executor");
 const recoveryLog = createLogger("recovery");
 
 const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
+
+/**
+ * Encode a project CWD to match Claude CLI's directory naming convention.
+ * The CLI replaces `/` with `-` and leading `.` in path components with `-`.
+ * e.g. /Users/foo/.myproject → -Users-foo--myproject
+ */
+function encodeProjectCwd(cwd: string): string {
+  return cwd
+    .replace(/\/\./g, "/-")  // encode leading dots in path components
+    .replace(/\//g, "-");     // encode path separators
+}
 
 /**
  * Build a clean environment for spawning Claude CLI subprocesses.
@@ -398,7 +409,7 @@ export function detectNewSession(
 ): string | null {
   // Claude encodes CWD as path with / replaced by -
   // e.g. /home/you/projects/MyApp → -home-you-projects-MyApp
-  const encodedDir = projectCwd.replace(/\//g, "-");
+  const encodedDir = encodeProjectCwd(projectCwd);
   const projDir = join(CLAUDE_PROJECTS_DIR, encodedDir);
 
   if (!existsSync(projDir)) return null;
@@ -1637,6 +1648,19 @@ export async function executeAllNodes(
       updateBlueprint(blueprintId, { status: "failed" });
       break;
     }
+
+    // Stop on blocked — the node's execution status is "done" but the node itself is "blocked".
+    // Downstream nodes depending on it can never run, so reset pre-queued nodes and stop.
+    const nodeAfterExec = getBlueprint(blueprintId)?.nodes.find(n => n.id === execution.nodeId);
+    if (nodeAfterExec?.status === "blocked") {
+      for (const remainingNodeId of preQueuedNodeIds) {
+        updateMacroNode(blueprintId, remainingNodeId, { status: "pending" });
+        removePendingTask(blueprintId, remainingNodeId, "run");
+      }
+      preQueuedNodeIds.length = 0;
+      updateBlueprint(blueprintId, { status: "failed" });
+      break;
+    }
   }
 }
 
@@ -1685,7 +1709,7 @@ function isProcessAlive(pid: number): boolean {
  * Returns null if the file doesn't exist.
  */
 function getSessionFileMtime(projectCwd: string, sessionId: string): number | null {
-  const encodedDir = projectCwd.replace(/\//g, "-");
+  const encodedDir = encodeProjectCwd(projectCwd);
   const filePath = join(CLAUDE_PROJECTS_DIR, encodedDir, `${sessionId}.jsonl`);
   try {
     return statSync(filePath).mtime.getTime();
@@ -1877,7 +1901,7 @@ async function generateArtifactFromSession(
   projectCwd: string,
   sessionId: string,
 ): Promise<void> {
-  const encodedDir = projectCwd.replace(/\//g, "-");
+  const encodedDir = encodeProjectCwd(projectCwd);
   const filePath = join(CLAUDE_PROJECTS_DIR, encodedDir, `${sessionId}.jsonl`);
 
   let lastAssistantContent = "";

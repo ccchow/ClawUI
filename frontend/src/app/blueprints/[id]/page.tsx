@@ -211,6 +211,9 @@ export default function BlueprintDetailPage() {
   useEffect(() => {
     if (shouldPoll) {
       if (!pollStartRef.current) pollStartRef.current = Date.now();
+      // Clear any existing interval before creating a new one to prevent leaks
+      // when the effect re-runs due to dependency changes while still polling.
+      if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = setInterval(() => {
         // Safety cap: stop polling after MAX_POLL_DURATION to prevent infinite polling
         if (pollStartRef.current && Date.now() - pollStartRef.current > MAX_POLL_DURATION) {
@@ -358,6 +361,8 @@ export default function BlueprintDetailPage() {
         title: nodeTitle.trim(),
         description: nodeDescription.trim() || undefined,
       });
+      // Smart Create (no nodeId) returns {title, description} from callback path
+      if ("status" in result) throw new Error("Unexpected queued response for Smart Create");
       // Create the node with enriched data directly in DB
       const node = await createMacroNode(id, {
         title: result.title,

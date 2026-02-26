@@ -137,7 +137,6 @@ export function MacroNodeCard({
         setRunning(false);
         onRefresh?.();
       });
-    setTimeout(() => onRefresh?.(), 1000);
   };
 
   const handleEditStart = (e: React.MouseEvent) => {
@@ -237,9 +236,15 @@ export function MacroNodeCard({
         description: editDescription.trim() || undefined,
         nodeId: node.id,
       });
-      setEditTitle(result.title);
-      setEditDescription(result.description);
-      onNodeUpdated?.();
+      // Existing node enrichment is now fire-and-forget (returns {status: "queued"}).
+      // Trigger refresh so polling picks up the result when Claude finishes.
+      if ("status" in result) {
+        onRefresh?.();
+      } else {
+        setEditTitle(result.title);
+        setEditDescription(result.description);
+        onNodeUpdated?.();
+      }
     } catch {
       // ignore enrichment errors silently
     } finally {

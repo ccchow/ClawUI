@@ -35,7 +35,7 @@ import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, ge
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
 import { createLogger } from "./logger.js";
-import { CLAWUI_DB_DIR, PORT } from "./config.js";
+import { CLAWUI_DB_DIR } from "./config.js";
 
 
 const log = createLogger("plan-routes");
@@ -283,7 +283,8 @@ Your task: Enrich and improve the title and description to make them clear and a
 4. Stay concise — no fluff`;
 
     if (nodeId) {
-      // Existing node: write directly to DB via curl (survives page closure)
+      // Existing node: fire-and-forget — Claude writes directly to DB via curl.
+      // Return immediately so the HTTP response doesn't block for minutes.
       const apiBase = getApiBase();
       const authParam = getAuthParam();
 
@@ -296,25 +297,28 @@ curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authP
 Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid — escape any special characters in string values.`;
 
       const enrichBefore = new Date();
-      await enqueueBlueprintTask(blueprintId, async () => {
-        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+      const enrichNodeId = nodeId;
+      addPendingTask(blueprintId, { type: "enrich", nodeId: enrichNodeId, queuedAt: new Date().toISOString() });
+      enqueueBlueprintTask(blueprintId, async () => {
+        try {
+          await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+        } finally {
+          removePendingTask(blueprintId, enrichNodeId, "enrich");
+        }
+      }).then(() => {
+        captureRelatedSession(blueprint.projectCwd, enrichBefore, enrichNodeId, blueprintId, "enrich");
+      }).catch((err) => {
+        log.error(`Enrich node ${enrichNodeId} failed: ${err instanceof Error ? err.message : err}`);
       });
-      captureRelatedSession(blueprint.projectCwd, enrichBefore, nodeId, blueprintId, "enrich");
 
-      // Read back the updated node from DB
-      const updated = getBlueprint(blueprintId);
-      const updatedNode = updated?.nodes.find((n) => n.id === nodeId);
-      if (updatedNode) {
-        res.json({ title: updatedNode.title, description: updatedNode.description });
-      } else {
-        res.json({ title: title.trim(), description: description?.trim() || "" });
-      }
+      res.json({ status: "queued", nodeId });
     } else {
       // New node (Smart Create): use API callback (same pattern as evaluation/generate)
+      // Register callback INSIDE the enqueued task so the 120s timeout doesn't start
+      // until the task actually begins executing (not while waiting in queue).
       const requestId = randomUUID();
       const apiBase = getApiBase();
       const authParam = getAuthParam();
-      const resultPromise = waitForEnrichmentCallback(requestId);
 
       const prompt = `${enrichPromptBase}
 
@@ -324,11 +328,13 @@ curl -s -X POST '${apiBase}/api/enrichment-callback/${requestId}?${authParam}' -
 
 Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid — escape any special characters in string values.`;
 
+      let resultPromise: ReturnType<typeof waitForEnrichmentCallback>;
       await enqueueBlueprintTask(blueprintId, async () => {
+        resultPromise = waitForEnrichmentCallback(requestId);
         await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
       });
 
-      const result = await resultPromise;
+      const result = await resultPromise!;
       res.json({ title: result.title, description: result.description });
     }
   } catch (err) {
@@ -1504,7 +1510,7 @@ For EACH node listed above, reevaluate it by examining the actual codebase:
 1. Read the relevant source files to verify implementation status.
 2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.
 
-Batch API endpoint: PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch
+Batch API endpoint: PUT ${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuthParam()}
 Content-Type: application/json
 
 The body is a JSON ARRAY of node updates. Each element has:
@@ -1525,7 +1531,7 @@ Guidelines:
 7. You MUST make ONE batch API call with ALL node updates — do NOT call individual endpoints.
 
 Example (updates all nodes in one call):
-curl -X PUT http://localhost:${PORT}/api/blueprints/${blueprintId}/nodes/batch -H "Content-Type: application/json" -d '[{"id":"node-id-1", "title":"...", "description":"...", "status":"done"}, {"id":"node-id-2", "title":"...", "status":"skipped"}]'`;
+curl -X PUT '${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuthParam()}' -H "Content-Type: application/json" -d '[{"id":"node-id-1", "title":"...", "description":"...", "status":"done"}, {"id":"node-id-2", "title":"...", "status":"skipped"}]'`;
 
     // Fire and forget via blueprint queue — Claude Code will directly update DB via API
     // withTimeout prevents indefinite hangs if the CLI process never exits

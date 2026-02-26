@@ -322,10 +322,16 @@ export default function NodeDetailPage() {
         description: editDesc.trim() || undefined,
         nodeId: node?.id,
       });
-      setEditTitle(result.title);
-      setEditDesc(result.description);
-      if (node) {
-        setNode((prev) => prev ? { ...prev, title: result.title, description: result.description } : prev);
+      // Existing node enrichment is now fire-and-forget (returns {status: "queued"}).
+      // Trigger data reload so polling picks up the result when Claude finishes.
+      if ("status" in result) {
+        loadData();
+      } else {
+        setEditTitle(result.title);
+        setEditDesc(result.description);
+        if (node) {
+          setNode((prev) => prev ? { ...prev, title: result.title, description: result.description } : prev);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

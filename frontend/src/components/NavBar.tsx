@@ -89,12 +89,13 @@ export function NavBar() {
   // Global execution status polling
   const [globalStatus, setGlobalStatus] = useState<GlobalQueueInfo | null>(null);
   const [showTooltip, setShowTooltip] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isActiveRef = useRef(false);
 
   const pollGlobalStatus = useCallback(async () => {
     try {
       const status = await getGlobalStatus();
       setGlobalStatus(status);
+      isActiveRef.current = status?.active ?? false;
     } catch {
       // Ignore errors — endpoint may not exist on older backends
     }
@@ -103,18 +104,19 @@ export function NavBar() {
   useEffect(() => {
     pollGlobalStatus();
 
-    const startPolling = () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      // Poll faster when active (5s), slower when idle (10s)
-      const interval = globalStatus?.active ? 5000 : 10000;
-      intervalRef.current = setInterval(pollGlobalStatus, interval);
+    // Use a fixed interval that checks the ref for adaptive timing.
+    // This avoids re-creating the interval on every poll response.
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const scheduleNext = () => {
+      const interval = isActiveRef.current ? 5000 : 10000;
+      timeoutId = setTimeout(() => {
+        pollGlobalStatus().then(scheduleNext);
+      }, interval);
     };
+    scheduleNext();
 
-    startPolling();
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [pollGlobalStatus, globalStatus?.active]);
+    return () => clearTimeout(timeoutId);
+  }, [pollGlobalStatus]);
 
   const isActive = globalStatus?.active ?? false;
   const taskCount = globalStatus?.totalPending ?? 0;
