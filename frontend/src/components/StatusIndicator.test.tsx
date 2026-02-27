@@ -75,4 +75,73 @@ describe("StatusIndicator", () => {
     const dot = screen.getByTitle("Completed");
     expect(dot.className).not.toContain("animate-pulse");
   });
+
+  it("renders skipped status with correct label and color", () => {
+    render(<StatusIndicator status="skipped" />);
+    const dot = screen.getByTitle("Skipped");
+    expect(dot).toBeInTheDocument();
+    expect(dot.className).toContain("bg-text-muted/50");
+  });
+
+  it("renders draft status with correct label", () => {
+    render(<StatusIndicator status="draft" />);
+    const dot = screen.getByTitle("Draft");
+    expect(dot).toBeInTheDocument();
+    expect(dot.className).toContain("bg-text-muted");
+  });
+
+  it("renders approved status with correct label", () => {
+    render(<StatusIndicator status="approved" />);
+    const dot = screen.getByTitle("Approved");
+    expect(dot).toBeInTheDocument();
+    expect(dot.className).toContain("bg-accent-blue");
+  });
+
+  it("renders paused status with correct label", () => {
+    render(<StatusIndicator status="paused" />);
+    const dot = screen.getByTitle("Paused");
+    expect(dot).toBeInTheDocument();
+    expect(dot.className).toContain("bg-accent-amber");
+  });
+
+  it("has correct aria-label for all standard statuses", () => {
+    const expectedLabels: Record<string, string> = {
+      pending: "Pending",
+      running: "Running",
+      done: "Completed",
+      failed: "Failed",
+      blocked: "Blocked",
+      skipped: "Skipped",
+      queued: "Waiting in queue",
+      draft: "Draft",
+      approved: "Approved",
+      paused: "Paused",
+    };
+
+    for (const [status, label] of Object.entries(expectedLabels)) {
+      const { unmount } = render(<StatusIndicator status={status} />);
+      const dot = screen.getByRole("img", { name: label });
+      expect(dot).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("uses status string as aria-label for unknown statuses", () => {
+    render(<StatusIndicator status="custom-state" />);
+    const dot = screen.getByRole("img", { name: "custom-state" });
+    expect(dot).toBeInTheDocument();
+  });
+
+  it("renders inline-block with rounded-full", () => {
+    render(<StatusIndicator status="done" />);
+    const dot = screen.getByTitle("Completed");
+    expect(dot.className).toContain("inline-block");
+    expect(dot.className).toContain("rounded-full");
+  });
+
+  it("has flex-shrink-0 to prevent collapsing in flex containers", () => {
+    render(<StatusIndicator status="done" />);
+    const dot = screen.getByTitle("Completed");
+    expect(dot.className).toContain("flex-shrink-0");
+  });
 });
