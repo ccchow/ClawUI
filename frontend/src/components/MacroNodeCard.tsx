@@ -2,12 +2,13 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
+import { type MacroNode, type PendingTask, type AgentType, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
 import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { AISparkle } from "./AISparkle";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
+import { AgentBadge } from "./AgentSelector";
 
 /** Strip markdown syntax for plain-text preview */
 function stripMarkdown(text: string): string {
@@ -31,6 +32,7 @@ export function MacroNodeCard({
   index,
   total,
   blueprintId,
+  blueprintAgentType,
   onRefresh,
   onNodeUpdated,
   onNodeDeleted,
@@ -43,6 +45,7 @@ export function MacroNodeCard({
   index: number;
   total: number;
   blueprintId?: string;
+  blueprintAgentType?: AgentType;
   onRefresh?: () => void;
   onNodeUpdated?: () => void;
   onNodeDeleted?: () => void;
@@ -96,6 +99,11 @@ export function MacroNodeCard({
   // Warning state (e.g. dependency not met)
   const [warning, setWarning] = useState<string | null>(null);
 
+  // Inline description expand/collapse (independent of card expand)
+  const [descExpanded, setDescExpanded] = useState(false);
+  const [descOverflows, setDescOverflows] = useState(false);
+  const descRef = useRef<HTMLParagraphElement>(null);
+
   // Mobile overflow menu state
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
@@ -123,6 +131,13 @@ export function MacroNodeCard({
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [mobileMenuOpen]);
+
+  // Detect whether description text overflows 2 lines
+  useEffect(() => {
+    const el = descRef.current;
+    if (!el) { setDescOverflows(false); return; }
+    setDescOverflows(el.scrollHeight > el.clientHeight);
+  }, [node.description, expanded, descExpanded]);
 
   const handleRun = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -274,7 +289,7 @@ export function MacroNodeCard({
       {/* Card */}
       <div
         className="flex-1 min-w-0 mb-2 rounded-xl border border-border-primary bg-bg-secondary hover:border-border-hover transition-colors cursor-pointer"
-        onClick={() => !isEditing && setExpanded(!expanded)}
+        onClick={() => { if (!isEditing) { setExpanded(!expanded); setDescExpanded(false); } }}
       >
         {/* Collapsed header */}
         <div className="p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
@@ -313,11 +328,39 @@ export function MacroNodeCard({
               }`}>
                 {running ? "running" : reevaluateQueued ? "re-eval" : node.status === "queued" ? (queuePosition > 0 ? `queued #${queuePosition}` : "queued") : node.status}
               </span>
+              {/* Show agent badge if node has a different agent type than the blueprint default */}
+              {node.agentType && node.agentType !== (blueprintAgentType ?? "claude") && (
+                <AgentBadge agentType={node.agentType} size="xs" />
+              )}
             </div>
             {!expanded && !isEditing && node.description && (
-              <p className="text-sm text-text-muted mt-1 line-clamp-1">
-                {stripMarkdown(node.description)}
-              </p>
+              <div className="mt-1">
+                {descExpanded ? (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <MarkdownContent content={node.description} />
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDescExpanded(false); }}
+                      className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-1"
+                    >
+                      Show less
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <p ref={descRef} className="text-sm text-text-muted line-clamp-2">
+                      {stripMarkdown(node.description)}
+                    </p>
+                    {descOverflows && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDescExpanded(true); }}
+                        className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-0.5"
+                      >
+                        Show more
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             )}
           </div>
           <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
@@ -338,7 +381,7 @@ export function MacroNodeCard({
                   <button
                     onClick={handleSkip}
                     disabled={skipping}
-                    title={node.status === "skipped" ? "Unskip node" : "Skip node"}
+                    title={skipping ? "Updating node status..." : node.status === "skipped" ? "Unskip node" : "Skip node"}
                     aria-label={node.status === "skipped" ? "Unskip node" : "Skip node"}
                     className="p-1.5 rounded-md text-text-muted hover:text-accent-yellow hover:bg-accent-yellow/10 transition-colors disabled:opacity-50 hidden sm:block"
                   >
@@ -454,6 +497,7 @@ export function MacroNodeCard({
                     }
                   }}
                   disabled={unqueuing}
+                  title={unqueuing ? "Removing from queue..." : undefined}
                   className="px-2 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
                 >
                   {unqueuing ? "..." : "Yes"}
@@ -502,7 +546,7 @@ export function MacroNodeCard({
             )}
             {!isEditing && (
               <button
-                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+                onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); setDescExpanded(false); }}
                 aria-expanded={expanded}
                 aria-label={expanded ? "Collapse node" : "Expand node"}
                 className={`p-1 -m-0.5 rounded text-text-muted text-xs transition-transform hover:bg-bg-tertiary ${expanded ? "rotate-180" : ""}`}
@@ -521,6 +565,7 @@ export function MacroNodeCard({
               <button
                 onClick={handleDeleteConfirm}
                 disabled={deleting}
+                title={deleting ? "Deleting node..." : undefined}
                 className="px-3 py-1 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 transition-colors disabled:opacity-50"
               >
                 {deleting ? "Deleting..." : "Delete"}
@@ -548,6 +593,7 @@ export function MacroNodeCard({
               <button
                 onClick={handleEditSave}
                 disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
+                title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
                 className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {saving ? "Saving..." : "Save"}
@@ -555,7 +601,7 @@ export function MacroNodeCard({
               <button
                 onClick={handleEnrich}
                 disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
-                title={enriching ? "AI is enriching the title and description..." : "AI enhances the title and description with implementation details from your codebase"}
+                title={enriching ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
                 className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
@@ -563,6 +609,7 @@ export function MacroNodeCard({
               <button
                 onClick={handleEditCancel}
                 disabled={enriching || reevaluating || reevaluateQueued}
+                title={enriching || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
                 className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Cancel
@@ -575,7 +622,33 @@ export function MacroNodeCard({
         {expanded && !isEditing && (
           <div className="px-4 pb-4 border-t border-border-primary pt-3 space-y-3">
             {node.description && (
-              <MarkdownContent content={node.description} />
+              <div>
+                {descExpanded ? (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <MarkdownContent content={node.description} />
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDescExpanded(false); }}
+                      className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-1"
+                    >
+                      Show less
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <p ref={descRef} className="text-sm text-text-muted line-clamp-2">
+                      {stripMarkdown(node.description)}
+                    </p>
+                    {descOverflows && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDescExpanded(true); }}
+                        className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-0.5"
+                      >
+                        Show more
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
             )}
 
             {node.prompt && (
@@ -646,7 +719,7 @@ export function MacroNodeCard({
                               }}
                               disabled={resumingExecId === exec.id || running}
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-green-600/15 text-green-500 hover:bg-green-600/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                              title={resumingExecId === exec.id ? "AI is resuming the failed session..." : "Resume this failed session — AI continues with full context from the previous attempt"}
+                              title={resumingExecId === exec.id ? "AI is resuming the failed session..." : running ? "Cannot resume while node is running" : "Resume this failed session — AI continues with full context from the previous attempt"}
                               aria-label={resumingExecId === exec.id ? "Resuming session" : "Resume failed session"}
                             >
                               {resumingExecId === exec.id ? (
