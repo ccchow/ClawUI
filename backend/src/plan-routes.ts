@@ -138,7 +138,8 @@ planRouter.post("/api/blueprints", (req, res) => {
         return;
       }
     }
-    const blueprint = createBlueprint(title.trim(), description, projectCwd);
+    const { agentType } = req.body as { agentType?: string };
+    const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType);
     res.status(201).json(blueprint);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -1720,17 +1721,18 @@ planRouter.post("/api/uploads", (req, res) => {
 // POST /api/plans — create (accepts both cwd and projectCwd)
 planRouter.post("/api/plans", (req, res) => {
   try {
-    const { title, description, cwd, projectCwd } = req.body as {
+    const { title, description, cwd, projectCwd, agentType } = req.body as {
       title?: string;
       description?: string;
       cwd?: string;
       projectCwd?: string;
+      agentType?: string;
     };
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
-    const blueprint = createBlueprint(title.trim(), description, projectCwd ?? cwd);
+    const blueprint = createBlueprint(title.trim(), description, projectCwd ?? cwd, agentType);
     res.status(201).json(blueprint);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });

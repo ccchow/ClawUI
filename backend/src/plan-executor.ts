@@ -1,8 +1,5 @@
-import { execFile, spawn } from "node:child_process";
-import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, statSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
-import { join, basename } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
   getBlueprint,
   updateBlueprint,
@@ -22,8 +19,12 @@ import {
 } from "./plan-db.js";
 import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
-import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
+import { getApiBase, getAuthParam } from "./plan-generator.js";
 import { analyzeSessionHealth } from "./jsonl-parser.js";
+import { getActiveRuntime } from "./agent-runtime.js";
+import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
+import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
+import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
 
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
@@ -147,15 +148,10 @@ export function removeQueuedTask(blueprintId: string, nodeId: string): { removed
   return { removed: true, running: false };
 }
 
-import { CLAUDE_PATH, EXPECT_PATH, CLAUDE_CLI_JS } from "./config.js";
-import { cleanEnvForClaude, stripAnsi, encodeProjectPath, isProcessAlive } from "./cli-utils.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("plan-executor");
 const recoveryLog = createLogger("recovery");
-
-const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
-
 
 // ─── Failure classification ──────────────────────────────────
 
@@ -173,7 +169,7 @@ function classifyFailure(
   sessionId: string | undefined,
 ): { reason: FailureReason; detail: string } {
   // 1. Check CLI error for timeout patterns
-  const isTimeout = /killed|timeout|timed out|SIGTERM|ETIMEDOUT|terminated unexpectedly/i.test(errorMsg);
+  const isTimeout = /killed|timeout|timed out|SIGTERM|ETIMEDOUT/i.test(errorMsg);
 
   // 2. Check CLI output and error message for context-related patterns
   const combinedText = [errorMsg, output || ""].join("\n");
@@ -323,7 +319,6 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
     );
   });
 }
-const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
 // ─── Blueprint-level serial queue (prevents concurrent Claude calls) ─
 
@@ -380,358 +375,33 @@ async function drainQueue(blueprintId: string): Promise<void> {
 
 /**
  * Find the newest JSONL session file created after `beforeTimestamp`
- * in the Claude projects directory matching `projectCwd`.
+ * in the agent's projects directory matching `projectCwd`.
+ * Delegates to the active agent runtime.
  * Returns the session ID (filename minus .jsonl) or null.
  */
 export function detectNewSession(
   projectCwd: string,
   beforeTimestamp: Date,
 ): string | null {
-  // Claude encodes CWD as path with / replaced by -
-  // e.g. /home/you/projects/MyApp → -home-you-projects-MyApp
-  const encodedDir = encodeProjectPath(projectCwd);
-  const projDir = join(CLAUDE_PROJECTS_DIR, encodedDir);
-
-  if (!existsSync(projDir)) return null;
-
-  let newestId: string | null = null;
-  let newestMtime = beforeTimestamp.getTime();
-
-  for (const file of readdirSync(projDir)) {
-    if (!file.endsWith(".jsonl")) continue;
-    const filePath = join(projDir, file);
-    const stat = statSync(filePath);
-    if (stat.mtime.getTime() > newestMtime) {
-      newestMtime = stat.mtime.getTime();
-      newestId = basename(file, ".jsonl");
-    }
-  }
-
-  return newestId;
+  const runtime = getActiveRuntime();
+  return runtime.detectNewSession(projectCwd, beforeTimestamp);
 }
 
-// ─── Low-level Claude runner (no --resume) ─────────────────
+// ─── Low-level agent runners (delegating to runtime) ─────────
 
 export function runClaudeInteractive(prompt: string, cwd?: string): Promise<string> {
-  if (process.platform === "win32") {
-    return runClaudeInteractiveWindows(prompt, cwd);
-  }
-  return runClaudeInteractiveUnix(prompt, cwd);
-}
-
-function runClaudeInteractiveWindows(prompt: string, cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const args = ["--dangerously-skip-permissions", "--max-turns", "200", "-p", prompt];
-    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
-    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
-
-    const child = spawn(cmd, spawnArgs, {
-      timeout: EXEC_TIMEOUT,
-      cwd: cwd || process.cwd(),
-      env: cleanEnvForClaude(),
-      shell: !CLAUDE_CLI_JS,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    child.stdin.end();
-
-    let stdout = "";
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-
-    child.on("error", (err) => reject(new Error(`Claude interactive failed: ${err.message}`)));
-    child.on("close", (code) => {
-      if (code !== 0 && !stdout) {
-        reject(new Error(`Claude interactive failed with exit code ${code}`));
-        return;
-      }
-      resolve(stdout || "");
-    });
-  });
-}
-
-function runClaudeInteractiveUnix(prompt: string, cwd?: string): Promise<string> {
-  // Run Claude Code without --output-format text, allowing full tool usage.
-  // Output is not parsed — used for tasks where Claude directly calls APIs.
-  return new Promise((resolve, reject) => {
-    const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
-    writeFileSync(tmpFile, prompt, "utf-8");
-
-    // Use Tcl file read for prompt
-    const fullScript = `
-set timeout 1800
-set stty_init "columns 2000"
-set fp [open "${tmpFile}" r]
-set prompt [read -nonewline $fp]
-close $fp
-file delete "${tmpFile}"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --max-turns 200 -p $prompt
-expect eof
-catch {wait}
-`;
-
-    const tmpExpect = join(tmpdir(), `clawui-plan-expect-${randomUUID()}.exp`);
-    writeFileSync(tmpExpect, fullScript, "utf-8");
-
-    execFile(
-      EXPECT_PATH,
-      [tmpExpect],
-      {
-        timeout: EXEC_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: cwd || process.cwd(),
-        env: cleanEnvForClaude(),
-      },
-      (error, stdout) => {
-        try { unlinkSync(tmpExpect); } catch { /* ignore */ }
-        try { unlinkSync(tmpFile); } catch { /* ignore */ }
-
-        if (error) {
-          reject(new Error(`Claude interactive failed: ${error.message}`));
-          return;
-        }
-
-        resolve(stdout || "");
-      },
-    );
-  });
+  const runtime = getActiveRuntime();
+  return runtime.runSessionInteractive(prompt, cwd);
 }
 
 function runClaude(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  if (process.platform === "win32") {
-    return runClaudeWin(prompt, cwd, onPid);
-  }
-  return runClaudeUnixExec(prompt, cwd, onPid);
-}
-
-function runClaudeWin(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const args = ["--dangerously-skip-permissions", "--output-format", "text", "--max-turns", "200", "-p", prompt];
-    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
-    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
-
-    const child = spawn(cmd, spawnArgs, {
-      timeout: EXEC_TIMEOUT,
-      cwd: cwd || process.cwd(),
-      env: cleanEnvForClaude(),
-      shell: !CLAUDE_CLI_JS,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    child.stdin.end();
-
-    if (child.pid && onPid) onPid(child.pid);
-
-    let stdout = "";
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-
-    child.on("error", (err) => reject(new Error(`Claude CLI error: ${err.message}`)));
-    child.on("close", (code) => {
-      const clean = stripAnsi(stdout).trim();
-      if (clean.length > 0) { resolve(clean); return; }
-      if (code !== 0) { reject(new Error(`Claude CLI error (exit ${code})`)); return; }
-      resolve(clean);
-    });
-  });
-}
-
-function runClaudeUnixExec(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
-    writeFileSync(tmpFile, prompt, "utf-8");
-
-    const outputFile = join(tmpdir(), `clawui-plan-output-${randomUUID()}.out`);
-    const expectScript = `
-log_user 0
-set timeout 1800
-set stty_init "columns 2000"
-match_max 1000000
-
-set fp [open "${tmpFile}" r]
-set prompt [read -nonewline $fp]
-close $fp
-file delete "${tmpFile}"
-
-set of [open "${outputFile}" w]
-set output ""
-
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 -p $prompt
-expect {
-  -re ".+" {
-    append output $expect_out(0,string)
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts -nonewline $of $output
-    close $of
-    exit 1
-  }
-}
-
-# Wait for the spawned process to fully exit
-catch {wait}
-
-puts -nonewline $of $output
-close $of
-`;
-
-    const tmpExpect = join(tmpdir(), `clawui-plan-expect-${randomUUID()}.exp`);
-    writeFileSync(tmpExpect, expectScript, "utf-8");
-
-    const child = execFile(
-      EXPECT_PATH,
-      [tmpExpect],
-      {
-        timeout: EXEC_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: cwd || process.cwd(),
-        env: cleanEnvForClaude(),
-      },
-      (error) => {
-        let clean = "";
-        try {
-          clean = stripAnsi(readFileSync(outputFile, "utf-8")).trim();
-        } catch { /* no output file */ }
-
-        try { unlinkSync(tmpExpect); } catch { /* ignore */ }
-        try { unlinkSync(tmpFile); } catch { /* ignore */ }
-        try { unlinkSync(outputFile); } catch { /* ignore */ }
-
-        if (clean.length > 0) {
-          resolve(clean);
-          return;
-        }
-        if (error) {
-          reject(new Error(`Claude CLI error: ${error.message}`));
-          return;
-        }
-        resolve(clean);
-      },
-    );
-
-    if (child.pid && onPid) {
-      onPid(child.pid);
-    }
-  });
+  const runtime = getActiveRuntime();
+  return runtime.runSession(prompt, cwd, onPid);
 }
 
 function runClaudeResume(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  if (process.platform === "win32") {
-    return runClaudeResumeWin(sessionId, prompt, cwd, onPid);
-  }
-  return runClaudeResumeUnix(sessionId, prompt, cwd, onPid);
-}
-
-function runClaudeResumeWin(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const args = ["--dangerously-skip-permissions", "--output-format", "text", "--max-turns", "200", "--resume", sessionId, "-p", prompt];
-    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
-    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
-
-    const child = spawn(cmd, spawnArgs, {
-      timeout: EXEC_TIMEOUT,
-      cwd: cwd || process.cwd(),
-      env: cleanEnvForClaude(),
-      shell: !CLAUDE_CLI_JS,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    child.stdin.end();
-
-    if (child.pid && onPid) onPid(child.pid);
-
-    let stdout = "";
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-
-    child.on("error", (err) => reject(new Error(`Claude CLI resume error: ${err.message}`)));
-    child.on("close", (code) => {
-      const clean = stripAnsi(stdout).trim();
-      if (clean.length > 0) { resolve(clean); return; }
-      if (code !== 0) { reject(new Error(`Claude CLI resume error (exit ${code})`)); return; }
-      resolve(clean);
-    });
-  });
-}
-
-function runClaudeResumeUnix(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
-    writeFileSync(tmpFile, prompt, "utf-8");
-
-    const outputFile = join(tmpdir(), `clawui-plan-output-${randomUUID()}.out`);
-    const expectScript = `
-log_user 0
-set timeout 1800
-set stty_init "columns 2000"
-match_max 1000000
-
-set fp [open "${tmpFile}" r]
-set prompt [read -nonewline $fp]
-close $fp
-file delete "${tmpFile}"
-
-set of [open "${outputFile}" w]
-set output ""
-
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 --resume ${sessionId} -p $prompt
-expect {
-  -re ".+" {
-    append output $expect_out(0,string)
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts -nonewline $of $output
-    close $of
-    exit 1
-  }
-}
-
-# Wait for the spawned process to fully exit
-catch {wait}
-
-puts -nonewline $of $output
-close $of
-`;
-
-    const tmpExpect = join(tmpdir(), `clawui-plan-expect-${randomUUID()}.exp`);
-    writeFileSync(tmpExpect, expectScript, "utf-8");
-
-    const child = execFile(
-      EXPECT_PATH,
-      [tmpExpect],
-      {
-        timeout: EXEC_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: cwd || process.cwd(),
-        env: cleanEnvForClaude(),
-      },
-      (error) => {
-        let clean = "";
-        try {
-          clean = stripAnsi(readFileSync(outputFile, "utf-8")).trim();
-        } catch { /* no output file */ }
-
-        try { unlinkSync(tmpExpect); } catch { /* ignore */ }
-        try { unlinkSync(tmpFile); } catch { /* ignore */ }
-        try { unlinkSync(outputFile); } catch { /* ignore */ }
-
-        if (clean.length > 0) {
-          resolve(clean);
-          return;
-        }
-        if (error) {
-          reject(new Error(`Claude CLI resume error: ${error.message}`));
-          return;
-        }
-        resolve(clean);
-      },
-    );
-
-    if (child.pid && onPid) {
-      onPid(child.pid);
-    }
-  });
+  const runtime = getActiveRuntime();
+  return runtime.resumeSession(sessionId, prompt, cwd, onPid);
 }
 
 // ─── Prompt builders ────────────────────────────────────────
@@ -1110,10 +780,10 @@ export async function evaluateNodeCompletion(
   // Build evaluation prompt (includes callback URL — Claude calls endpoint directly)
   const prompt = buildEvaluationPrompt(blueprint, node, latestArtifact.content, dependents, blueprintId, nodeId);
 
-  // Call Claude in interactive mode — evaluation result is applied via the callback endpoint
+  // Call agent in interactive mode — evaluation result is applied via the callback endpoint
   const evalBefore = new Date();
   try {
-    await runClaudeInteractiveGen(prompt, cwd);
+    await runClaudeInteractive(prompt, cwd);
   } catch (err) {
     log.error(`Evaluation Claude call failed for node ${nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
     return null;
@@ -1149,7 +819,19 @@ export async function executeNode(
 
   return enqueueBlueprintTask(blueprintId, async () => {
     removePendingTask(blueprintId, nodeId, "run");
-    return executeNodeInternal(blueprintId, nodeId);
+    try {
+      return await executeNodeInternal(blueprintId, nodeId);
+    } catch (err) {
+      // If executeNodeInternal throws before reaching "running" state
+      // (e.g., dependency check failure), the node is stuck in "queued".
+      // Reset it so the user can retry.
+      const current = getBlueprint(blueprintId)?.nodes.find((n) => n.id === nodeId);
+      if (current && current.status === "queued") {
+        updateMacroNode(blueprintId, nodeId, { status: "pending" });
+        log.warn(`Node ${nodeId.slice(0, 8)} reset to pending after pre-execution failure: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      throw err;
+    }
   }, nodeId);
 }
 
@@ -1795,7 +1477,16 @@ export function requeueOrphanedNodes(): void {
 
     enqueueBlueprintTask(blueprintId, async () => {
       removePendingTask(blueprintId, nodeId, "run");
-      return executeNodeInternal(blueprintId, nodeId);
+      try {
+        return await executeNodeInternal(blueprintId, nodeId);
+      } catch (err) {
+        const current = getBlueprint(blueprintId)?.nodes.find((n) => n.id === nodeId);
+        if (current && current.status === "queued") {
+          updateMacroNode(blueprintId, nodeId, { status: "pending" });
+          log.warn(`Re-queued node ${nodeId.slice(0, 8)} reset to pending after failure: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        throw err;
+      }
     }, nodeId).catch((err) => {
       log.error(`Re-queued node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
     });
@@ -1804,14 +1495,26 @@ export function requeueOrphanedNodes(): void {
 
 // ─── Smart execution recovery (resilient to server restarts) ─
 
+/**
+ * Check if a process is still alive by sending signal 0.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Get the mtime (in ms since epoch) of a session's JSONL file.
  * Returns null if the file doesn't exist.
  */
 function getSessionFileMtime(projectCwd: string, sessionId: string): number | null {
-  const encodedDir = encodeProjectPath(projectCwd);
-  const filePath = join(CLAUDE_PROJECTS_DIR, encodedDir, `${sessionId}.jsonl`);
+  const runtime = getActiveRuntime();
+  const encodedDir = runtime.encodeProjectCwd(projectCwd);
+  const filePath = join(runtime.getSessionsDir(), encodedDir, `${sessionId}.jsonl`);
   try {
     return statSync(filePath).mtime.getTime();
   } catch {
@@ -2002,8 +1705,9 @@ async function generateArtifactFromSession(
   projectCwd: string,
   sessionId: string,
 ): Promise<void> {
-  const encodedDir = encodeProjectPath(projectCwd);
-  const filePath = join(CLAUDE_PROJECTS_DIR, encodedDir, `${sessionId}.jsonl`);
+  const runtime = getActiveRuntime();
+  const encodedDir = runtime.encodeProjectCwd(projectCwd);
+  const filePath = join(runtime.getSessionsDir(), encodedDir, `${sessionId}.jsonl`);
 
   let lastAssistantContent = "";
   try {

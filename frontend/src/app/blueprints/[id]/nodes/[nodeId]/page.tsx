@@ -31,6 +31,7 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
+import { AgentBadge } from "@/components/AgentSelector";
 
 function formatDuration(startedAt: string, completedAt?: string): string {
   const start = new Date(startedAt).getTime();
@@ -82,6 +83,8 @@ export default function NodeDetailPage() {
   const nodeSwitcherTriggerRef = useRef<HTMLButtonElement>(null);
   const [expandedInputs, setExpandedInputs] = useState<Set<string>>(new Set());
   const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
+  const [inputArtifactsCollapsed, setInputArtifactsCollapsed] = useState(false);
+  const [outputArtifactsCollapsed, setOutputArtifactsCollapsed] = useState(false);
   const [lastMessage, setLastMessage] = useState<TimelineNode | null>(null);
   const [relatedSessions, setRelatedSessions] = useState<RelatedSession[]>([]);
   const [relatedExpanded, setRelatedExpanded] = useState(false);
@@ -417,6 +420,7 @@ export default function NodeDetailPage() {
             onClick={() => prevNode && router.push(`/blueprints/${blueprintId}/nodes/${prevNode.id}`)}
             disabled={!prevNode}
             aria-label="Previous node"
+            title={!prevNode ? "No previous node" : `Go to #${prevNode.order + 1} ${prevNode.title}`}
             className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-tertiary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
           >
             <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
@@ -427,6 +431,7 @@ export default function NodeDetailPage() {
             onClick={() => nextNode && router.push(`/blueprints/${blueprintId}/nodes/${nextNode.id}`)}
             disabled={!nextNode}
             aria-label="Next node"
+            title={!nextNode ? "No next node" : `Go to #${nextNode.order + 1} ${nextNode.title}`}
             className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-tertiary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
           >
             <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
@@ -514,6 +519,7 @@ export default function NodeDetailPage() {
             onClick={() => prevNode && router.push(`/blueprints/${blueprintId}/nodes/${prevNode.id}`)}
             disabled={!prevNode}
             aria-label="Previous node"
+            title={!prevNode ? "No previous node" : `Go to #${prevNode.order + 1} ${prevNode.title}`}
             className="flex items-center gap-1.5 px-3 py-3 rounded-xl bg-bg-tertiary text-text-secondary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed flex-1 justify-center"
           >
             <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
@@ -535,6 +541,7 @@ export default function NodeDetailPage() {
             onClick={() => nextNode && router.push(`/blueprints/${blueprintId}/nodes/${nextNode.id}`)}
             disabled={!nextNode}
             aria-label="Next node"
+            title={!nextNode ? "No next node" : `Go to #${nextNode.order + 1} ${nextNode.title}`}
             className="flex items-center gap-1.5 px-3 py-3 rounded-xl bg-bg-tertiary text-text-secondary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed flex-1 justify-center"
           >
             <span className="text-xs truncate max-w-[80px]">{nextNode ? `#${nextNode.order + 1}` : "Next"}</span>
@@ -580,6 +587,9 @@ export default function NodeDetailPage() {
           }`}>
             {isRunning ? "running" : reevaluateQueued ? "re-evaluating (queued)" : isQueued ? (queuePosition > 0 ? `queued #${queuePosition}` : "queued") : node.status}
           </span>
+          {node.agentType && node.agentType !== (blueprint?.agentType ?? "claude") && (
+            <AgentBadge agentType={node.agentType} size="xs" />
+          )}
           {isRunning && (
             <AISparkle size="sm" className="text-accent-blue" />
           )}
@@ -619,6 +629,7 @@ export default function NodeDetailPage() {
                       setSaving(false);
                     }}
                     disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
+                    title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {saving ? "Saving..." : "Save"}
@@ -626,7 +637,7 @@ export default function NodeDetailPage() {
                   <button
                     onClick={handleEnrich}
                     disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
-                    title={enriching ? "AI is enriching the title and description..." : "AI enhances the title and description with implementation details from your codebase"}
+                    title={enriching ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
                     className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
@@ -634,6 +645,7 @@ export default function NodeDetailPage() {
                   <button
                     onClick={() => setEditing(false)}
                     disabled={enriching || reevaluating || reevaluateQueued}
+                    title={enriching || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Cancel
@@ -643,15 +655,42 @@ export default function NodeDetailPage() {
             />
           </div>
         ) : (
-          <div
-            className="text-sm mb-3 cursor-pointer hover:text-text-primary transition-colors"
-            onClick={() => { setEditTitle(node.title); setEditDesc(node.description || ""); setEditing(true); }}
-            title="Click to edit"
-          >
-            {node.description ? (
-              <MarkdownContent content={node.description} />
-            ) : (
-              <span className="text-text-muted italic">Click to add description...</span>
+          <div className="mb-3 rounded-xl border border-border-primary bg-bg-secondary transition-colors hover:border-border-hover">
+            <div
+              className="text-sm px-4 pt-3 pb-1 cursor-pointer hover:text-text-primary transition-colors min-h-[3rem]"
+              onClick={() => { setEditTitle(node.title); setEditDesc(node.description || ""); setEditing(true); }}
+              title="Click to edit"
+            >
+              {node.description ? (
+                <MarkdownContent content={node.description} />
+              ) : (
+                <span className="text-text-muted italic">Click to add description...</span>
+              )}
+            </div>
+            {!isRunning && !isQueued && (
+              <div className="flex items-center justify-end px-3 pb-2.5">
+                <button
+                  onClick={handleReevaluate}
+                  disabled={reevaluating || reevaluateQueued}
+                  title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : "AI reads your codebase and updates this node's title, description, and status"}
+                  className={`inline-flex items-center gap-1.5 rounded-lg text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                    reevaluating || reevaluateQueued
+                      ? "px-2.5 py-1 bg-accent-amber/15 text-accent-amber"
+                      : "px-2.5 py-1 text-text-muted hover:bg-bg-tertiary hover:text-text-secondary"
+                  }`}
+                >
+                  {reevaluating || reevaluateQueued ? (
+                    <><AISparkle size="xs" /> {reevaluateQueued ? "Queued..." : "Re-evaluating..."}</>
+                  ) : (
+                    <>
+                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                      </svg>
+                      Re-evaluate
+                    </>
+                  )}
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -708,6 +747,7 @@ export default function NodeDetailPage() {
                     }
                   }}
                   disabled={unqueuing}
+                  title={unqueuing ? "Removing from queue..." : undefined}
                   className="px-3 py-1.5 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
                 >
                   {unqueuing ? "..." : "Yes"}
@@ -782,6 +822,7 @@ export default function NodeDetailPage() {
                 }
               }}
               disabled={skipping}
+              title={skipping ? "Updating node status..." : node.status === "skipped" ? "Restore this node to pending status" : "Mark this node as skipped"}
               className="px-4 py-2.5 rounded-xl border border-border-primary text-text-secondary text-sm font-medium hover:bg-bg-tertiary active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
@@ -831,35 +872,13 @@ export default function NodeDetailPage() {
             <button
               onClick={() => setShowDeleteConfirm(true)}
               disabled={deleting}
+              title={deleting ? "Deleting node..." : "Delete this node permanently"}
               className="px-4 py-2.5 rounded-xl border border-accent-red/30 text-accent-red text-sm font-medium hover:bg-accent-red/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75ZM11 3V1.75A1.75 1.75 0 0 0 9.25 0h-2.5A1.75 1.75 0 0 0 5 1.75V3H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 14h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11Zm-5.47 1.5.7 7h-1.46l-.7-7h1.46Zm2.97 7V4.5h-1v7h1Zm2.97 0-.7-7h1.46l.7 7h-1.46Z" />
               </svg>
               {deleting ? "Deleting..." : "Delete"}
-            </button>
-          )}
-          {!isRunning && !isQueued && (
-            <button
-              onClick={handleReevaluate}
-              disabled={reevaluating || reevaluateQueued}
-              title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : "AI reads your codebase and updates this node's title, description, and status"}
-              className="px-4 py-2.5 rounded-xl border border-accent-amber/30 text-accent-amber text-sm font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {reevaluating || reevaluateQueued ? (
-                <>
-                  <AISparkle size="sm" />
-                  {reevaluateQueued ? "Queued..." : "Re-evaluating..."}
-                </>
-              ) : (
-                <>
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
-                  </svg>
-                  Re-evaluate
-                </>
-              )}
             </button>
           )}
         </div>
@@ -885,6 +904,7 @@ export default function NodeDetailPage() {
                   }
                 }}
                 disabled={splitting}
+                title={splitting ? "AI is decomposing this node..." : undefined}
                 className="px-3 py-1 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50"
               >
                 {splitting ? "Splitting..." : "Yes, Split"}
@@ -915,6 +935,7 @@ export default function NodeDetailPage() {
                   }
                 }}
                 disabled={deleting}
+                title={deleting ? "Deleting node..." : undefined}
                 className="px-3 py-1 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 transition-colors disabled:opacity-50"
               >
                 {deleting ? "Deleting..." : "Confirm Delete"}
@@ -1030,7 +1051,7 @@ export default function NodeDetailPage() {
                               ? "border-accent-blue bg-accent-blue/20 text-accent-blue"
                               : "border-border-primary text-text-muted hover:border-border-hover"
                         }`}
-                        title={isSkipped ? "This node was split — consider removing this dependency" : undefined}
+                        title={smartDepsLoading ? "AI is analyzing dependencies..." : isSkipped ? "This node was split — consider removing this dependency" : undefined}
                       >
                         <StatusIndicator status={n.status} size="sm" />
                         #{n.order + 1} {n.title.length > 30 ? n.title.slice(0, 30) + "…" : n.title}
@@ -1055,10 +1076,16 @@ export default function NodeDetailPage() {
         {/* Input Artifacts */}
         {node.inputArtifacts.length > 0 && (
           <section>
-            <h2 className="text-sm font-medium text-text-primary mb-2">
+            <button
+              onClick={() => setInputArtifactsCollapsed(!inputArtifactsCollapsed)}
+              aria-expanded={!inputArtifactsCollapsed}
+              className="flex items-center gap-1.5 text-sm font-medium text-text-primary mb-2 hover:text-text-secondary transition-colors"
+            >
+              <span className={`transition-transform text-xs ${!inputArtifactsCollapsed ? "rotate-90" : ""}`}>▶</span>
               Input Artifacts
-            </h2>
-            <div className="space-y-2">
+              <span className="text-xs font-normal text-text-muted">({node.inputArtifacts.length})</span>
+            </button>
+            {!inputArtifactsCollapsed && <div className="space-y-2">
               {node.inputArtifacts.map((a) => {
                 const sourceNode = blueprint.nodes.find(
                   (n) => n.id === a.sourceNodeId
@@ -1096,7 +1123,7 @@ export default function NodeDetailPage() {
                   </div>
                 );
               })}
-            </div>
+            </div>}
           </section>
         )}
 
@@ -1216,7 +1243,7 @@ export default function NodeDetailPage() {
                             }}
                             disabled={resumingExecId === exec.id || isRunning}
                             className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-all active:scale-[0.97] text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                            title={resumingExecId === exec.id ? "AI is resuming the failed session..." : "Resume this failed session — AI continues with full context from the previous attempt"}
+                            title={resumingExecId === exec.id ? "AI is resuming the failed session..." : isRunning ? "Cannot resume while node is running" : "Resume this failed session — AI continues with full context from the previous attempt"}
                           >
                             {resumingExecId === exec.id ? (
                               <AISparkle size="xs" />
@@ -1430,10 +1457,16 @@ export default function NodeDetailPage() {
 
           return (
             <section>
-              <h2 className="text-sm font-medium text-text-primary mb-2">
+              <button
+                onClick={() => setOutputArtifactsCollapsed(!outputArtifactsCollapsed)}
+                aria-expanded={!outputArtifactsCollapsed}
+                className="flex items-center gap-1.5 text-sm font-medium text-text-primary mb-2 hover:text-text-secondary transition-colors"
+              >
+                <span className={`transition-transform text-xs ${!outputArtifactsCollapsed ? "rotate-90" : ""}`}>▶</span>
                 Output Artifacts
-              </h2>
-              <div className="space-y-2">
+                <span className="text-xs font-normal text-text-muted">({merged.length})</span>
+              </button>
+              {!outputArtifactsCollapsed && <div className="space-y-2">
                 {merged.map((g) => {
                   const targetNodes = g.targetNodeIds
                     .map((tid) => blueprint.nodes.find((n) => n.id === tid))
@@ -1466,7 +1499,7 @@ export default function NodeDetailPage() {
                     </div>
                   );
                 })}
-              </div>
+              </div>}
             </section>
           );
         })()}

@@ -10,6 +10,16 @@ function authHeaders(): Record<string, string> {
   return token ? { "x-clawui-token": token } : {};
 }
 
+export type AgentType = "claude" | "openclaw" | "pi";
+
+export interface AgentInfo {
+  name: string;
+  type: AgentType;
+  available: boolean;
+  sessionsPath: string;
+  sessionCount: number;
+}
+
 export interface ProjectInfo {
   id: string;
   name: string;
@@ -25,6 +35,7 @@ export interface SessionMeta {
   nodeCount: number;
   slug?: string;
   cwd?: string;
+  agentType?: AgentType;
   // Enrichment fields
   starred?: boolean;
   tags?: string[];
@@ -83,15 +94,23 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export function getProjects(): Promise<ProjectInfo[]> {
-  return fetchJSON(`${API_BASE}/projects`);
+export function getAgents(): Promise<AgentInfo[]> {
+  return fetchJSON(`${API_BASE}/agents`);
 }
 
-export function getSessions(projectId: string, filters?: SessionFilters): Promise<SessionMeta[]> {
+export function getProjects(agentType?: AgentType): Promise<ProjectInfo[]> {
+  const params = new URLSearchParams();
+  if (agentType) params.set("agent", agentType);
+  const qs = params.toString();
+  return fetchJSON(`${API_BASE}/projects${qs ? `?${qs}` : ""}`);
+}
+
+export function getSessions(projectId: string, filters?: SessionFilters, agentType?: AgentType): Promise<SessionMeta[]> {
   const params = new URLSearchParams();
   if (filters?.starred) params.set("starred", "true");
   if (filters?.tag) params.set("tag", filters.tag);
   if (filters?.archived) params.set("archived", "true");
+  if (agentType) params.set("agent", agentType);
   const qs = params.toString();
   return fetchJSON(`${API_BASE}/projects/${encodeURIComponent(projectId)}/sessions${qs ? `?${qs}` : ""}`);
 }
@@ -233,6 +252,7 @@ export interface MacroNode {
   outputArtifacts: Artifact[];
   executions: NodeExecution[];
   error?: string;
+  agentType?: AgentType;
   createdAt: string;
   updatedAt: string;
 }
@@ -244,6 +264,7 @@ export interface Blueprint {
   projectCwd?: string;
   status: BlueprintStatus;
   archivedAt?: string;
+  agentType?: AgentType;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -268,6 +289,7 @@ export function createBlueprint(data: {
   title: string;
   description?: string;
   projectCwd?: string;
+  agentType?: AgentType;
 }): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints`, {
     method: "POST",
@@ -278,7 +300,7 @@ export function createBlueprint(data: {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd">>
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType">>
 ): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
     method: "PUT",
@@ -360,6 +382,7 @@ export function createMacroNode(
     parallelGroup?: string;
     prompt?: string;
     estimatedMinutes?: number;
+    agentType?: AgentType;
   }
 ): Promise<MacroNode> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes`, {
@@ -372,7 +395,7 @@ export function createMacroNode(
 export function updateMacroNode(
   blueprintId: string,
   nodeId: string,
-  patch: Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "order" | "prompt">>
+  patch: Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "order" | "prompt" | "agentType">>
 ): Promise<MacroNode> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}`,

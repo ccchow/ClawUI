@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+import type { AgentType } from "./agent-runtime.js";
 
 /**
  * Resolve the path to the Claude CLI binary.
@@ -111,3 +112,63 @@ import { resolveClaudeCliJs } from "./cli-utils.js";
 
 /** Path to Claude's cli.js for direct node invocation on Windows. Null on Unix. */
 export const CLAUDE_CLI_JS = resolveClaudeCliJs(CLAUDE_PATH);
+
+// ─── Multi-agent configuration ──────────────────────────────
+
+/** Which backend AI agent to use. Default: "claude". */
+function resolveAgentType(): AgentType {
+  const raw = process.env.AGENT_TYPE || "claude";
+  const valid: AgentType[] = ["claude", "openclaw", "pi-mono"];
+  if (valid.includes(raw as AgentType)) return raw as AgentType;
+  return "claude";
+}
+
+export const AGENT_TYPE: AgentType = resolveAgentType();
+
+/**
+ * Resolve the path to the OpenClaw binary.
+ * Priority: OPENCLAW_PATH env → common install locations → PATH lookup via `which`.
+ */
+function resolveOpenClawPath(): string | null {
+  if (process.env.OPENCLAW_PATH) {
+    return process.env.OPENCLAW_PATH;
+  }
+  const candidates = [
+    join(homedir(), ".local", "bin", "openclaw"),
+    "/usr/local/bin/openclaw",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  try {
+    const resolved = execFileSync("/usr/bin/which", ["openclaw"], { encoding: "utf-8" }).trim();
+    if (resolved) return resolved;
+  } catch { /* not in PATH */ }
+  return null;
+}
+
+export const OPENCLAW_PATH = resolveOpenClawPath();
+
+/**
+ * Resolve the path to the Pi Mono binary.
+ * Priority: PI_PATH env → common install locations → PATH lookup via `which`.
+ */
+function resolvePiPath(): string | null {
+  if (process.env.PI_PATH) {
+    return process.env.PI_PATH;
+  }
+  const candidates = [
+    join(homedir(), ".local", "bin", "pi-mono"),
+    "/usr/local/bin/pi-mono",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  try {
+    const resolved = execFileSync("/usr/bin/which", ["pi-mono"], { encoding: "utf-8" }).trim();
+    if (resolved) return resolved;
+  } catch { /* not in PATH */ }
+  return null;
+}
+
+export const PI_PATH = resolvePiPath();

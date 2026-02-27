@@ -10,6 +10,7 @@ import { PORT, EXPECT_PATH, CLAUDE_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
 import { setChildPidTracker } from "./cli-runner.js";
+import { getAvailableAgents } from "./db.js";
 
 const log = createLogger("server");
 
@@ -75,6 +76,20 @@ initPlanTables();
 smartRecoverStaleExecutions();
 requeueOrphanedNodes();
 syncAll();
+
+// Log detected agent runtimes
+try {
+  const agents = getAvailableAgents();
+  for (const agent of agents) {
+    if (agent.available) {
+      log.info(`Agent detected: ${agent.name} (${agent.type}) — ${agent.sessionCount} sessions, path: ${agent.sessionsPath}`);
+    } else {
+      log.debug(`Agent not available: ${agent.name} (${agent.type}) — sessions dir not found: ${agent.sessionsPath}`);
+    }
+  }
+} catch {
+  // Agent detection is non-fatal
+}
 
 // Background sync every 30 seconds — run in next tick to avoid blocking concurrent requests
 setInterval(() => {
