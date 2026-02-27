@@ -15,8 +15,8 @@
     "start": "node dist/index.js",
     "lint": "eslint src/",
     "test": "vitest run",
-    "dev:stable": "PORT=3001 CLAWUI_DB_DIR=.clawui CLAWUI_DEV=1 node dist/index.js",
-    "dev:dev": "PORT=3101 CLAWUI_DB_DIR=.clawui-dev tsx watch src/index.ts"
+    "dev:stable": "cross-env PORT=3001 CLAWUI_DB_DIR=.clawui CLAWUI_DEV=1 node dist/index.js",
+    "dev:dev": "cross-env PORT=3101 CLAWUI_DB_DIR=.clawui-dev tsx watch src/index.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

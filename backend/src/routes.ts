@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { join } from "node:path";
 import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
 import { runPrompt, validateSessionId } from "./cli-runner.js";
@@ -239,32 +239,30 @@ router.post("/api/dev/redeploy", (_req, res) => {
     return;
   }
   const projectRoot = join(process.cwd(), "..");
-  const deployScript = join(projectRoot, "scripts", "deploy-stable.sh");
-  const startScript = join(projectRoot, "scripts", "start-stable.sh");
+  const deployScript = join(projectRoot, "scripts", "deploy-stable.mjs");
+  const startScript = join(projectRoot, "scripts", "start-stable.mjs");
 
-  log.info("Dev redeploy: starting deploy-stable.sh + start-stable.sh");
+  log.info("Dev redeploy: starting deploy-stable.mjs + start-stable.mjs");
 
-  // Run deploy first, then start
-  execFile("/bin/bash", [deployScript], { cwd: projectRoot, timeout: 120_000 }, (deployErr, deployStdout, deployStderr) => {
+  // Run deploy first (blocking — build must finish before restart)
+  execFile("node", [deployScript], { cwd: projectRoot, timeout: 120_000 }, (deployErr, deployStdout, deployStderr) => {
     if (deployErr) {
       log.error(`Deploy failed: ${deployErr.message}`);
-      res.status(500).json({ error: "Deploy failed", details: deployStderr || deployErr.message });
+      res.status(500).json({ error: "Deploy failed", details: safeError(deployStderr || deployErr.message) });
       return;
     }
     log.info(`Deploy output: ${deployStdout.trim()}`);
 
-    // Start stable in detached mode (nohup + disown so it survives this process)
-    // Shell-escape the path to prevent command injection if path contains special characters
-    const escapedStartScript = startScript.replace(/'/g, "'\\''");
-    execFile("/bin/bash", ["-c", `nohup '${escapedStartScript}' > /tmp/clawui-stable.log 2>&1 &`], { cwd: projectRoot }, (startErr) => {
-      if (startErr) {
-        log.error(`Start failed: ${startErr.message}`);
-        res.status(500).json({ error: "Start failed", details: startErr.message });
-        return;
-      }
-      log.info("Stable environment restarted");
-      res.json({ ok: true, message: "Stable environment deployed and restarted" });
+    // Start stable in detached mode so it survives this process
+    const child = spawn("node", [startScript], {
+      cwd: projectRoot,
+      detached: true,
+      stdio: "ignore",
     });
+    child.unref();
+
+    res.json({ status: "redeployed" });
+    log.info("Stable environment restart triggered");
   });
 });
 
