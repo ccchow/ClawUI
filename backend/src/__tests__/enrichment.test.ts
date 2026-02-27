@@ -144,4 +144,86 @@ describe("enrichment module", () => {
     expect(data.version).toBe(1);
     expect(data.sessions).toEqual({});
   });
+
+  it("updateNodeMeta removes null/undefined keys", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateNodeMeta } = await import("../enrichment.js");
+
+    const testId = `test-node-${randomUUID()}`;
+    updateNodeMeta(testId, { bookmarked: true, annotation: "note" });
+    const result = updateNodeMeta(testId, { annotation: undefined as unknown as string });
+    expect(result.bookmarked).toBe(true);
+    expect(result).not.toHaveProperty("annotation");
+  });
+
+  it("updateNodeMeta removes null keys", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateNodeMeta } = await import("../enrichment.js");
+
+    const testId = `test-node-${randomUUID()}`;
+    updateNodeMeta(testId, { bookmarked: true, annotation: "note" });
+    const result = updateNodeMeta(testId, { annotation: null as unknown as string });
+    expect(result.bookmarked).toBe(true);
+    expect(result).not.toHaveProperty("annotation");
+  });
+
+  it("updateSessionMeta adds new tags to global list while preserving existing", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateSessionMeta, getAllTags } = await import("../enrichment.js");
+
+    const id1 = `test-session-${randomUUID()}`;
+    const id2 = `test-session-${randomUUID()}`;
+    updateSessionMeta(id1, { tags: ["zeta"] });
+    updateSessionMeta(id2, { tags: ["alpha", "zeta"] });
+
+    const tags = getAllTags();
+    expect(tags).toEqual(["alpha", "zeta"]);
+  });
+
+  it("updateSessionMeta removes null keys from session", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateSessionMeta } = await import("../enrichment.js");
+
+    const testId = `test-session-${randomUUID()}`;
+    updateSessionMeta(testId, { starred: true, alias: "my-alias" });
+    const result = updateSessionMeta(testId, { alias: null as unknown as string });
+    expect(result.starred).toBe(true);
+    expect(result).not.toHaveProperty("alias");
+  });
+
+  it("updateSessionMeta does not add tags to global list when patch has no tags", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateSessionMeta, getAllTags } = await import("../enrichment.js");
+
+    const testId = `test-session-${randomUUID()}`;
+    updateSessionMeta(testId, { starred: true });
+
+    const tags = getAllTags();
+    expect(tags).toEqual([]);
+  });
+
+  it("updateSessionMeta persists data to disk", async () => {
+    if (existsSync(ENRICHMENTS_PATH)) {
+      rmSync(ENRICHMENTS_PATH);
+    }
+    const { updateSessionMeta } = await import("../enrichment.js");
+
+    const testId = `test-session-${randomUUID()}`;
+    updateSessionMeta(testId, { starred: true });
+
+    // Verify the file was written to disk
+    expect(existsSync(ENRICHMENTS_PATH)).toBe(true);
+    const raw = JSON.parse(readFileSync(ENRICHMENTS_PATH, "utf-8"));
+    expect(raw.sessions[testId].starred).toBe(true);
+  });
 });

@@ -104,4 +104,81 @@ describe("app-state module", () => {
     // Most recent should be at front
     expect(state.recentSessions[0].id).toBe("session-54");
   });
+
+  it("trackSessionView sets lastViewedSession in ui state", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { trackSessionView, getAppState } = await import("../app-state.js");
+
+    trackSessionView("session-abc");
+    const state = getAppState();
+    expect(state.ui.lastViewedSession).toBe("session-abc");
+  });
+
+  it("trackSessionView preserves viewedAt timestamps for other sessions", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { trackSessionView, getAppState } = await import("../app-state.js");
+
+    trackSessionView("s1");
+    const state1 = getAppState();
+    const s1ViewedAt = state1.recentSessions[0].viewedAt;
+
+    trackSessionView("s2");
+    const state2 = getAppState();
+    // s2 is at front, s1 is second
+    expect(state2.recentSessions[0].id).toBe("s2");
+    expect(state2.recentSessions[1].id).toBe("s1");
+    // s1's viewedAt should be preserved
+    expect(state2.recentSessions[1].viewedAt).toBe(s1ViewedAt);
+  });
+
+  it("updateAppState with empty patch does not lose existing data", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { updateAppState, getAppState } = await import("../app-state.js");
+
+    // Set up initial state
+    updateAppState({ ui: { theme: "light" }, filters: { defaultSort: "created_at" } });
+
+    // Update with empty-ish patch (no ui, no filters, no recentSessions)
+    const result = updateAppState({});
+    expect(result.ui.theme).toBe("light");
+    expect(result.filters.defaultSort).toBe("created_at");
+  });
+
+  it("updateAppState merges ui without overwriting other ui fields", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { updateAppState, getAppState } = await import("../app-state.js");
+
+    updateAppState({ ui: { theme: "light", lastViewedSession: "s1" } });
+    updateAppState({ ui: { lastViewedProject: "p1" } });
+
+    const state = getAppState();
+    expect(state.ui.theme).toBe("light");
+    expect(state.ui.lastViewedSession).toBe("s1");
+    expect(state.ui.lastViewedProject).toBe("p1");
+  });
+
+  it("getAppState returns consistent defaults for new state", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { getAppState } = await import("../app-state.js");
+
+    const state = getAppState();
+    expect(state).toEqual({
+      version: 1,
+      ui: { theme: "dark" },
+      recentSessions: [],
+      filters: { hideArchivedSessions: true, defaultSort: "updated_at" },
+    });
+  });
+
+  it("updateAppState persists data to disk", async () => {
+    if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
+    const { updateAppState } = await import("../app-state.js");
+
+    updateAppState({ ui: { theme: "light" } });
+
+    expect(existsSync(STATE_PATH)).toBe(true);
+    const raw = JSON.parse(readFileSync(STATE_PATH, "utf-8"));
+    expect(raw.ui.theme).toBe("light");
+    expect(raw.version).toBe(1);
+  });
 });

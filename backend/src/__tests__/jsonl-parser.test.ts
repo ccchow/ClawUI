@@ -405,4 +405,243 @@ describe("parseTimelineRaw", () => {
     expect(nodes).toHaveLength(1);
     expect(nodes[0].content).toBe("Plain string response");
   });
+
+  it("handles user messages with string content (non-array)", () => {
+    const filePath = writeJsonl([
+      {
+        type: "user",
+        uuid: "u1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: { role: "user", content: "Simple string user message" },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].type).toBe("user");
+    expect(nodes[0].content).toBe("Simple string user message");
+  });
+
+  it("generates uuid when not provided in JSONL line", () => {
+    const filePath = writeJsonl([
+      {
+        type: "user",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: { role: "user", content: "No uuid field" },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(1);
+    // Should have a generated UUID-like id
+    expect(nodes[0].id).toBeTruthy();
+    expect(nodes[0].id.length).toBeGreaterThan(0);
+  });
+
+  it("uses empty string for missing timestamp", () => {
+    const filePath = writeJsonl([
+      {
+        type: "user",
+        uuid: "u1",
+        message: { role: "user", content: "No timestamp" },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].timestamp).toBe("");
+  });
+
+  it("skips user messages where cleaned content is only whitespace", () => {
+    const filePath = writeJsonl([
+      {
+        type: "user",
+        uuid: "u1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: { role: "user", content: "   " },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(0);
+  });
+
+  it("skips assistant messages where cleaned content is only whitespace", () => {
+    const filePath = writeJsonl([
+      {
+        type: "assistant",
+        uuid: "a1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: { content: [{ type: "text", text: "   " }] },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(0);
+  });
+
+  it("handles tool_use block without explicit id field", () => {
+    const filePath = writeJsonl([
+      {
+        type: "assistant",
+        uuid: "a1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Write",
+              input: { file_path: "/tmp/out.txt", content: "hello" },
+            },
+          ],
+        },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].type).toBe("tool_use");
+    expect(nodes[0].toolName).toBe("Write");
+    // id falls back to uuid-tool-Write
+    expect(nodes[0].id).toContain("Write");
+  });
+
+  it("handles tool_result referencing unknown tool_use_id (no prior tool_use)", () => {
+    const filePath = writeJsonl([
+      {
+        type: "user",
+        uuid: "u1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "unknown-tool-id",
+              content: "some result",
+            },
+          ],
+        },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0].type).toBe("tool_result");
+    expect(nodes[0].title).toBe("Tool result"); // fallback title
+    expect(nodes[0].toolName).toBeUndefined();
+  });
+
+  it("handles multiple tool_use blocks in a single assistant message", () => {
+    const filePath = writeJsonl([
+      {
+        type: "assistant",
+        uuid: "a1",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          content: [
+            { type: "tool_use", id: "tu1", name: "bash", input: { command: "ls" } },
+            { type: "text", text: "Let me also check:" },
+            { type: "tool_use", id: "tu2", name: "Read", input: { file_path: "/tmp/f" } },
+          ],
+        },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    // Should produce: tool_use (bash), assistant text, tool_use (Read)
+    const toolNodes = nodes.filter((n) => n.type === "tool_use");
+    const assistantNodes = nodes.filter((n) => n.type === "assistant");
+    expect(toolNodes).toHaveLength(2);
+    expect(assistantNodes).toHaveLength(1);
+    expect(assistantNodes[0].content).toBe("Let me also check:");
+  });
+
+  it("handles user array content with only tool_results (no text blocks)", () => {
+    const filePath = writeJsonl([
+      {
+        type: "assistant",
+        uuid: "a0",
+        timestamp: "2024-01-01T00:00:00Z",
+        message: {
+          content: [
+            { type: "tool_use", id: "tu1", name: "bash", input: {} },
+          ],
+        },
+      },
+      {
+        type: "user",
+        uuid: "u1",
+        timestamp: "2024-01-01T00:00:01Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tu1", content: "output here" },
+          ],
+        },
+      },
+    ]);
+    const nodes = parseTimelineRaw(filePath);
+    const userNodes = nodes.filter((n) => n.type === "user");
+    const trNodes = nodes.filter((n) => n.type === "tool_result");
+    // No user text node (empty text blocks), only tool_result
+    expect(userNodes).toHaveLength(0);
+    expect(trNodes).toHaveLength(1);
+  });
+});
+
+// ─── extractTextContent edge cases ───────────────────────────
+
+describe("extractTextContent edge cases", () => {
+  it("handles array with plain string items", () => {
+    const content = ["hello", "world"];
+    expect(extractTextContent(content)).toBe("hello\nworld");
+  });
+
+  it("handles tool_result with non-string non-array content (object)", () => {
+    const content = [
+      { type: "tool_result", content: { nested: "value" } },
+    ];
+    const result = extractTextContent(content);
+    expect(result).toContain("nested");
+    expect(result).toContain("value");
+  });
+
+  it("handles tool_result with null content", () => {
+    const content = [{ type: "tool_result", content: null }];
+    const result = extractTextContent(content);
+    expect(result).toBe('""');
+  });
+
+  it("handles unknown block types by returning empty string", () => {
+    const content = [{ type: "unknown_type", data: "something" }];
+    const result = extractTextContent(content);
+    expect(result).toBe("");
+  });
+
+  it("handles empty array", () => {
+    expect(extractTextContent([])).toBe("");
+  });
+
+  it("handles tool_use block with missing name and input", () => {
+    const content = [{ type: "tool_use" }];
+    const result = extractTextContent(content);
+    expect(result).toContain("[Tool: undefined]");
+  });
+});
+
+// ─── summarize edge cases ──────────────────────────────────────
+
+describe("summarize edge cases", () => {
+  it("returns empty string for null-ish input", () => {
+    expect(summarize(null as unknown as string)).toBe("");
+    expect(summarize(undefined as unknown as string)).toBe("");
+  });
+
+  it("trims whitespace", () => {
+    expect(summarize("  hello  ")).toBe("hello");
+  });
+
+  it("handles text exactly at max length", () => {
+    const text = "a".repeat(120);
+    expect(summarize(text, 120)).toBe(text); // exactly at limit, no truncation
+  });
+
+  it("handles text one char over max length", () => {
+    const text = "a".repeat(121);
+    const result = summarize(text, 120);
+    expect(result).toBe("a".repeat(120) + "...");
+  });
 });

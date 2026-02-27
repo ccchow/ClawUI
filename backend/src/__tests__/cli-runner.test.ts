@@ -158,4 +158,115 @@ not valid json at all`;
     expect(result.output).toBe("Response text.");
     expect(result.suggestions).toEqual([]);
   });
+
+  it("runPrompt strips OSC escape sequences", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        // OSC sequence: ESC ] ... BEL
+        const output = `spawn /path/to/claude --args
+\x1B]0;title\x07Clean text here`;
+        callback(null, output, "");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    const result = await runPrompt("session-123", "test prompt");
+    expect(result.output).toBe("Clean text here");
+  });
+
+  it("runPrompt strips carriage returns", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        const output = `spawn /path/to/claude\r\nLine one\r\nLine two`;
+        callback(null, output, "");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    const result = await runPrompt("session-123", "test");
+    expect(result.output).not.toContain("\r");
+    expect(result.output).toContain("Line one");
+    expect(result.output).toContain("Line two");
+  });
+
+  it("runPrompt handles output without spawn line", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        // No "spawn" line in output — use all lines
+        const output = "Just a direct response\nSecond line";
+        callback(null, output, "");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    const result = await runPrompt("session-123", "test");
+    expect(result.output).toBe("Just a direct response\nSecond line");
+  });
+
+  it("runPrompt resolves with output even when error is present", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    // When there's an error but also output, resolve with the output
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        const output = `spawn /path/to/claude --args
+Partial output before error`;
+        callback(new Error("timeout"), output, "");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    const result = await runPrompt("session-123", "test");
+    // Should resolve because clean output is non-empty
+    expect(result.output).toBe("Partial output before error");
+  });
+
+  it("runPrompt resolves with empty string when output is only whitespace and no error", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        const output = `spawn /path/to/claude --args
+   `;
+        callback(null, output, "");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    const result = await runPrompt("session-123", "test");
+    expect(result.output).toBe("");
+  });
+
+  it("runPrompt includes stderr in error message", async () => {
+    const { execFile } = await import("node:child_process");
+    const mockedExecFile = vi.mocked(execFile);
+
+    mockedExecFile.mockImplementation(
+      (_cmd: any, _args: any, _opts: any, callback: any) => {
+        callback(new Error("process exited with code 1"), "", "detailed stderr info");
+        return {} as any;
+      }
+    );
+
+    const { runPrompt } = await import("../cli-runner.js");
+    await expect(runPrompt("session-123", "test")).rejects.toThrow(
+      "detailed stderr info"
+    );
+  });
 });
