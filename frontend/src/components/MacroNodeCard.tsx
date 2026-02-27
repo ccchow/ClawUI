@@ -2,13 +2,12 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { type MacroNode, type PendingTask, type AgentType, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
+import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
 import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { AISparkle } from "./AISparkle";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
-import { AgentBadge } from "./AgentSelector";
 
 /** Strip markdown syntax for plain-text preview */
 function stripMarkdown(text: string): string {
@@ -32,7 +31,6 @@ export function MacroNodeCard({
   index,
   total,
   blueprintId,
-  blueprintAgentType,
   onRefresh,
   onNodeUpdated,
   onNodeDeleted,
@@ -45,7 +43,6 @@ export function MacroNodeCard({
   index: number;
   total: number;
   blueprintId?: string;
-  blueprintAgentType?: AgentType;
   onRefresh?: () => void;
   onNodeUpdated?: () => void;
   onNodeDeleted?: () => void;
@@ -328,10 +325,6 @@ export function MacroNodeCard({
               }`}>
                 {running ? "running" : reevaluateQueued ? "re-eval" : node.status === "queued" ? (queuePosition > 0 ? `queued #${queuePosition}` : "queued") : node.status}
               </span>
-              {/* Show agent badge if node has a different agent type than the blueprint default */}
-              {node.agentType && node.agentType !== (blueprintAgentType ?? "claude") && (
-                <AgentBadge agentType={node.agentType} size="xs" />
-              )}
             </div>
             {!expanded && !isEditing && node.description && (
               <div className="mt-1">
