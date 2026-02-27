@@ -702,3 +702,196 @@ describe("Transaction behavior (sync write)", () => {
     expect(oldNode).toBeUndefined();
   });
 });
+
+// ─── getLastMessage query pattern ──────────────────────────────
+
+describe("getLastMessage query pattern", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    db.prepare("INSERT INTO projects (id, name, decoded_path, session_count, updated_at) VALUES (?, ?, ?, ?, ?)").run("proj-1", "P", "/p", 1, "2024-01-01T00:00:00Z");
+    db.prepare("INSERT INTO sessions (id, project_id, slug, created_at, updated_at, node_count, file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("session-1", "proj-1", "test", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", 3, 500, "2024-01-01T00:00:00Z");
+  });
+  afterEach(() => { db.close(); });
+
+  it("returns the last node by seq (DESC LIMIT 1)", () => {
+    const insert = db.prepare("INSERT INTO timeline_nodes (id, session_id, seq, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    insert.run("n1", "session-1", 0, "user", "2024-01-01T00:00:00Z", "First", "First msg", null, null, null, null);
+    insert.run("n2", "session-1", 1, "assistant", "2024-01-01T00:00:01Z", "Second", "Second msg", null, null, null, null);
+    insert.run("n3", "session-1", 2, "tool_use", "2024-01-01T00:00:02Z", "Read", "{}", "Read", '{"path":"f"}', null, "tu-1");
+
+    const row = db.prepare(`
+      SELECT id, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id
+      FROM timeline_nodes
+      WHERE session_id = ?
+      ORDER BY seq DESC
+      LIMIT 1
+    `).get("session-1") as { id: string; type: string; tool_name: string | null };
+
+    expect(row).toBeDefined();
+    expect(row.id).toBe("n3");
+    expect(row.type).toBe("tool_use");
+    expect(row.tool_name).toBe("Read");
+  });
+
+  it("returns undefined for empty session", () => {
+    const row = db.prepare(`
+      SELECT id FROM timeline_nodes WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+    `).get("session-1");
+    expect(row).toBeUndefined();
+  });
+
+  it("returns undefined for non-existent session", () => {
+    const row = db.prepare(`
+      SELECT id FROM timeline_nodes WHERE session_id = ? ORDER BY seq DESC LIMIT 1
+    `).get("nonexistent");
+    expect(row).toBeUndefined();
+  });
+});
+
+// ─── getTimeline query mapping ─────────────────────────────────
+
+describe("getTimeline query mapping (optional tool fields)", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    db.prepare("INSERT INTO projects (id, name, decoded_path, session_count, updated_at) VALUES (?, ?, ?, ?, ?)").run("proj-1", "P", "/p", 1, "2024-01-01T00:00:00Z");
+    db.prepare("INSERT INTO sessions (id, project_id, slug, created_at, updated_at, node_count, file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("session-1", "proj-1", "test", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", 3, 500, "2024-01-01T00:00:00Z");
+  });
+  afterEach(() => { db.close(); });
+
+  it("maps tool_result node with all optional fields", () => {
+    const insert = db.prepare("INSERT INTO timeline_nodes (id, session_id, seq, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    insert.run("n1", "session-1", 0, "tool_result", "2024-01-01T00:00:00Z", "Read result", "file data", "Read", '{"path":"f"}', "file data", "tu-1");
+
+    const rows = db.prepare(`
+      SELECT id, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id
+      FROM timeline_nodes WHERE session_id = ? ORDER BY seq ASC
+    `).all("session-1") as Array<{
+      id: string; type: string; timestamp: string; title: string; content: string;
+      tool_name: string | null; tool_input: string | null; tool_result: string | null; tool_use_id: string | null;
+    }>;
+
+    // Map like getTimeline does
+    const mapped = rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      timestamp: r.timestamp,
+      title: r.title,
+      content: r.content,
+      ...(r.tool_name ? { toolName: r.tool_name } : {}),
+      ...(r.tool_input ? { toolInput: r.tool_input } : {}),
+      ...(r.tool_result ? { toolResult: r.tool_result } : {}),
+      ...(r.tool_use_id ? { toolUseId: r.tool_use_id } : {}),
+    }));
+
+    expect(mapped).toHaveLength(1);
+    expect(mapped[0].toolName).toBe("Read");
+    expect(mapped[0].toolInput).toBe('{"path":"f"}');
+    expect(mapped[0].toolResult).toBe("file data");
+    expect(mapped[0].toolUseId).toBe("tu-1");
+  });
+
+  it("omits optional fields that are null", () => {
+    const insert = db.prepare("INSERT INTO timeline_nodes (id, session_id, seq, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    insert.run("n1", "session-1", 0, "assistant", "2024-01-01T00:00:00Z", "Response", "Hello", null, null, null, null);
+
+    const rows = db.prepare(`
+      SELECT id, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id
+      FROM timeline_nodes WHERE session_id = ? ORDER BY seq ASC
+    `).all("session-1") as Array<{
+      id: string; type: string; timestamp: string; title: string; content: string;
+      tool_name: string | null; tool_input: string | null; tool_result: string | null; tool_use_id: string | null;
+    }>;
+
+    const mapped = rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      timestamp: r.timestamp,
+      title: r.title,
+      content: r.content,
+      ...(r.tool_name ? { toolName: r.tool_name } : {}),
+      ...(r.tool_input ? { toolInput: r.tool_input } : {}),
+      ...(r.tool_result ? { toolResult: r.tool_result } : {}),
+      ...(r.tool_use_id ? { toolUseId: r.tool_use_id } : {}),
+    }));
+
+    expect(mapped).toHaveLength(1);
+    expect(mapped[0]).not.toHaveProperty("toolName");
+    expect(mapped[0]).not.toHaveProperty("toolInput");
+    expect(mapped[0]).not.toHaveProperty("toolResult");
+    expect(mapped[0]).not.toHaveProperty("toolUseId");
+  });
+});
+
+// ─── getSessions query pattern (project name decoding) ────────
+
+describe("getSessions query pattern", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+  afterEach(() => { db.close(); });
+
+  it("decodes project name from project id", () => {
+    const projectId = "-Users-leizhou-Git-ClawUI";
+    const decodedPath = projectId.replace(/-/g, "/");
+    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+    expect(projectName).toBe("Git/ClawUI");
+  });
+
+  it("handles project id with single path segment", () => {
+    const projectId = "-Users-test";
+    const decodedPath = projectId.replace(/-/g, "/");
+    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+    expect(projectName).toBe("Users/test");
+  });
+
+  it("returns sessions ordered by updated_at DESC", () => {
+    db.prepare("INSERT INTO projects (id, name, decoded_path, session_count, updated_at) VALUES (?, ?, ?, ?, ?)").run("proj-1", "P", "/p", 3, "2024-01-01T00:00:00Z");
+
+    const ins = db.prepare("INSERT INTO sessions (id, project_id, slug, created_at, updated_at, node_count, file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    ins.run("s1", "proj-1", "a", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", 1, 100, "2024-01-01T00:00:00Z");
+    ins.run("s2", "proj-1", "b", "2024-01-01T00:00:00Z", "2024-01-03T00:00:00Z", 1, 100, "2024-01-03T00:00:00Z");
+    ins.run("s3", "proj-1", "c", "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", 1, 100, "2024-01-02T00:00:00Z");
+
+    const rows = db.prepare("SELECT id FROM sessions WHERE project_id = ? ORDER BY updated_at DESC").all("proj-1") as Array<{ id: string }>;
+    expect(rows.map((r) => r.id)).toEqual(["s2", "s3", "s1"]);
+  });
+
+  it("maps null slug/cwd to proper values", () => {
+    db.prepare("INSERT INTO projects (id, name, decoded_path, session_count, updated_at) VALUES (?, ?, ?, ?, ?)").run("proj-1", "P", "/p", 1, "2024-01-01T00:00:00Z");
+    db.prepare("INSERT INTO sessions (id, project_id, slug, cwd, created_at, updated_at, node_count, file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run("s1", "proj-1", null, null, "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", 1, 100, "2024-01-01T00:00:00Z");
+
+    const row = db.prepare("SELECT slug, cwd FROM sessions WHERE id = ?").get("s1") as { slug: string | null; cwd: string | null };
+    // slug ?? undefined — null becomes undefined
+    const mappedSlug = row.slug ?? undefined;
+    const mappedCwd = row.cwd ?? undefined;
+    expect(mappedSlug).toBeUndefined();
+    expect(mappedCwd).toBeUndefined();
+  });
+});
+
+// ─── File mtime change detection ─────────────────────────────
+
+describe("File mtime change detection", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    db.prepare("INSERT INTO projects (id, name, decoded_path, session_count, updated_at) VALUES (?, ?, ?, ?, ?)").run("proj-1", "P", "/p", 1, "2024-01-01T00:00:00Z");
+  });
+  afterEach(() => { db.close(); });
+
+  it("detects file changed when mtime differs but size is the same", () => {
+    db.prepare("INSERT INTO sessions (id, project_id, slug, created_at, updated_at, node_count, file_size, file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("session-1", "proj-1", "test", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z", 5, 1024, "2024-01-01T00:00:00.000Z");
+
+    const existing = db.prepare("SELECT file_size, file_mtime FROM sessions WHERE id = ?").get("session-1") as { file_size: number; file_mtime: string };
+    // Same size but different mtime
+    const unchanged = existing.file_size === 1024 && existing.file_mtime === "2024-01-02T00:00:00.000Z";
+    expect(unchanged).toBe(false);
+  });
+});

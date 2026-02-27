@@ -56,4 +56,47 @@ describe("auth", () => {
     const res = await request(app).get("/health");
     expect(res.status).toBe(200);
   });
+
+  it("rejects token with wrong length (timing-safe comparison requires equal lengths)", async () => {
+    // Token is 32 chars, send a shorter one — should be rejected before timingSafeEqual
+    const res = await request(app)
+      .get("/api/test")
+      .set("x-clawui-token", "short");
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Forbidden");
+  });
+
+  it("rejects token with correct length but wrong value", async () => {
+    // Same length as LOCAL_AUTH_TOKEN (32 hex chars) but all zeros
+    const fakeToken = "0".repeat(LOCAL_AUTH_TOKEN.length);
+    const res = await request(app)
+      .get("/api/test")
+      .set("x-clawui-token", fakeToken);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns proper JSON error body on 403", async () => {
+    const res = await request(app).get("/api/test");
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({
+      error: "Forbidden",
+      message: "Missing or invalid Local Auth Token.",
+    });
+  });
+
+  it("skips auth for nested non-api paths like /health/check", async () => {
+    app = express();
+    app.use(requireLocalAuth);
+    app.get("/health/check", (_req, res) => res.json({ ok: true }));
+    const res = await request(app).get("/health/check");
+    expect(res.status).toBe(200);
+  });
+
+  it("requires auth for nested api paths like /api/sub/route", async () => {
+    app = express();
+    app.use(requireLocalAuth);
+    app.get("/api/sub/route", (_req, res) => res.json({ ok: true }));
+    const res = await request(app).get("/api/sub/route");
+    expect(res.status).toBe(403);
+  });
 });

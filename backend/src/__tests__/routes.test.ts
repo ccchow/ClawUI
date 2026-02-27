@@ -7,6 +7,7 @@ vi.mock("../db.js", () => ({
   getProjects: vi.fn(() => []),
   getSessions: vi.fn(() => []),
   getTimeline: vi.fn(() => []),
+  getLastMessage: vi.fn(() => null),
   syncAll: vi.fn(),
   syncSession: vi.fn(),
 }));
@@ -53,6 +54,7 @@ vi.mock("../cli-runner.js", () => ({
 
 vi.mock("../jsonl-parser.js", () => ({
   getSessionCwd: vi.fn(() => "/test/cwd"),
+  analyzeSessionHealth: vi.fn(() => null),
 }));
 
 vi.mock("../plan-db.js", () => ({
@@ -64,6 +66,7 @@ import {
   getProjects,
   getSessions,
   getTimeline,
+  getLastMessage,
   syncAll,
   syncSession,
 } from "../db.js";
@@ -71,9 +74,11 @@ import {
   getEnrichments,
   updateSessionMeta,
   updateNodeMeta,
+  getAllTags,
 } from "../enrichment.js";
-import { updateAppState, trackSessionView } from "../app-state.js";
+import { getAppState, updateAppState, trackSessionView } from "../app-state.js";
 import { runPrompt } from "../cli-runner.js";
+import { analyzeSessionHealth } from "../jsonl-parser.js";
 
 function createApp() {
   const app = express();
@@ -372,6 +377,223 @@ describe("routes", () => {
 
       expect(res.status).toBe(200);
       expect(updateAppState).toHaveBeenCalled();
+    });
+
+    it("returns 500 on error", async () => {
+      vi.mocked(updateAppState).mockImplementation(() => {
+        throw new Error("write error");
+      });
+
+      const res = await request(app).put("/api/state").send({ ui: {} });
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("write error");
+    });
+  });
+
+  // ─── GET /api/sessions/:id/last-message ─────────────────────
+
+  describe("GET /api/sessions/:id/last-message", () => {
+    it("returns the last message for a session", async () => {
+      vi.mocked(getLastMessage).mockReturnValue({
+        id: "n99",
+        type: "assistant",
+        timestamp: "2024-01-01T00:01:00Z",
+        title: "Final response",
+        content: "All done!",
+      });
+
+      const res = await request(app).get("/api/sessions/s1/last-message");
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe("n99");
+      expect(res.body.type).toBe("assistant");
+      expect(syncSession).toHaveBeenCalledWith("s1");
+    });
+
+    it("returns 404 when no messages exist", async () => {
+      vi.mocked(getLastMessage).mockReturnValue(null);
+
+      const res = await request(app).get("/api/sessions/missing/last-message");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("No messages found");
+    });
+
+    it("returns 500 on error", async () => {
+      vi.mocked(getLastMessage).mockImplementation(() => {
+        throw new Error("DB read error");
+      });
+
+      const res = await request(app).get("/api/sessions/s1/last-message");
+      expect(res.status).toBe(500);
+    });
+  });
+
+  // ─── GET /api/sessions/:id/health ──────────────────────────
+
+  describe("GET /api/sessions/:id/health", () => {
+    it("returns session health analysis", async () => {
+      vi.mocked(analyzeSessionHealth).mockReturnValue({
+        failureReason: "context_exhausted",
+        detail: "Session compacted 3 times",
+        compactCount: 3,
+        peakTokens: 170000,
+        lastApiError: null,
+        messageCount: 50,
+        contextPressure: "critical",
+        endedAfterCompaction: true,
+        responsesAfterLastCompact: 0,
+      });
+
+      const res = await request(app).get("/api/sessions/s1/health");
+      expect(res.status).toBe(200);
+      expect(res.body.failureReason).toBe("context_exhausted");
+      expect(res.body.compactCount).toBe(3);
+      expect(res.body.contextPressure).toBe("critical");
+    });
+
+    it("returns 404 when session file not found", async () => {
+      vi.mocked(analyzeSessionHealth).mockReturnValue(null);
+
+      const res = await request(app).get("/api/sessions/missing/health");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Session file not found");
+    });
+
+    it("returns 500 on error", async () => {
+      vi.mocked(analyzeSessionHealth).mockImplementation(() => {
+        throw new Error("file read error");
+      });
+
+      const res = await request(app).get("/api/sessions/s1/health");
+      expect(res.status).toBe(500);
+    });
+  });
+
+  // ─── GET /api/dev/status ──────────────────────────────────
+
+  describe("GET /api/dev/status", () => {
+    it("returns dev mode status", async () => {
+      const res = await request(app).get("/api/dev/status");
+      expect(res.status).toBe(200);
+      expect(typeof res.body.devMode).toBe("boolean");
+    });
+  });
+
+  // ─── Error handling edge cases ─────────────────────────────
+
+  describe("Error handling", () => {
+    it("GET /api/projects/:id/sessions returns 500 on error", async () => {
+      vi.mocked(getSessions).mockImplementation(() => {
+        throw new Error("sessions error");
+      });
+
+      const res = await request(app).get("/api/projects/p1/sessions");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("sessions error");
+    });
+
+    it("GET /api/sessions/:id/timeline returns 500 on error", async () => {
+      vi.mocked(syncSession).mockImplementation(() => {
+        throw new Error("sync error");
+      });
+
+      const res = await request(app).get("/api/sessions/s1/timeline");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("sync error");
+    });
+
+    it("GET /api/sync returns 500 on error", async () => {
+      vi.mocked(syncAll).mockImplementation(() => {
+        throw new Error("sync all error");
+      });
+
+      const res = await request(app).get("/api/sync");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("sync all error");
+    });
+
+    it("PATCH /api/sessions/:id/meta returns 500 on error", async () => {
+      vi.mocked(updateSessionMeta).mockImplementation(() => {
+        throw new Error("enrichment write error");
+      });
+
+      const res = await request(app)
+        .patch("/api/sessions/s1/meta")
+        .send({ starred: true });
+      expect(res.status).toBe(500);
+    });
+
+    it("PATCH /api/nodes/:id/meta returns 500 on error", async () => {
+      vi.mocked(updateNodeMeta).mockImplementation(() => {
+        throw new Error("node meta write error");
+      });
+
+      const res = await request(app)
+        .patch("/api/nodes/n1/meta")
+        .send({ bookmarked: true });
+      expect(res.status).toBe(500);
+    });
+
+    it("GET /api/tags returns 500 on error", async () => {
+      vi.mocked(getAllTags).mockImplementation(() => {
+        throw new Error("tags error");
+      });
+
+      const res = await request(app).get("/api/tags");
+      expect(res.status).toBe(500);
+    });
+
+    it("GET /api/state returns 500 on error", async () => {
+      vi.mocked(getAppState).mockImplementation(() => {
+        throw new Error("state read error");
+      });
+
+      const res = await request(app).get("/api/state");
+      expect(res.status).toBe(500);
+    });
+  });
+
+  // ─── POST /api/sessions/:id/run edge cases ─────────────────
+
+  describe("POST /api/sessions/:id/run edge cases", () => {
+    it("returns 400 for non-string prompt", async () => {
+      const res = await request(app)
+        .post("/api/sessions/s1/run")
+        .send({ prompt: 12345 });
+      expect(res.status).toBe(400);
+    });
+
+    it("trims prompt before sending to CLI", async () => {
+      // Reset mocks that may have been overridden by error handling tests
+      vi.mocked(syncSession).mockImplementation(() => {});
+      vi.mocked(runPrompt).mockResolvedValue({
+        output: "response",
+        suggestions: [],
+      });
+
+      const res = await request(app)
+        .post("/api/sessions/s1/run")
+        .send({ prompt: "  test prompt  " });
+      expect(res.status).toBe(200);
+      // runPrompt should have been called with trimmed prompt
+      expect(runPrompt).toHaveBeenCalledWith(
+        "s1",
+        "test prompt",
+        expect.anything()
+      );
+    });
+
+    it("syncs session after successful run", async () => {
+      // Reset mocks that may have been overridden by error handling tests
+      vi.mocked(syncSession).mockImplementation(() => {});
+      vi.mocked(runPrompt).mockResolvedValue({
+        output: "done",
+        suggestions: [],
+      });
+
+      await request(app)
+        .post("/api/sessions/s1/run")
+        .send({ prompt: "do something" });
+      expect(syncSession).toHaveBeenCalledWith("s1");
     });
   });
 });
