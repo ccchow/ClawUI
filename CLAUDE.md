@@ -46,7 +46,8 @@ Layer 4 — App State:  .clawui/app-state.json (UI preferences, recent sessions)
 Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
 
 **Core files:**
-- **config.ts** — Centralized configuration: exports `CLAUDE_PATH` (auto-detected), `PORT`, `CLAWUI_DB_DIR`, `NEXT_PUBLIC_API_PORT`, `LOG_LEVEL`, `CLAWUI_DEV`. All other modules import from here.
+- **config.ts** — Centralized configuration: exports `CLAUDE_PATH` (auto-detected), `PORT`, `CLAWUI_DB_DIR`, `NEXT_PUBLIC_API_PORT`, `LOG_LEVEL`, `CLAWUI_DEV`, `AGENT_TYPE`, `OPENCLAW_PATH`, `PI_PATH`. All other modules import from here.
+- **agent-runtime.ts** — Multi-agent abstraction layer: `AgentRuntime` interface (run/resume/detect/parse sessions), `AgentType` union (`"claude" | "openclaw" | "pi-mono"`), `AgentConfig`/`AgentCapabilities` types, runtime registry (`registerRuntime`/`getActiveRuntime` factory), `resolveAgentBinary()` auto-detection. Uses `import type` from `jsonl-parser.ts` for `TimelineNode`/`SessionAnalysis`.
 - **logger.ts** — Structured logging: `createLogger('module')` returns `{debug, info, warn, error}`. Format: `[ISO timestamp] [LEVEL] [module] msg`. Controlled by `LOG_LEVEL` env var.
 - **db.ts** — SQLite initialization (better-sqlite3), tables: `projects`, `sessions`, `timeline_nodes`. `initDb()`, `syncAll()`, `syncSession()`, `getProjects()`, `getSessions()`, `getTimeline()`, `getLastMessage()` (single-row query for lightweight polling).
 - **jsonl-parser.ts** — Parses JSONL into `TimelineNode[]`. Types: user, assistant, tool_use, tool_result. Exports `parseTimeline()`, `parseTimelineRaw()`, `listProjects()`, `listSessions()`, `analyzeSessionHealth()`, `decodeProjectPath()`, and helpers (`cleanContent`, `summarize`, `extractTextContent`).
@@ -127,6 +128,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`.
 
 ## Key Design Decisions
 
+- **Multi-agent runtime registry**: `agent-runtime.ts` defines `AgentRuntime` interface and a registry pattern — each agent type (claude, openclaw, pi-mono) registers a factory via `registerRuntime()`. `getActiveRuntime()` returns the runtime for the configured `AGENT_TYPE`. `config.ts` uses `import type` for `AgentType` to avoid circular runtime dependencies. Binary paths use the same resolve pattern as `CLAUDE_PATH` (env var → common locations → PATH via `which`), returning `null` instead of bare name for non-Claude agents since they may not be installed.
 - **expect for TTY**: Claude Code requires a TTY — `node-pty` fails on Node 25, so we use `expect` (path auto-detected via `EXPECT_PATH` config) with `set stty_init "columns 2000"`
 - **Inline suggestions**: One API call per prompt — suffix asks Claude to append `---SUGGESTIONS---` + JSON
 - **SQLite for index**: `better-sqlite3` sync API, incremental updates via file mtime+size comparison
@@ -197,6 +199,9 @@ All config is centralized in `backend/src/config.ts`. See `.env.example` for def
 - `EXPECT_PATH` — Path to `expect` binary (auto-detected: checks `/usr/bin/expect`, `/usr/local/bin/expect`, `/opt/local/bin/expect`, `/opt/homebrew/bin/expect`, then PATH)
 - `LOG_LEVEL` — Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)
 - `CLAWUI_DEV` — Set to `1` to reuse existing auth token across backend restarts and enable dev UI features (default: unset, token rotates every restart). Exposed to frontend via `GET /api/dev/status`.
+- `AGENT_TYPE` — Backend AI agent: `"claude"` (default), `"openclaw"`, or `"pi-mono"`. Invalid values fall back to `"claude"`.
+- `OPENCLAW_PATH` — Path to OpenClaw CLI binary (auto-detected: `~/.local/bin/openclaw`, `/usr/local/bin/openclaw`, then PATH). Null if not found.
+- `PI_PATH` — Path to Pi Mono CLI binary (auto-detected: `~/.local/bin/pi-mono`, `/usr/local/bin/pi-mono`, then PATH). Null if not found.
 
 ## Development Environments
 
