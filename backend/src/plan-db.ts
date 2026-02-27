@@ -23,6 +23,7 @@ export interface Blueprint {
   projectCwd?: string;
   status: BlueprintStatus;
   archivedAt?: string;
+  agentType?: string;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -45,6 +46,7 @@ export interface MacroNode {
   outputArtifacts: Artifact[];
   executions: NodeExecution[];
   error?: string;
+  agentType?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -269,6 +271,18 @@ export function initPlanTables(): void {
     db.exec("ALTER TABLE blueprints ADD COLUMN archived_at TEXT");
   }
 
+  // Incremental migration: add agent_type column to blueprints
+  const bpCols2 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols2.some((c) => c.name === "agent_type")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN agent_type TEXT DEFAULT 'claude'");
+  }
+
+  // Incremental migration: add agent_type column to macro_nodes (per-node agent override)
+  const mnCols = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
+  if (!mnCols.some((c) => c.name === "agent_type")) {
+    db.exec("ALTER TABLE macro_nodes ADD COLUMN agent_type TEXT DEFAULT 'claude'");
+  }
+
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
       "plan_schema",
@@ -286,6 +300,7 @@ interface BlueprintRow {
   status: string;
   project_cwd: string | null;
   archived_at: string | null;
+  agent_type: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -303,6 +318,7 @@ interface MacroNodeRow {
   estimated_minutes: number | null;
   actual_minutes: number | null;
   error: string | null;
+  agent_type: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -411,6 +427,7 @@ function rowToMacroNode(
     outputArtifacts,
     executions,
     ...(row.error ? { error: row.error } : {}),
+    ...(row.agent_type ? { agentType: row.agent_type } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -424,6 +441,7 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
     status: row.status as BlueprintStatus,
     ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
+    ...(row.agent_type ? { agentType: row.agent_type } : {}),
     nodes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -544,15 +562,16 @@ export function createBlueprint(
   title: string,
   description?: string,
   projectCwd?: string,
+  agentType?: string,
 ): Blueprint {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO blueprints (id, title, description, status, project_cwd, created_at, updated_at)
-    VALUES (?, ?, ?, 'draft', ?, ?, ?)
-  `).run(id, title, description ?? null, projectCwd ?? null, now, now);
+    INSERT INTO blueprints (id, title, description, status, project_cwd, agent_type, created_at, updated_at)
+    VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)
+  `).run(id, title, description ?? null, projectCwd ?? null, agentType ?? "claude", now, now);
 
   return {
     id,
@@ -560,6 +579,7 @@ export function createBlueprint(
     description: description ?? "",
     status: "draft",
     ...(projectCwd ? { projectCwd } : {}),
+    ...(agentType ? { agentType } : {}),
     nodes: [],
     createdAt: now,
     updatedAt: now,
@@ -638,7 +658,7 @@ export function unarchiveBlueprint(id: string): Blueprint | null {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd">>,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType">>,
 ): Blueprint | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
@@ -664,6 +684,10 @@ export function updateBlueprint(
     sets.push("project_cwd = ?");
     params.push(patch.projectCwd);
   }
+  if (patch.agentType !== undefined) {
+    sets.push("agent_type = ?");
+    params.push(patch.agentType);
+  }
 
   params.push(id);
   db.prepare(`UPDATE blueprints SET ${sets.join(", ")} WHERE id = ?`).run(...params);
@@ -688,6 +712,7 @@ export function createMacroNode(
     parallelGroup?: string;
     prompt?: string;
     estimatedMinutes?: number;
+    agentType?: string;
   },
 ): MacroNode {
   const db = getDb();
@@ -703,8 +728,8 @@ export function createMacroNode(
     ).run(now, blueprintId, data.order);
 
     db.prepare(`
-      INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+      INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, agent_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       blueprintId,
@@ -715,6 +740,7 @@ export function createMacroNode(
       data.parallelGroup ?? null,
       data.prompt ?? null,
       data.estimatedMinutes ?? null,
+      data.agentType ?? null,
       now,
       now,
     );
@@ -735,6 +761,7 @@ export function createMacroNode(
     ...(data.parallelGroup ? { parallelGroup: data.parallelGroup } : {}),
     ...(data.prompt ? { prompt: data.prompt } : {}),
     ...(data.estimatedMinutes != null ? { estimatedMinutes: data.estimatedMinutes } : {}),
+    ...(data.agentType ? { agentType: data.agentType } : {}),
     inputArtifacts: [],
     outputArtifacts: [],
     executions: [],
@@ -759,6 +786,7 @@ export function updateMacroNode(
       | "actualMinutes"
       | "error"
       | "order"
+      | "agentType"
     >
   >,
 ): MacroNode | null {
@@ -782,6 +810,7 @@ export function updateMacroNode(
   if (patch.actualMinutes !== undefined) { sets.push("actual_minutes = ?"); params.push(patch.actualMinutes); }
   if (patch.error !== undefined) { sets.push("error = ?"); params.push(patch.error); }
   if (patch.order !== undefined) { sets.push('"order" = ?'); params.push(patch.order); }
+  if (patch.agentType !== undefined) { sets.push("agent_type = ?"); params.push(patch.agentType); }
 
   params.push(nodeId, blueprintId);
   db.prepare(`UPDATE macro_nodes SET ${sets.join(", ")} WHERE id = ? AND blueprint_id = ?`).run(...params);
@@ -1045,7 +1074,8 @@ export function updateNode(
   if (patch.actualMinutes !== undefined) mapped.actualMinutes = patch.actualMinutes;
   if (patch.seq !== undefined) mapped.order = patch.seq;
   if (patch.order !== undefined) mapped.order = patch.order;
-  return updateMacroNode(blueprintId, nodeId, mapped as Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "parallelGroup" | "prompt" | "estimatedMinutes" | "actualMinutes" | "error" | "order">>);
+  if (patch.agentType !== undefined) mapped.agentType = patch.agentType;
+  return updateMacroNode(blueprintId, nodeId, mapped as Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "parallelGroup" | "prompt" | "estimatedMinutes" | "actualMinutes" | "error" | "order" | "agentType">>);
 }
 
 export const deleteNode = deleteMacroNode;

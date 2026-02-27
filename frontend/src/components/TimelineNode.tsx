@@ -43,6 +43,14 @@ const BADGE_COLOR: Record<string, string> = {
   WebSearch: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-400 border-cyan-500/30",
   Task: "bg-pink-500/15 text-pink-700 dark:text-pink-400 border-pink-500/30",
   TodoWrite: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 border-indigo-500/30",
+  // OpenClaw tools
+  skill_call: "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30",
+  thinking: "bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-500/30",
+  // Pi Mono tools
+  bash_execution: "bg-violet-500/15 text-violet-700 dark:text-violet-400 border-violet-500/30",
+  file_read: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
+  file_write: "bg-orange-500/15 text-orange-700 dark:text-orange-400 border-orange-500/30",
+  file_edit: "bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/30",
 };
 
 const DEFAULT_BADGE = "bg-text-muted/15 text-text-secondary border-text-muted/30";
@@ -100,6 +108,24 @@ function toolInputSummary(toolName: string, rawInput: string): string | null {
           return active?.content || `${input.todos.length} items`;
         }
         return null;
+      // OpenClaw tools
+      case "skill_call":
+        return input.skill_name || input.name || null;
+      case "thinking":
+        return input.content?.slice(0, 80) || null;
+      // Pi Mono tools
+      case "bash_execution":
+        return input.command
+          ? input.command.length > 120
+            ? input.command.slice(0, 120) + "..."
+            : input.command
+          : null;
+      case "file_read":
+        return input.path || input.file_path || null;
+      case "file_write":
+        return input.path ? `→ ${input.path}` : null;
+      case "file_edit":
+        return input.path || input.file_path || null;
       default:
         // Try common field names
         return (

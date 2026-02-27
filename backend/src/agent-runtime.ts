@@ -1,186 +1,134 @@
-import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import type { TimelineNode, SessionAnalysis } from "./jsonl-parser.js";
+/**
+ * Agent Runtime abstraction layer.
+ *
+ * Defines the interface that all AI agent backends (Claude Code, OpenClaw, Pi Mono)
+ * must implement, plus a registry/factory for runtime selection.
+ */
 
-// ─── Types ──────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────
 
-export type AgentType = "claude" | "openclaw" | "pi-mono";
+export type AgentType = "claude" | "openclaw" | "pi";
 
 export interface AgentCapabilities {
+  /** Supports --resume flag for session continuation */
   supportsResume: boolean;
-  supportsTTY: boolean;
-  supportsToolUse: boolean;
-  supportsJsonOutput: boolean;
+  /** Supports interactive mode (full tool use, no --output-format text) */
+  supportsInteractive: boolean;
+  /** Supports --output-format text for text-only output */
+  supportsTextOutput: boolean;
+  /** Supports --dangerously-skip-permissions flag */
+  supportsDangerousMode: boolean;
 }
 
 export interface AgentConfig {
-  name: string;
   type: AgentType;
   binaryPath: string;
-  sessionsPath: string;
-  features: AgentCapabilities;
+  expectPath: string;
+  sessionsDir: string;
 }
 
-// ─── AgentRuntime interface ─────────────────────────────────
-
+/**
+ * Core interface that all agent runtimes must implement.
+ *
+ * Each method corresponds to a different CLI invocation pattern used
+ * throughout the plan system (executor, generator, cli-runner).
+ */
 export interface AgentRuntime {
-  /** Display name for this runtime (e.g. "Claude Code", "OpenClaw", "Pi Mono") */
-  name: string;
+  readonly type: AgentType;
+  readonly capabilities: AgentCapabilities;
 
-  /** Resolved path to the agent's CLI binary */
-  binaryPath: string;
-
-  /** Feature capabilities of this runtime */
-  capabilities: AgentCapabilities;
-
-  // ── Execution modes ──
-
-  /** Run a one-shot prompt in a new session */
-  runSession(prompt: string, cwd?: string): Promise<string>;
-
-  /** Run a prompt in interactive mode (full tool usage, no structured output) */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string>;
-
-  /** Resume an existing session with a continuation prompt */
-  resumeSession(
-    sessionId: string,
-    prompt: string,
-    cwd?: string,
-    onPid?: (pid: number) => void,
-  ): Promise<string>;
-
-  // ── Session discovery ──
-
-  /** Detect the newest session file created after `beforeTimestamp` for a project */
-  detectNewSession(projectCwd: string, beforeTimestamp: Date): Promise<string | null>;
-
-  /** Return the base directory where this runtime stores session files */
+  /**
+   * Get the directory where this agent stores session JSONL files.
+   * e.g. ~/.claude/projects/ for Claude Code
+   */
   getSessionsDir(): string;
 
-  /** Encode a project CWD into the directory name format used by this runtime */
+  /**
+   * Run the agent in text output mode (--output-format text).
+   * Used for simple tasks that only need text output (artifact generation, etc.)
+   * Returns the cleaned text output.
+   */
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string>;
+
+  /**
+   * Run the agent in interactive mode (full tool use, no --output-format text).
+   * Used for tasks where the agent directly calls API endpoints via curl.
+   * Returns raw stdout (usually ignored — side effects happen via API calls).
+   */
+  runSessionInteractive(prompt: string, cwd?: string): Promise<string>;
+
+  /**
+   * Resume an existing session by ID with a continuation prompt.
+   * Used for retrying failed executions.
+   * Returns the cleaned text output.
+   */
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string>;
+
+  /**
+   * Encode a project CWD to match the agent's directory naming convention.
+   * e.g. /Users/foo/project → -Users-foo-project for Claude Code
+   */
   encodeProjectCwd(cwd: string): string;
 
-  // ── Session parsing ──
+  /**
+   * Detect the newest session file created after `beforeTimestamp`
+   * in the agent's projects directory matching `projectCwd`.
+   * Returns the session ID or null.
+   */
+  detectNewSession(projectCwd: string, beforeTimestamp: Date): string | null;
 
-  /** Parse a session file into timeline nodes */
-  parseSessionFile(filePath: string, rawContent?: string): TimelineNode[];
-
-  /** Analyze a session for health metrics (compaction, errors, token usage) */
-  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null;
+  /**
+   * Build a clean environment for spawning agent CLI subprocesses.
+   * Strips agent-specific env vars that could cause conflicts.
+   */
+  cleanEnv(): NodeJS.ProcessEnv;
 }
 
-// ─── Binary auto-detection ──────────────────────────────────
+// ─── Runtime Registry ────────────────────────────────────────
 
-/**
- * Try to resolve a CLI binary by checking common locations then PATH.
- * Returns the resolved path, or null if not found.
- */
-export function resolveAgentBinary(type: AgentType): string | null {
-  const binaryName = agentBinaryName(type);
-  const candidates = agentBinaryCandidates(type);
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  // Fallback: check PATH via `which`
-  try {
-    const resolved = execFileSync("/usr/bin/which", [binaryName], {
-      encoding: "utf-8",
-    }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // not in PATH
-  }
-
-  return null;
-}
-
-function agentBinaryName(type: AgentType): string {
-  switch (type) {
-    case "claude":
-      return "claude";
-    case "openclaw":
-      return "openclaw";
-    case "pi-mono":
-      return "pi-mono";
-  }
-}
-
-function agentBinaryCandidates(type: AgentType): string[] {
-  const home = homedir();
-  switch (type) {
-    case "claude":
-      return [
-        join(home, ".local", "bin", "claude"),
-        "/usr/local/bin/claude",
-      ];
-    case "openclaw":
-      return [
-        join(home, ".local", "bin", "openclaw"),
-        "/usr/local/bin/openclaw",
-      ];
-    case "pi-mono":
-      return [
-        join(home, ".local", "bin", "pi-mono"),
-        "/usr/local/bin/pi-mono",
-      ];
-  }
-}
-
-// ─── Runtime factory ────────────────────────────────────────
-
-/**
- * Registry of runtime constructors, keyed by AgentType.
- * Initially only "claude" is registered; other runtimes are added
- * when their implementation modules call `registerRuntime()`.
- */
 const runtimeRegistry = new Map<AgentType, () => AgentRuntime>();
+let activeRuntime: AgentRuntime | null = null;
 
+/**
+ * Register an agent runtime factory for a given agent type.
+ * Called during module initialization (e.g. in agent-claude.ts).
+ */
 export function registerRuntime(type: AgentType, factory: () => AgentRuntime): void {
   runtimeRegistry.set(type, factory);
 }
 
-/** Configured agent type from env / config. Imported lazily to avoid circular deps. */
-let activeType: AgentType = "claude";
-
-export function setActiveAgentType(type: AgentType): void {
-  activeType = type;
-}
-
 /**
- * Get the currently active AgentRuntime.
- * Throws if the configured agent type has no registered implementation.
+ * Get the active agent runtime. Creates it lazily on first call
+ * using the configured AGENT_TYPE from config.ts.
+ *
+ * Falls back to "claude" if the configured type has no registered factory.
  */
 export function getActiveRuntime(): AgentRuntime {
-  const factory = runtimeRegistry.get(activeType);
+  if (activeRuntime) return activeRuntime;
+
+  // Import config lazily to avoid circular dependencies
+  const agentType = (process.env.AGENT_TYPE || "claude") as AgentType;
+  const factory = runtimeRegistry.get(agentType) ?? runtimeRegistry.get("claude");
+
   if (!factory) {
-    throw new Error(
-      `No runtime registered for agent type "${activeType}". ` +
-      `Available: ${[...runtimeRegistry.keys()].join(", ") || "(none)"}`,
-    );
+    throw new Error(`No agent runtime registered for type "${agentType}". Available: ${[...runtimeRegistry.keys()].join(", ")}`);
   }
-  return factory();
+
+  activeRuntime = factory();
+  return activeRuntime;
 }
 
 /**
- * Get the default sessions directory for a given agent type.
- * Claude: ~/.claude/projects/
- * OpenClaw: ~/.openclaw/sessions/
- * Pi Mono: ~/.pi-mono/sessions/
+ * Get all registered runtime factories with availability info.
+ * Used for multi-agent session discovery and the /api/agents endpoint.
  */
-export function getDefaultSessionsDir(type: AgentType): string {
-  const home = homedir();
-  switch (type) {
-    case "claude":
-      return join(home, ".claude", "projects");
-    case "openclaw":
-      return join(home, ".openclaw", "sessions");
-    case "pi-mono":
-      return join(home, ".pi-mono", "sessions");
-  }
+export function getRegisteredRuntimes(): Map<AgentType, () => AgentRuntime> {
+  return new Map(runtimeRegistry);
+}
+
+/**
+ * Reset the active runtime (for testing purposes).
+ */
+export function resetActiveRuntime(): void {
+  activeRuntime = null;
 }

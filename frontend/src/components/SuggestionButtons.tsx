@@ -29,6 +29,7 @@ export function SuggestionButtons({
             key={i}
             onClick={() => onSelect(s.prompt)}
             disabled={disabled}
+            title={disabled ? "A command is currently running" : undefined}
             className="text-left px-4 py-3 rounded-xl border border-border-primary bg-bg-secondary hover:bg-bg-tertiary hover:border-accent-purple/40 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <p className="text-sm font-medium text-text-primary mb-1 line-clamp-1">

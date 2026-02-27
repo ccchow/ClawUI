@@ -1,151 +1,26 @@
-import { execFile } from "node:child_process";
-import { writeFileSync, unlinkSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import { getBlueprint, getArtifactsForNode } from "./plan-db.js";
-import { CLAUDE_PATH, EXPECT_PATH, PORT } from "./config.js";
+import { PORT } from "./config.js";
 import { LOCAL_AUTH_TOKEN } from "./auth.js";
-import { createLogger } from "./logger.js";
-
-const log = createLogger("plan-generator");
-
-const INTERACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 min
-
-/**
- * Build a clean environment for spawning Claude CLI subprocesses.
- * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
- * error when the backend itself was started from within a Claude Code session.
- */
-function cleanEnvForClaude(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.CLAUDECODE;
-  return env;
-}
+import { runClaudeTextMode, runClaudeInteractiveMode } from "./agent-claude.js";
 
 /**
  * Run Claude in text output mode (no tool use). Used for simple tasks that
  * only need text output (e.g., enrich-node, artifact generation).
+ *
+ * Delegates to agent-claude.ts runClaudeTextMode.
  */
 export function runClaude(prompt: string, cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // Claude Code requires TTY even in -p mode, so we must use expect.
-    // log_user 0 suppresses TTY echo; we capture output via a temp output file.
-    const promptFile = join(tmpdir(), `clawui-gen-${randomUUID()}.txt`);
-    const outputFile = join(tmpdir(), `clawui-gen-${randomUUID()}.out`);
-    const expectFile = join(tmpdir(), `clawui-gen-${randomUUID()}.exp`);
-    writeFileSync(promptFile, prompt, "utf-8");
-
-    const expectScript = `
-log_user 0
-set timeout 180
-set stty_init "columns 2000"
-match_max 1000000
-
-set fp [open "${promptFile}" r]
-set prompt_text [read -nonewline $fp]
-close $fp
-
-set of [open "${outputFile}" w]
-set output ""
-
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 -p $prompt_text
-expect {
-  -re ".+" {
-    append output $expect_out(0,string)
-    exp_continue
-  }
-  eof {}
-  timeout {
-    puts -nonewline $of $output
-    close $of
-    exit 1
-  }
-}
-puts -nonewline $of $output
-close $of
-`;
-    writeFileSync(expectFile, expectScript, "utf-8");
-
-    execFile(EXPECT_PATH, [expectFile], {
-      timeout: 200_000,
-      maxBuffer: 10 * 1024 * 1024,
-      cwd: cwd || process.cwd(),
-      env: cleanEnvForClaude(),
-    }, (error) => {
-      // Read output from file (avoids TTY echo contamination)
-      let output = "";
-      try {
-        output = readFileSync(outputFile, "utf-8").trim();
-      } catch { /* no output file */ }
-
-      // Cleanup
-      try { unlinkSync(promptFile); } catch { /* */ }
-      try { unlinkSync(outputFile); } catch { /* */ }
-      try { unlinkSync(expectFile); } catch { /* */ }
-
-      // Strip ANSI escapes
-      output = output
-        .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
-        .replace(/\x1B\][^\x07]*\x07/g, "")
-        .replace(/\r/g, "")
-        .trim();
-
-      if (output.length === 0) {
-        reject(new Error(`Claude returned empty output. expect error: ${error?.message?.slice(0, 300) ?? "none"}`));
-        return;
-      }
-      log.debug(`Claude output length: ${output.length}, first 200 chars: ${output.slice(0, 200).replace(/\n/g, "\\n")}`);
-      resolve(output);
-    });
-  });
+  return runClaudeTextMode(prompt, cwd);
 }
 
 /**
  * Run Claude in interactive mode (full tool use). Used for tasks where
  * Claude directly calls ClawUI API endpoints.
+ *
+ * Delegates to agent-claude.ts runClaudeInteractiveMode.
  */
 export function runClaudeInteractiveGen(prompt: string, cwd?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const tmpFile = join(tmpdir(), `clawui-gen-prompt-${randomUUID()}.txt`);
-    writeFileSync(tmpFile, prompt, "utf-8");
-
-    const fullScript = `
-set timeout 600
-set stty_init "columns 2000"
-set fp [open "${tmpFile}" r]
-set prompt [read -nonewline $fp]
-close $fp
-file delete "${tmpFile}"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --max-turns 200 -p $prompt
-expect eof
-catch {wait}
-`;
-
-    const tmpExpect = join(tmpdir(), `clawui-gen-expect-${randomUUID()}.exp`);
-    writeFileSync(tmpExpect, fullScript, "utf-8");
-
-    execFile(
-      EXPECT_PATH,
-      [tmpExpect],
-      {
-        timeout: INTERACTIVE_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: cwd || process.cwd(),
-        env: cleanEnvForClaude(),
-      },
-      (error, stdout) => {
-        try { unlinkSync(tmpExpect); } catch { /* ignore */ }
-        try { unlinkSync(tmpFile); } catch { /* ignore */ }
-
-        if (error) {
-          reject(new Error(`Claude interactive (generator) failed: ${error.message}`));
-          return;
-        }
-        resolve(stdout || "");
-      },
-    );
-  });
+  return runClaudeInteractiveMode(prompt, cwd);
 }
 
 /**

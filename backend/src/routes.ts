@@ -3,8 +3,11 @@ import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
 import { runPrompt, validateSessionId } from "./cli-runner.js";
-import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession } from "./db.js";
+import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession, getAvailableAgents, getSessionAgentType } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
+import type { AgentType } from "./agent-runtime.js";
+import { analyzePiSessionHealth } from "./agent-pimono.js";
+import { analyzeOpenClawSessionHealth } from "./agent-openclaw.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
 import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
 import { createLogger } from "./logger.js";
@@ -22,10 +25,13 @@ function safeError(err: unknown): string {
 
 const router = Router();
 
-// GET /api/projects — list all Claude Code projects
-router.get("/api/projects", (_req, res) => {
+// GET /api/projects — list projects, optionally filtered by agent type
+// ?agent=claude|openclaw|pi (default: all)
+router.get("/api/projects", (req, res) => {
   try {
-    const projects = getProjects();
+    const agentParam = req.query.agent as string | undefined;
+    const agentType = agentParam && agentParam !== "all" ? agentParam as AgentType : undefined;
+    const projects = getProjects(agentType);
     res.json(projects);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -33,9 +39,12 @@ router.get("/api/projects", (_req, res) => {
 });
 
 // GET /api/projects/:id/sessions — list sessions with enrichment data merged in
+// ?agent=claude|openclaw|pi (default: all)
 router.get("/api/projects/:id/sessions", (req, res) => {
   try {
-    const sessions = getSessions(req.params.id as string);
+    const agentParam = req.query.agent as string | undefined;
+    const agentType = agentParam && agentParam !== "all" ? agentParam as AgentType : undefined;
+    const sessions = getSessions(req.params.id as string, agentType);
     const enrichments = getEnrichments();
 
     // Apply query filters
@@ -269,14 +278,43 @@ router.post("/api/dev/redeploy", (_req, res) => {
 });
 
 // GET /api/sessions/:id/health — analyze session context health
+// Uses the correct analyzer based on the session's agent type
 router.get("/api/sessions/:id/health", (req, res) => {
   try {
-    const analysis = analyzeSessionHealth(req.params.id as string);
+    const sessionId = req.params.id as string;
+    const agentType = getSessionAgentType(sessionId) ?? "claude";
+
+    let analysis;
+    switch (agentType) {
+      case "pi":
+        analysis = analyzePiSessionHealth(sessionId);
+        break;
+      case "openclaw":
+        analysis = analyzeOpenClawSessionHealth(sessionId);
+        break;
+      case "claude":
+      default:
+        analysis = analyzeSessionHealth(sessionId);
+        break;
+    }
+
     if (!analysis) {
       res.status(404).json({ error: "Session file not found" });
       return;
     }
     res.json(analysis);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// ─── Agent Discovery ────────────────────────────────────────────
+
+// GET /api/agents — list available agent runtimes with session counts
+router.get("/api/agents", (_req, res) => {
+  try {
+    const agents = getAvailableAgents();
+    res.json(agents);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }

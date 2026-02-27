@@ -2,7 +2,8 @@
 
 import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
-import { type SessionMeta, type SessionFilters, updateSessionMeta, getTags } from "@/lib/api";
+import { type SessionMeta, type SessionFilters, type AgentType, type AgentInfo, updateSessionMeta, getTags, getAgents } from "@/lib/api";
+import { AgentBadge } from "./AgentSelector";
 import { formatTimeAgo } from "@/lib/format-time";
 
 type SortMode = "newest" | "most-messages";
@@ -10,9 +11,11 @@ type SortMode = "newest" | "most-messages";
 export function SessionList({
   sessions,
   onFiltersChange,
+  onAgentFilterChange,
 }: {
   sessions: SessionMeta[];
   onFiltersChange?: (filters: SessionFilters) => void;
+  onAgentFilterChange?: (agentType: AgentType | undefined) => void;
 }) {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortMode>("newest");
@@ -20,6 +23,8 @@ export function SessionList({
   const [tagFilter, setTagFilter] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [allTags, setAllTags] = useState<string[]>([]);
+  const [agentFilter, setAgentFilter] = useState<AgentType | undefined>(undefined);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
   // Optimistic star overrides: sessionId -> starred value
   const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
   // Optimistic archive overrides: sessionId -> archived value
@@ -48,6 +53,16 @@ export function SessionList({
   useEffect(() => {
     getTags().then(setAllTags).catch(() => { /* non-critical: stale data cleared on next poll */ });
   }, []);
+
+  // Load available agents
+  useEffect(() => {
+    getAgents().then(setAgents).catch(() => {});
+  }, []);
+
+  // Notify parent of agent filter changes
+  useEffect(() => {
+    onAgentFilterChange?.(agentFilter);
+  }, [agentFilter, onAgentFilterChange]);
 
   // Notify parent of filter changes (for server-side filtering)
   useEffect(() => {
@@ -217,12 +232,29 @@ export function SessionList({
           {showArchived ? "Showing archived" : "Archived"}
         </button>
 
-        {(starredFilter || tagFilter || showArchived) && (
+        {/* Agent filter — only show when multiple agents have sessions */}
+        {agents.filter(a => a.sessionCount > 0).length > 1 && (
+          <select
+            value={agentFilter ?? ""}
+            onChange={(e) => setAgentFilter(e.target.value ? e.target.value as AgentType : undefined)}
+            className="px-2.5 py-1 rounded-lg border border-border-primary bg-bg-secondary text-text-secondary text-xs focus:outline-none focus:border-accent-blue"
+          >
+            <option value="">All agents</option>
+            {agents.filter(a => a.sessionCount > 0).map((a) => (
+              <option key={a.type} value={a.type}>
+                {a.name} ({a.sessionCount})
+              </option>
+            ))}
+          </select>
+        )}
+
+        {(starredFilter || tagFilter || showArchived || agentFilter) && (
           <button
             onClick={() => {
               setStarredFilter(false);
               setTagFilter("");
               setShowArchived(false);
+              setAgentFilter(undefined);
             }}
             className="text-xs text-text-muted hover:text-text-secondary transition-colors"
           >
@@ -232,7 +264,7 @@ export function SessionList({
       </div>
 
       {/* Results count when filtering */}
-      {(query || starredFilter || tagFilter) && (
+      {(query || starredFilter || tagFilter || agentFilter) && (
         <p className="text-xs text-text-muted mb-2">
           {filtered.length} of {effectiveSessions.length} sessions
         </p>
@@ -240,7 +272,7 @@ export function SessionList({
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-text-muted">
-          {query || starredFilter || tagFilter ? (
+          {query || starredFilter || tagFilter || agentFilter ? (
             "No sessions matching current filters"
           ) : (
             <div className="flex flex-col items-center gap-3">
@@ -318,6 +350,11 @@ export function SessionList({
                     <span className="text-xs text-text-muted font-mono truncate">
                       {s.sessionId.slice(0, 8)}
                     </span>
+
+                    {/* Agent badge — only show for non-Claude agents */}
+                    {s.agentType && s.agentType !== "claude" && (
+                      <AgentBadge agentType={s.agentType} size="xs" />
+                    )}
 
                     {/* Tags — show first tag on mobile, all on desktop */}
                     {s.tags && s.tags.length > 0 && (

@@ -3,14 +3,16 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { createBlueprint } from "@/lib/api";
+import { createBlueprint, type AgentType } from "@/lib/api";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
+import { AgentSelector } from "@/components/AgentSelector";
 
 export default function NewBlueprintPage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [projectCwd, setProjectCwd] = useState("");
+  const [agentType, setAgentType] = useState<AgentType>("claude");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cwdError, setCwdError] = useState<string | null>(null);
@@ -26,6 +28,7 @@ export default function NewBlueprintPage() {
         title: title.trim(),
         description: description.trim() || undefined,
         projectCwd: projectCwd.trim() || undefined,
+        agentType,
       });
       router.push(autoGenerate ? `/blueprints/${bp.id}?generate=true` : `/blueprints/${bp.id}`);
     } catch (err) {
@@ -95,6 +98,12 @@ export default function NewBlueprintPage() {
           {cwdError && <p className="text-red-500 text-sm mt-1">{cwdError}</p>}
         </div>
 
+        <AgentSelector
+          value={agentType}
+          onChange={setAgentType}
+          disabled={submitting}
+        />
+
         {error && (
           <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-3">
             {error}
@@ -105,6 +114,7 @@ export default function NewBlueprintPage() {
           <button
             type="submit"
             disabled={!title.trim() || submitting}
+            title={submitting ? "Creating blueprint..." : !title.trim() ? "Enter a title first" : "Create a new blueprint"}
             className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? "Creating..." : "Create Blueprint"}
@@ -112,6 +122,7 @@ export default function NewBlueprintPage() {
           <button
             type="button"
             disabled={!title.trim() || submitting}
+            title={submitting ? "Creating blueprint..." : !title.trim() ? "Enter a title first" : "Create blueprint and auto-generate task nodes with AI"}
             onClick={() => handleCreate(true)}
             className="px-4 py-2 rounded-lg bg-accent-purple text-white text-sm font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { getProjects, getSessions, type ProjectInfo, type SessionMeta, type SessionFilters } from "@/lib/api";
+import { getProjects, getSessions, type ProjectInfo, type SessionMeta, type SessionFilters, type AgentType } from "@/lib/api";
 import { SessionList } from "@/components/SessionList";
 
 export default function SessionsPage() {
@@ -12,6 +12,7 @@ export default function SessionsPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<SessionFilters>({});
+  const [agentFilter, setAgentFilter] = useState<AgentType | undefined>(undefined);
 
   useEffect(() => {
     getProjects()
@@ -35,7 +36,7 @@ export default function SessionsPage() {
     if (isInitial) setInitialLoading(true);
     else setRefreshing(true);
 
-    getSessions(selectedProject, filters)
+    getSessions(selectedProject, filters, agentFilter)
       .then((s) => {
         setSessions(s);
         setInitialLoading(false);
@@ -47,10 +48,14 @@ export default function SessionsPage() {
         setRefreshing(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sessions is intentionally excluded to avoid refetch loops when sessions state updates
-  }, [selectedProject, filters]);
+  }, [selectedProject, filters, agentFilter]);
 
   const handleFiltersChange = useCallback((newFilters: SessionFilters) => {
     setFilters(newFilters);
+  }, []);
+
+  const handleAgentFilterChange = useCallback((agent: AgentType | undefined) => {
+    setAgentFilter(agent);
   }, []);
 
   if (error) {
@@ -67,7 +72,7 @@ export default function SessionsPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold mb-1">Sessions</h1>
         <p className="text-text-secondary text-sm">
-          Browse Claude Code sessions across your projects
+          Browse AI agent sessions across your projects
         </p>
       </div>
 
@@ -104,7 +109,7 @@ export default function SessionsPage() {
             </div>
           )}
           <div className={refreshing ? "opacity-70 transition-opacity duration-150" : "transition-opacity duration-150"}>
-            <SessionList sessions={sessions} onFiltersChange={handleFiltersChange} />
+            <SessionList sessions={sessions} onFiltersChange={handleFiltersChange} onAgentFilterChange={handleAgentFilterChange} />
           </div>
         </div>
       )}

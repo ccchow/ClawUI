@@ -572,7 +572,7 @@ describe("plan-routes", () => {
         .post("/api/plans")
         .send({ title: "Legacy Plan", cwd: "/test" });
       expect(res.status).toBe(201);
-      expect(createBlueprint).toHaveBeenCalledWith("Legacy Plan", undefined, "/test");
+      expect(createBlueprint).toHaveBeenCalledWith("Legacy Plan", undefined, "/test", undefined);
     });
 
     it("returns 400 for missing title", async () => {

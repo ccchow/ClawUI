@@ -20,6 +20,7 @@ import {
   archiveBlueprint as archiveBlueprintApi,
   unarchiveBlueprint as unarchiveBlueprintApi,
 } from "@/lib/api";
+import { AgentBadge } from "@/components/AgentSelector";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MacroNodeCard } from "@/components/MacroNodeCard";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -590,45 +591,78 @@ export default function BlueprintDetailPage() {
               archived
             </span>
           )}
-          {/* Archive/Unarchive button */}
-          {blueprint.archivedAt ? (
-            <button
-              onClick={async () => {
-                try {
-                  const updated = await unarchiveBlueprintApi(id);
-                  setBlueprint(updated);
-                } catch { /* silently fail */ }
-              }}
-              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
-              aria-label="Unarchive blueprint"
-              title="Unarchive"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="2" y="3" width="20" height="5" rx="1" />
-                <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
-                <path d="M12 12v6" />
-                <path d="M9 15l3-3 3 3" />
-              </svg>
-            </button>
-          ) : (
-            <button
-              onClick={async () => {
-                try {
-                  const updated = await archiveBlueprintApi(id);
-                  setBlueprint(updated);
-                } catch { /* silently fail */ }
-              }}
-              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
-              aria-label="Archive blueprint"
-              title="Archive"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="2" y="3" width="20" height="5" rx="1" />
-                <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
-                <path d="M10 12h4" />
-              </svg>
-            </button>
+          {blueprint.agentType && blueprint.agentType !== "claude" && (
+            <AgentBadge agentType={blueprint.agentType} size="xs" />
           )}
+          {/* State-control actions + archive */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {blueprint.status === "draft" && (
+              <button
+                onClick={handleApprove}
+                disabled={approving}
+                title={approving ? "Approving blueprint..." : "Mark this blueprint as approved and ready for execution"}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-blue/15 text-accent-blue text-xs font-medium hover:bg-accent-blue/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                {approving ? "Approving..." : "Approve"}
+              </button>
+            )}
+            {canRunAll && (
+              <button
+                onClick={handleRunAll}
+                disabled={isRunning}
+                title={isRunning ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using Claude Code"}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                {isRunning ? (
+                  <><AISparkle size="xs" /> Running...</>
+                ) : (
+                  <>
+                    <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>
+                    Run All
+                  </>
+                )}
+              </button>
+            )}
+            {blueprint.archivedAt ? (
+              <button
+                onClick={async () => {
+                  try {
+                    const updated = await unarchiveBlueprintApi(id);
+                    setBlueprint(updated);
+                  } catch { /* silently fail */ }
+                }}
+                className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
+                aria-label="Unarchive blueprint"
+                title="Unarchive"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="5" rx="1" />
+                  <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+                  <path d="M12 12v6" />
+                  <path d="M9 15l3-3 3 3" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  try {
+                    const updated = await archiveBlueprintApi(id);
+                    setBlueprint(updated);
+                  } catch { /* silently fail */ }
+                }}
+                className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-all active:scale-[0.97] flex-shrink-0"
+                aria-label="Archive blueprint"
+                title="Archive"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="5" rx="1" />
+                  <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+                  <path d="M10 12h4" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
         {editingDesc ? (
           <textarea
@@ -680,134 +714,105 @@ export default function BlueprintDetailPage() {
           </p>
         )}
 
-        {/* Generate instruction + action buttons */}
-        <div className="flex flex-col sm:flex-row gap-2 sm:items-start">
-          <div className="flex-1 min-w-0">
-            <textarea
-              rows={2}
-              value={generateInstruction}
-              onChange={(e) => setGenerateInstruction(e.target.value)}
-              readOnly={generating}
-              placeholder="Optional: describe what to generate or change (e.g. 'add auth support', 'focus on testing')... Press Cmd+Enter to generate"
-              className={`w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary text-sm placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-accent-purple resize-y max-h-32 overflow-y-auto ${generating ? "opacity-60 cursor-not-allowed" : ""}`}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  if (!generating) handleGenerate();
-                }
-              }}
-            />
-          </div>
-          <div className="flex gap-2 flex-wrap">
-            {blueprint.status === "draft" && (
-              <button
-                onClick={handleApprove}
-                disabled={approving}
-                title="Mark this blueprint as approved and ready for execution"
-                className="px-4 py-2 rounded-lg bg-accent-blue text-white text-sm font-medium hover:bg-accent-blue/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-              >
-                {approving ? "Approving..." : "Approve Plan"}
-              </button>
-            )}
-            {confirmingRegenerate ? (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-accent-purple/40 bg-accent-purple/10 animate-fade-in">
-                <span className="text-xs text-accent-purple whitespace-nowrap">Regenerate nodes?</span>
-                <button
-                  onClick={() => handleGenerate(true)}
-                  className="px-2.5 py-1 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.98] transition-all"
-                >
-                  Yes
-                </button>
-                <button
-                  onClick={() => setConfirmingRegenerate(false)}
-                  className="px-2.5 py-1 rounded-md border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary active:scale-[0.98] transition-all"
-                >
-                  Cancel
-                </button>
-              </div>
-            ) : (
-              <button
-                onClick={() => handleGenerate()}
-                disabled={generating}
-                title={generating ? "AI is generating task nodes..." : "Use AI to decompose the blueprint into executable task nodes"}
-                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap ${
-                  blueprint.nodes.length === 0
-                    ? "bg-accent-purple text-white hover:bg-accent-purple/90"
-                    : "border border-accent-purple text-accent-purple hover:bg-accent-purple/10"
-                }`}
-              >
-                {generating ? (
-                  <>
-                    <AISparkle size="sm" />
-                    Generating...
-                  </>
+        {/* Generate instruction + action buttons — ChatGPT-style unified input */}
+        <div className={`rounded-xl border bg-bg-secondary transition-colors ${generating ? "border-accent-purple/40" : "border-border-primary focus-within:border-accent-purple/60"}`}>
+          <textarea
+            rows={2}
+            value={generateInstruction}
+            onChange={(e) => setGenerateInstruction(e.target.value)}
+            readOnly={generating}
+            placeholder="Describe what to generate or change (e.g. 'add auth support', 'focus on testing')..."
+            className={`w-full px-4 pt-3 pb-1 bg-transparent text-text-primary text-sm placeholder:text-text-muted focus:outline-none resize-none max-h-32 overflow-y-auto ${generating ? "opacity-60 cursor-not-allowed" : ""}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (!generating) handleGenerate();
+              }
+            }}
+          />
+          <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
+            {/* Generative actions — left side */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
+                confirmingReevaluate ? (
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-blue/30 bg-accent-blue/10 animate-fade-in">
+                    <span className="text-xs text-accent-blue whitespace-nowrap">Reevaluate?</span>
+                    <button
+                      onClick={handleReevaluateAll}
+                      className="px-2 py-0.5 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.97] transition-all"
+                    >
+                      Yes
+                    </button>
+                    <button
+                      onClick={() => setConfirmingReevaluate(false)}
+                      className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
+                    >
+                      No
+                    </button>
+                  </div>
                 ) : (
-                  "Generate Nodes"
-                )}
-              </button>
-            )}
-            {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
-              confirmingReevaluate ? (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-accent-blue/40 bg-accent-blue/10 animate-fade-in">
-                  <span className="text-xs text-accent-blue whitespace-nowrap">Reevaluate all nodes?</span>
                   <button
                     onClick={handleReevaluateAll}
-                    className="px-2.5 py-1 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.98] transition-all"
+                    disabled={isRunning || reevaluating || generateCooldown}
+                    title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                  >
+                    {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
+                      <><AISparkle size="xs" /> Reevaluating...</>
+                    ) : (
+                      <>
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+                        </svg>
+                        Reevaluate
+                      </>
+                    )}
+                  </button>
+                )
+              )}
+            </div>
+            {/* Primary generate action — right side */}
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              {confirmingRegenerate ? (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-purple/30 bg-accent-purple/10 animate-fade-in">
+                  <span className="text-xs text-accent-purple whitespace-nowrap">Regenerate?</span>
+                  <button
+                    onClick={() => handleGenerate(true)}
+                    className="px-2 py-0.5 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.97] transition-all"
                   >
                     Yes
                   </button>
                   <button
-                    onClick={() => setConfirmingReevaluate(false)}
-                    className="px-2.5 py-1 rounded-md border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary active:scale-[0.98] transition-all"
+                    onClick={() => setConfirmingRegenerate(false)}
+                    className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
                   >
-                    Cancel
+                    No
                   </button>
                 </div>
               ) : (
                 <button
-                  onClick={handleReevaluateAll}
-                  disabled={isRunning || reevaluating || generateCooldown}
-                  title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
-                  className="px-4 py-2 rounded-lg border border-accent-blue text-accent-blue text-sm font-medium hover:bg-accent-blue/10 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                  onClick={() => handleGenerate()}
+                  disabled={generating}
+                  title={generating ? "AI is generating task nodes..." : `Use AI to decompose the blueprint into executable task nodes (${navigator?.userAgent?.includes("Mac") ? "⌘" : "Ctrl"}+Enter)`}
+                  aria-label="Generate nodes"
+                  className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed ${
+                    generating
+                      ? "px-3 py-1.5 bg-accent-purple/20 text-accent-purple"
+                      : blueprint.nodes.length === 0
+                        ? "p-2 bg-accent-purple text-white hover:bg-accent-purple/90"
+                        : "p-2 text-accent-purple hover:bg-accent-purple/15"
+                  }`}
                 >
-                  {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
-                    <>
-                      <AISparkle size="sm" />
-                      Reevaluating...
-                    </>
+                  {generating ? (
+                    <><AISparkle size="xs" /> Generating...</>
                   ) : (
-                    <>
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-                      </svg>
-                      Reevaluate
-                    </>
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
+                    </svg>
                   )}
                 </button>
-              )
-            )}
-            {canRunAll && (
-              <button
-                onClick={handleRunAll}
-                disabled={isRunning}
-                title={isRunning ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using Claude Code"}
-                className="px-4 py-2 rounded-lg bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
-              >
-                {isRunning ? (
-                  <>
-                    <AISparkle size="sm" />
-                    Running...
-                  </>
-                ) : (
-                  <>
-                    <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M4 2l10 6-10 6V2z" />
-                    </svg>
-                    Run All
-                  </>
-                )}
-              </button>
-            )}
+              )}
+            </div>
           </div>
         </div>
         {/* Generation progress banner */}
@@ -835,7 +840,7 @@ export default function BlueprintDetailPage() {
         {showAddNode ? (
           <form
             onSubmit={handleAddNode}
-            className="rounded-xl border border-border-primary bg-bg-secondary p-4 space-y-3"
+            className="rounded-xl border border-border-primary bg-bg-secondary focus-within:border-accent-blue/40 transition-colors"
           >
             <input
               type="text"
@@ -843,25 +848,28 @@ export default function BlueprintDetailPage() {
               onChange={(e) => setNodeTitle(e.target.value)}
               placeholder="Node title"
               readOnly={enriching}
-              className={`w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
+              className={`w-full px-4 pt-3 pb-1 bg-transparent text-text-primary placeholder:text-text-muted text-sm focus:outline-none${enriching ? " opacity-60 cursor-not-allowed" : ""}`}
               autoFocus
               required
             />
-            <MarkdownEditor
-              value={nodeDescription}
-              onChange={setNodeDescription}
-              placeholder="Description (supports Markdown and image paste)"
-              disabled={enriching}
-            />
+            <div className="px-4 pb-2">
+              <MarkdownEditor
+                value={nodeDescription}
+                onChange={setNodeDescription}
+                placeholder="Description (supports Markdown and image paste)"
+                disabled={enriching}
+              />
+            </div>
             {/* Dependency picker */}
             {blueprint.nodes.length > 0 && (
-              <div>
+              <div className="px-4 pb-2">
                 <button
                   type="button"
                   onClick={() => setDepsExpanded((v) => !v)}
                   className="flex items-center gap-1 text-xs text-text-muted mb-1 hover:text-text-secondary transition-colors"
+                  aria-expanded={depsExpanded}
                 >
-                  <span className={`transition-transform ${depsExpanded ? "rotate-90" : ""}`}>▶</span>
+                  <svg className={`w-3 h-3 transition-transform ${depsExpanded ? "rotate-90" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
                   Dependencies{nodeDeps.length > 0 && <span className="text-accent-blue ml-1">({nodeDeps.length} selected)</span>}
                 </button>
                 <div className={`flex gap-1.5 ${depsExpanded ? "flex-wrap" : "overflow-hidden max-h-[28px]"}`}>
@@ -891,33 +899,47 @@ export default function BlueprintDetailPage() {
                 </div>
               </div>
             )}
-            <div className="flex gap-2 flex-wrap">
+            {/* Bottom action bar */}
+            <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={!nodeTitle.trim() || enriching}
+                  onClick={handleSmartCreate}
+                  title={enriching ? "AI is enriching the node..." : !nodeTitle.trim() ? "Enter a node title first" : "AI enriches the title and description, then creates the node"}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddNode(false);
+                    setNodeTitle("");
+                    setNodeDescription("");
+                    setNodeDeps([]);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] whitespace-nowrap"
+                >
+                  Cancel
+                </button>
+              </div>
               <button
                 type="submit"
                 disabled={!nodeTitle.trim() || addingNode}
-                className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-sm hover:bg-accent-blue/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                title={addingNode ? "Adding node..." : !nodeTitle.trim() ? "Enter a node title first" : "Add node to blueprint"}
+                aria-label="Add node"
+                className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed ${
+                  nodeTitle.trim()
+                    ? "p-2 bg-accent-blue text-white hover:bg-accent-blue/90"
+                    : "p-2 text-text-muted"
+                }`}
               >
-                {addingNode ? "Adding..." : "Add Node"}
-              </button>
-              <button
-                type="button"
-                disabled={!nodeTitle.trim() || enriching}
-                onClick={handleSmartCreate}
-                className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-sm hover:bg-accent-purple/90 transition-all active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {enriching ? (<><AISparkle size="xs" /> Enrich</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowAddNode(false);
-                  setNodeTitle("");
-                  setNodeDescription("");
-                  setNodeDeps([]);
-                }}
-                className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-sm hover:bg-bg-tertiary transition-colors"
-              >
-                Cancel
+                {addingNode ? (
+                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" strokeOpacity="0.25" /><path d="M12 2a10 10 0 0 1 10 10" /></svg>
+                ) : (
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+                )}
               </button>
             </div>
           </form>

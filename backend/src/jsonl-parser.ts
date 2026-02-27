@@ -23,6 +23,7 @@ export interface SessionMeta {
   nodeCount: number;
   slug?: string;
   cwd?: string;
+  agentType?: string;
 }
 
 export interface ProjectInfo {
@@ -30,6 +31,7 @@ export interface ProjectInfo {
   name: string;
   path: string;
   sessionCount: number;
+  agentType?: string;
 }
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
