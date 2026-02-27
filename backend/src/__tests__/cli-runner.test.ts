@@ -377,6 +377,124 @@ not valid json at all`;
     });
   });
 
+  // ─── macOS-specific tests ─────────────────────────────────
+
+  describe("macOS platform", () => {
+    beforeEach(() => {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+    });
+
+    it("uses execFile (not spawn) on macOS", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          callback(null, "spawn /opt/homebrew/bin/claude --args\nmacOS output", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      await runPrompt("session-mac-1", "test prompt");
+
+      expect(mockExecFile).toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it("strips spawn line containing /opt/homebrew path", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          callback(null, "spawn /opt/homebrew/bin/claude --dangerously-skip-permissions --resume sess -p test\nActual macOS response", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      const result = await runPrompt("session-mac-2", "test");
+      expect(result.output).toBe("Actual macOS response");
+    });
+
+    it("strips spawn line with /Users/ homedir path", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          callback(null, "spawn /Users/testuser/.local/bin/claude --args\nResponse from macOS", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      const result = await runPrompt("session-mac-3", "test");
+      expect(result.output).toBe("Response from macOS");
+    });
+
+    it("handles macOS expect output with multiple spawn-like lines", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          // macOS expect can emit extra lines before the actual spawn line
+          callback(null, "spawn /usr/local/bin/claude --args\nThe code spawns a new process\nActual result", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      const result = await runPrompt("session-mac-4", "test");
+      // Only the first "spawn" line (with "claude") should be stripped
+      expect(result.output).toContain("Actual result");
+    });
+
+    it("cleans up temp files on macOS /var/folders tmpdir", async () => {
+      vi.resetModules();
+      const fs = await import("node:fs");
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          callback(null, "spawn claude\nDone", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      await runPrompt("session-mac-5", "test prompt");
+
+      // Both prompt and expect temp files should be written and cleaned up
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      expect(fs.unlinkSync).toHaveBeenCalled();
+    });
+
+    it("handles macOS stderr warnings without failing", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          // macOS sometimes emits Tcl warnings to stderr
+          callback(null, "spawn claude\nValid output", "Tcl_Init: unable to set default encoding");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      const result = await runPrompt("session-mac-6", "test");
+      expect(result.output).toBe("Valid output");
+    });
+
+    it("handles SIGTERM from macOS Activity Monitor gracefully", async () => {
+      vi.resetModules();
+      mockExecFile.mockImplementation(
+        (_cmd: any, _args: any, _opts: any, callback: any) => {
+          const err = new Error("process killed") as NodeJS.ErrnoException;
+          err.code = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+          callback(err, "spawn claude\nPartial output before kill", "");
+          return {} as any;
+        },
+      );
+
+      const { runPrompt } = await import("../cli-runner.js");
+      const result = await runPrompt("session-mac-7", "test");
+      // Should still resolve with partial output
+      expect(result.output).toBe("Partial output before kill");
+    });
+  });
+
   // ─── validateSessionId ──────────────────────────────────────
 
   describe("validateSessionId", () => {

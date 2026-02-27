@@ -134,6 +134,36 @@ describe("config.ts", () => {
         expect(CLAUDE_PATH).toBe("claude");
       });
     });
+
+    describe("macOS", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        delete process.env.CLAUDE_PATH;
+      });
+
+      it("prefers ~/.local/bin/claude over /usr/local/bin/claude", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return s.includes(".local/bin/claude") || s === "/usr/local/bin/claude";
+        });
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toContain(".local");
+      });
+
+      it("finds claude installed via which on macOS", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("/opt/homebrew/bin/claude\n");
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toBe("/opt/homebrew/bin/claude");
+      });
+
+      it("trims trailing newline from which output", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("/usr/local/bin/claude\n\n");
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toBe("/usr/local/bin/claude");
+      });
+    });
   });
 
   // ─── resolveExpectPath ──────────────────────────────────────
@@ -201,6 +231,50 @@ describe("config.ts", () => {
         mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
         const { EXPECT_PATH } = await import("../config.js");
         expect(EXPECT_PATH).toBe("expect");
+      });
+    });
+
+    describe("macOS", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        delete process.env.EXPECT_PATH;
+      });
+
+      it("prefers /usr/bin/expect over Homebrew paths", async () => {
+        process.env.CLAUDE_PATH = "claude";
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return s === "/usr/bin/expect" || s === "/opt/homebrew/bin/expect";
+        });
+        const { EXPECT_PATH } = await import("../config.js");
+        expect(EXPECT_PATH).toBe("/usr/bin/expect");
+      });
+
+      it("finds /opt/homebrew/bin/expect on Apple Silicon when system expect is absent", async () => {
+        process.env.CLAUDE_PATH = "claude";
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/opt/homebrew/bin/expect";
+        });
+        const { EXPECT_PATH } = await import("../config.js");
+        expect(EXPECT_PATH).toBe("/opt/homebrew/bin/expect");
+      });
+
+      it("finds /opt/local/bin/expect for MacPorts installs", async () => {
+        process.env.CLAUDE_PATH = "claude";
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/opt/local/bin/expect";
+        });
+        const { EXPECT_PATH } = await import("../config.js");
+        expect(EXPECT_PATH).toBe("/opt/local/bin/expect");
+      });
+
+      it("finds /usr/local/bin/expect on Intel Mac Homebrew", async () => {
+        process.env.CLAUDE_PATH = "claude";
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/usr/local/bin/expect";
+        });
+        const { EXPECT_PATH } = await import("../config.js");
+        expect(EXPECT_PATH).toBe("/usr/local/bin/expect");
       });
     });
   });

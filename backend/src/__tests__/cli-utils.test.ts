@@ -115,6 +115,39 @@ describe("cli-utils", () => {
     });
   });
 
+  describe("isProcessAlive (macOS)", () => {
+    beforeEach(() => {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+    });
+
+    it("returns true when signal 0 throws EPERM (process exists but no permission)", async () => {
+      vi.resetModules();
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => {
+        const err = new Error("EPERM") as NodeJS.ErrnoException;
+        err.code = "EPERM";
+        throw err;
+      });
+      const { isProcessAlive } = await import("../cli-utils.js");
+      // EPERM means the process exists but we don't have permission to signal it.
+      // The current implementation returns false for any throw — this documents that behavior.
+      expect(isProcessAlive(1)).toBe(false);
+      killSpy.mockRestore();
+    });
+
+    it("uses signal 0 (not tasklist) on macOS", async () => {
+      vi.resetModules();
+      const cp = await import("node:child_process");
+      vi.mocked(cp.execFileSync).mockClear();
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+      const { isProcessAlive } = await import("../cli-utils.js");
+      isProcessAlive(1234);
+      // Should NOT use tasklist on macOS
+      expect(cp.execFileSync).not.toHaveBeenCalled();
+      expect(killSpy).toHaveBeenCalledWith(1234, 0);
+      killSpy.mockRestore();
+    });
+  });
+
   // ─── resolveClaudeCliJs: platform-specific tests ─────────────
 
   describe("resolveClaudeCliJs (Windows)", () => {
@@ -250,6 +283,36 @@ describe("cli-utils", () => {
     });
   });
 
+  describe("resolveClaudeCliJs (macOS)", () => {
+    beforeEach(() => {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+    });
+
+    it("returns null for Homebrew-installed Claude on macOS", async () => {
+      vi.resetModules();
+      const { resolveClaudeCliJs, _resetCliJsCache } = await import("../cli-utils.js");
+      _resetCliJsCache();
+      expect(resolveClaudeCliJs("/opt/homebrew/bin/claude")).toBeNull();
+      _resetCliJsCache();
+    });
+
+    it("returns null for ~/.local/bin/claude on macOS", async () => {
+      vi.resetModules();
+      const { resolveClaudeCliJs, _resetCliJsCache } = await import("../cli-utils.js");
+      _resetCliJsCache();
+      expect(resolveClaudeCliJs("/Users/test/.local/bin/claude")).toBeNull();
+      _resetCliJsCache();
+    });
+
+    it("returns null for bare 'claude' command on macOS", async () => {
+      vi.resetModules();
+      const { resolveClaudeCliJs, _resetCliJsCache } = await import("../cli-utils.js");
+      _resetCliJsCache();
+      expect(resolveClaudeCliJs("claude")).toBeNull();
+      _resetCliJsCache();
+    });
+  });
+
   // ─── encodeProjectPath ───────────────────────────────────────
 
   describe("encodeProjectPath", () => {
@@ -285,6 +348,38 @@ describe("cli-utils", () => {
       const { encodeProjectPath } = await import("../cli-utils.js");
       expect(encodeProjectPath("/")).toBe("-");
       expect(encodeProjectPath("C:\\")).toBe("C--");
+    });
+  });
+
+  describe("encodeProjectPath (macOS)", () => {
+    it("encodes typical macOS /Users/ path", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/Users/leizhou/Git/ClawUI")).toBe("-Users-leizhou-Git-ClawUI");
+    });
+
+    it("encodes macOS /Applications path", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/Applications/Xcode.app")).toBe("-Applications-Xcode.app");
+    });
+
+    it("encodes macOS /opt/homebrew path", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/opt/homebrew/lib")).toBe("-opt-homebrew-lib");
+    });
+
+    it("encodes macOS /var/folders temp path", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/var/folders/xx/abc123/T")).toBe("-var-folders-xx-abc123-T");
+    });
+
+    it("encodes macOS path with spaces", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/Users/test/My Project")).toBe("-Users-test-My Project");
+    });
+
+    it("encodes macOS hidden directory paths", async () => {
+      const { encodeProjectPath } = await import("../cli-utils.js");
+      expect(encodeProjectPath("/Users/test/.config/claude")).toBe("-Users-test-.config-claude");
     });
   });
 

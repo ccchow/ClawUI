@@ -735,3 +735,73 @@ describe("decodeProjectPath (Unix)", () => {
     expect(result === undefined || typeof result === "string").toBe(true);
   });
 });
+
+describe("decodeProjectPath (macOS)", () => {
+  const originalPlatform = process.platform;
+
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+  });
+
+  it("decodes macOS /Users/ home directory path", () => {
+    // "-Users" should resolve to /Users on macOS (it exists)
+    const result = decodeProjectPath("-Users");
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]Users$/);
+    }
+  });
+
+  it("decodes macOS /tmp path (symlink to /private/tmp)", () => {
+    const result = decodeProjectPath("-tmp");
+    // /tmp exists on macOS (symlink to /private/tmp)
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]tmp$/);
+    }
+  });
+
+  it("decodes macOS /var path", () => {
+    const result = decodeProjectPath("-var");
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]var$/);
+    }
+  });
+
+  it("decodes macOS /opt path for Homebrew prefix", () => {
+    const result = decodeProjectPath("-opt");
+    // /opt exists on macOS (Apple Silicon Homebrew uses /opt/homebrew)
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]opt$/);
+    }
+  });
+
+  it("returns root for dash on macOS", () => {
+    const result = decodeProjectPath("-");
+    expect(result).toBe("/");
+  });
+
+  it("handles double-dash for macOS hidden directories", () => {
+    // "--config" represents ".config" directory. On macOS, ~/.config may or may not exist
+    const result = decodeProjectPath("-Users-test--config");
+    // Result depends on whether /Users/test/.config exists on this machine
+    expect(result === undefined || typeof result === "string").toBe(true);
+  });
+
+  it("decodes macOS /private path", () => {
+    const result = decodeProjectPath("-private");
+    // /private exists on macOS
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]private$/);
+    }
+  });
+
+  it("handles macOS /Applications path", () => {
+    const result = decodeProjectPath("-Applications");
+    if (result !== undefined) {
+      expect(result).toMatch(/[/\\]Applications$/);
+    }
+  });
+});

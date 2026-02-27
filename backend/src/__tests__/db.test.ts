@@ -629,6 +629,43 @@ describe("naiveDecodePath logic", () => {
     });
   });
 
+  describe("macOS (sep = /)", () => {
+    const sep = "/";
+
+    it("decodes macOS /Users/ home directory path", () => {
+      expect(naiveDecodePath("-Users-leizhou-Git-ClawUI", sep)).toBe("/Users/leizhou/Git/ClawUI");
+    });
+
+    it("decodes macOS /Applications path", () => {
+      expect(naiveDecodePath("-Applications", sep)).toBe("/Applications");
+    });
+
+    it("decodes macOS /opt/homebrew path", () => {
+      expect(naiveDecodePath("-opt-homebrew-lib", sep)).toBe("/opt/homebrew/lib");
+    });
+
+    it("decodes macOS /private/var path", () => {
+      expect(naiveDecodePath("-private-var-folders", sep)).toBe("/private/var/folders");
+    });
+
+    it("decodes macOS /Library path", () => {
+      expect(naiveDecodePath("-Library-Frameworks", sep)).toBe("/Library/Frameworks");
+    });
+
+    it("decodes macOS path with hyphenated directory name", () => {
+      // Note: naiveDecodePath doesn't do filesystem walk, so hyphens are ambiguous
+      expect(naiveDecodePath("-Users-test-my-project", sep)).toBe("/Users/test/my/project");
+    });
+
+    it("decodes macOS /System path", () => {
+      expect(naiveDecodePath("-System-Library", sep)).toBe("/System/Library");
+    });
+
+    it("decodes macOS /var/folders temp path", () => {
+      expect(naiveDecodePath("-var-folders-xx-abc123", sep)).toBe("/var/folders/xx/abc123");
+    });
+  });
+
   describe("Edge cases", () => {
     it("single letter without -- is not treated as drive letter", () => {
       // "A-foo-bar" has just a single dash after 'A', not '--'
