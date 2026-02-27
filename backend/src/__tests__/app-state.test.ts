@@ -133,7 +133,7 @@ describe("app-state module", () => {
 
   it("updateAppState with empty patch does not lose existing data", async () => {
     if (existsSync(STATE_PATH)) rmSync(STATE_PATH);
-    const { updateAppState, getAppState } = await import("../app-state.js");
+    const { updateAppState } = await import("../app-state.js");
 
     // Set up initial state
     updateAppState({ ui: { theme: "light" }, filters: { defaultSort: "created_at" } });

@@ -209,7 +209,7 @@ vi.mock("../plan-executor.js", () => ({
   runClaudeInteractive: vi.fn(async () => ""),
   withTimeout: vi.fn(async (promise: Promise<unknown>) => promise),
   evaluateNodeCompletion: vi.fn(async () => null),
-  applyGraphMutations: vi.fn((_bpId: string, _nodeId: string, _eval: unknown, _bp: unknown) => ({
+  applyGraphMutations: vi.fn(() => ({
     createdNodes: [{ id: "new-node-1", title: "Refinement", status: "pending" }],
     rewiredDependencies: [],
   })),

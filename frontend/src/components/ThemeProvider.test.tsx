@@ -14,8 +14,10 @@ vi.mock("next-themes", () => ({
   }),
 }));
 
-let mockGetAppState: ReturnType<typeof vi.fn>;
-let mockUpdateAppState: ReturnType<typeof vi.fn>;
+import type { Mock } from "vitest";
+
+let mockGetAppState: Mock<(...args: unknown[]) => unknown>;
+let mockUpdateAppState: Mock<(...args: unknown[]) => unknown>;
 
 vi.mock("@/lib/api", () => ({
   getAppState: (...args: unknown[]) => mockGetAppState(...args),

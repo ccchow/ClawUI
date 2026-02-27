@@ -365,8 +365,6 @@ describe("Mixed dependency format in batch-create", () => {
 
   it("filters out invalid integer indices", () => {
     const createdNodes = [{ id: "uuid-1" }];
-    const existingNodeIds = new Set<string>();
-
     const step = { dependencies: [0, 5, -1] as (string | number)[] };
 
     const depIds = step.dependencies

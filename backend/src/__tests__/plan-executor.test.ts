@@ -1375,13 +1375,13 @@ describe("removeQueuedTask logic", () => {
   it("returns false when queue does not exist", () => {
     const queues = new Map<string, Array<{ nodeId?: string }>>();
 
-    function removeQueuedTask(bpId: string, _nodeId: string): { removed: boolean } {
+    function removeQueuedTask(bpId: string): { removed: boolean } {
       const queue = queues.get(bpId);
       if (!queue) return { removed: false };
       return { removed: false };
     }
 
-    expect(removeQueuedTask("nonexistent", "n1").removed).toBe(false);
+    expect(removeQueuedTask("nonexistent").removed).toBe(false);
   });
 
   it("returns false when nodeId not found in queue", () => {

@@ -10,6 +10,8 @@ vi.mock("../db.js", () => ({
   getLastMessage: vi.fn(() => null),
   syncAll: vi.fn(),
   syncSession: vi.fn(),
+  getSessionAgentType: vi.fn(() => "claude"),
+  getAvailableAgents: vi.fn(() => []),
 }));
 
 vi.mock("../enrichment.js", () => ({
@@ -59,6 +61,14 @@ vi.mock("../jsonl-parser.js", () => ({
 
 vi.mock("../plan-db.js", () => ({
   getNodeInfoForSessions: vi.fn(() => new Map()),
+}));
+
+vi.mock("../agent-pimono.js", () => ({
+  analyzePiSessionHealth: vi.fn(() => null),
+}));
+
+vi.mock("../agent-openclaw.js", () => ({
+  analyzeOpenClawSessionHealth: vi.fn(() => null),
 }));
 
 import router from "../routes.js";
@@ -386,7 +396,7 @@ describe("routes", () => {
 
       const res = await request(app).put("/api/state").send({ ui: {} });
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("write error");
+      expect(res.body.error).toContain("Internal server error");
     });
   });
 
@@ -488,7 +498,7 @@ describe("routes", () => {
 
       const res = await request(app).get("/api/projects/p1/sessions");
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("sessions error");
+      expect(res.body.error).toContain("Internal server error");
     });
 
     it("GET /api/sessions/:id/timeline returns 500 on error", async () => {
@@ -498,7 +508,7 @@ describe("routes", () => {
 
       const res = await request(app).get("/api/sessions/s1/timeline");
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("sync error");
+      expect(res.body.error).toContain("Internal server error");
     });
 
     it("GET /api/sync returns 500 on error", async () => {
@@ -508,7 +518,7 @@ describe("routes", () => {
 
       const res = await request(app).get("/api/sync");
       expect(res.status).toBe(500);
-      expect(res.body.error).toContain("sync all error");
+      expect(res.body.error).toContain("Internal server error");
     });
 
     it("PATCH /api/sessions/:id/meta returns 500 on error", async () => {

@@ -118,7 +118,7 @@ export const CLAUDE_CLI_JS = resolveClaudeCliJs(CLAUDE_PATH);
 /** Which backend AI agent to use. Default: "claude". */
 function resolveAgentType(): AgentType {
   const raw = process.env.AGENT_TYPE || "claude";
-  const valid: AgentType[] = ["claude", "openclaw", "pi-mono"];
+  const valid: AgentType[] = ["claude", "openclaw", "pi"];
   if (valid.includes(raw as AgentType)) return raw as AgentType;
   return "claude";
 }
