@@ -348,4 +348,315 @@ describe("plan-db", () => {
     expect(exec.outputSummary).toBe("output summary");
     expect(exec.completedAt).toBe("2024-06-01T00:00:00Z");
   });
+
+  // ─── Archive / Unarchive ──────────────────────────────────
+
+  it("archiveBlueprint sets archivedAt timestamp", async () => {
+    const { createBlueprint, archiveBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Archive Test");
+    expect(bp.archivedAt).toBeUndefined();
+
+    const archived = archiveBlueprint(bp.id);
+    expect(archived).not.toBeNull();
+    expect(archived!.archivedAt).toBeDefined();
+  });
+
+  it("archiveBlueprint returns null for non-existent id", async () => {
+    const { archiveBlueprint } = await import("../plan-db.js");
+    expect(archiveBlueprint("nonexistent")).toBeNull();
+  });
+
+  it("unarchiveBlueprint clears archivedAt", async () => {
+    const { createBlueprint, archiveBlueprint, unarchiveBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Unarchive Test");
+    archiveBlueprint(bp.id);
+
+    const unarchived = unarchiveBlueprint(bp.id);
+    expect(unarchived).not.toBeNull();
+    expect(unarchived!.archivedAt).toBeUndefined();
+  });
+
+  it("unarchiveBlueprint returns null for non-existent id", async () => {
+    const { unarchiveBlueprint } = await import("../plan-db.js");
+    expect(unarchiveBlueprint("nonexistent")).toBeNull();
+  });
+
+  it("listBlueprints excludes archived by default", async () => {
+    const { createBlueprint, archiveBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const bp = createBlueprint(`Archived List Test ${randomUUID()}`);
+    archiveBlueprint(bp.id);
+
+    const list = listBlueprints();
+    expect(list.some((b) => b.id === bp.id)).toBe(false);
+  });
+
+  it("listBlueprints includes archived when includeArchived=true", async () => {
+    const { createBlueprint, archiveBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const bp = createBlueprint(`Archived Include Test ${randomUUID()}`);
+    archiveBlueprint(bp.id);
+
+    const list = listBlueprints({ includeArchived: true });
+    expect(list.some((b) => b.id === bp.id)).toBe(true);
+  });
+
+  // ─── Execution callback columns ───────────────────────────
+
+  it("setExecutionBlocker stores blocker info", async () => {
+    const { createBlueprint, createMacroNode, createExecution, setExecutionBlocker, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Blocker Test");
+    const n = createMacroNode(bp.id, { title: "B", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    const blockerJson = JSON.stringify({ type: "missing_dependency", description: "Redis not installed" });
+    setExecutionBlocker(exec.id, blockerJson);
+
+    const fetched = getExecution(exec.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.blockerInfo).toBe(blockerJson);
+  });
+
+  it("setExecutionTaskSummary stores task summary", async () => {
+    const { createBlueprint, createMacroNode, createExecution, setExecutionTaskSummary, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Summary Test");
+    const n = createMacroNode(bp.id, { title: "S", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    setExecutionTaskSummary(exec.id, "Implemented JWT auth");
+
+    const fetched = getExecution(exec.id);
+    expect(fetched!.taskSummary).toBe("Implemented JWT auth");
+  });
+
+  it("setExecutionReportedStatus stores status and reason", async () => {
+    const { createBlueprint, createMacroNode, createExecution, setExecutionReportedStatus, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Reported Status Test");
+    const n = createMacroNode(bp.id, { title: "RS", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    setExecutionReportedStatus(exec.id, "done");
+    let fetched = getExecution(exec.id);
+    expect(fetched!.reportedStatus).toBe("done");
+    expect(fetched!.reportedReason).toBeUndefined();
+
+    setExecutionReportedStatus(exec.id, "failed", "Tests didn't pass");
+    fetched = getExecution(exec.id);
+    expect(fetched!.reportedStatus).toBe("failed");
+    expect(fetched!.reportedReason).toBe("Tests didn't pass");
+  });
+
+  it("getExecution returns null for non-existent id", async () => {
+    const { getExecution } = await import("../plan-db.js");
+    expect(getExecution("nonexistent-exec")).toBeNull();
+  });
+
+  // ─── Execution context health columns ─────────────────────
+
+  it("updateExecution stores context health metrics", async () => {
+    const { createBlueprint, createMacroNode, createExecution, updateExecution, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Context Health Test");
+    const n = createMacroNode(bp.id, { title: "CH", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    updateExecution(exec.id, {
+      compactCount: 3,
+      peakTokens: 167000,
+      contextPressure: "critical",
+    });
+
+    const fetched = getExecution(exec.id);
+    expect(fetched!.compactCount).toBe(3);
+    expect(fetched!.peakTokens).toBe(167000);
+    expect(fetched!.contextPressure).toBe("critical");
+  });
+
+  it("updateExecution stores failure reason", async () => {
+    const { createBlueprint, createMacroNode, createExecution, updateExecution, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Failure Reason Test");
+    const n = createMacroNode(bp.id, { title: "FR", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    updateExecution(exec.id, {
+      status: "failed",
+      failureReason: "context_exhausted",
+    });
+
+    const fetched = getExecution(exec.id);
+    expect(fetched!.status).toBe("failed");
+    expect(fetched!.failureReason).toBe("context_exhausted");
+  });
+
+  it("updateExecution stores cliPid for process tracking", async () => {
+    const { createBlueprint, createMacroNode, createExecution, updateExecution, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("CLI PID Test");
+    const n = createMacroNode(bp.id, { title: "PID", order: 0 });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    updateExecution(exec.id, { cliPid: 12345 });
+
+    const fetched = getExecution(exec.id);
+    expect(fetched!.cliPid).toBe(12345);
+  });
+
+  // ─── Recovery functions ───────────────────────────────────
+
+  it("getStaleRunningExecutions returns running executions", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getStaleRunningExecutions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Stale Exec Test", "desc", "/tmp/stale-test");
+    const n = createMacroNode(bp.id, { title: "Stale", order: 0 });
+    createExecution(n.id, bp.id, "stale-session", "primary");
+
+    const stale = getStaleRunningExecutions();
+    expect(stale.length).toBeGreaterThan(0);
+    const found = stale.find((e) => e.sessionId === "stale-session");
+    expect(found).toBeDefined();
+    expect(found!.blueprintId).toBe(bp.id);
+    expect(found!.nodeId).toBe(n.id);
+    expect(found!.projectCwd).toBe("/tmp/stale-test");
+  });
+
+  it("getOrphanedQueuedNodes returns queued nodes", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Orphan Test");
+    const n = createMacroNode(bp.id, { title: "Queued Node", order: 0 });
+    updateMacroNode(bp.id, n.id, { status: "queued" });
+
+    const orphaned = getOrphanedQueuedNodes();
+    expect(orphaned.some((o) => o.id === n.id && o.blueprintId === bp.id)).toBe(true);
+  });
+
+  it("recoverStaleExecutions marks dead executions as failed", async () => {
+    const { createBlueprint, createMacroNode, createExecution, updateMacroNode, recoverStaleExecutions, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Recovery Test");
+    const n = createMacroNode(bp.id, { title: "Recover", order: 0 });
+    updateMacroNode(bp.id, n.id, { status: "running" });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    recoverStaleExecutions();
+
+    const fetched = getExecution(exec.id);
+    expect(fetched!.status).toBe("failed");
+    expect(fetched!.outputSummary).toContain("Server restarted");
+  });
+
+  it("recoverStaleExecutions skips executions in skipIds", async () => {
+    const { createBlueprint, createMacroNode, createExecution, updateMacroNode, recoverStaleExecutions, getExecution } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Recovery Skip Test");
+    const n = createMacroNode(bp.id, { title: "Skip Recover", order: 0 });
+    updateMacroNode(bp.id, n.id, { status: "running" });
+    const exec = createExecution(n.id, bp.id, undefined, "primary");
+
+    const skipIds = new Set([exec.id]);
+    recoverStaleExecutions(skipIds);
+
+    const fetched = getExecution(exec.id);
+    // Should still be running since it was in skipIds
+    expect(fetched!.status).toBe("running");
+  });
+
+  // ─── Related Sessions CRUD ────────────────────────────────
+
+  it("createRelatedSession and getRelatedSessionsForNode", async () => {
+    const { createBlueprint, createMacroNode, createRelatedSession, getRelatedSessionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Related Session Test");
+    const n = createMacroNode(bp.id, { title: "RS Node", order: 0 });
+
+    const rs = createRelatedSession(n.id, bp.id, "related-session-1", "enrich", "2024-01-01T00:00:00Z", "2024-01-01T00:01:00Z");
+    expect(rs.id).toBeDefined();
+    expect(rs.sessionId).toBe("related-session-1");
+    expect(rs.type).toBe("enrich");
+    expect(rs.completedAt).toBe("2024-01-01T00:01:00Z");
+
+    const sessions = getRelatedSessionsForNode(n.id);
+    expect(sessions.length).toBeGreaterThanOrEqual(1);
+    expect(sessions.some((s) => s.sessionId === "related-session-1")).toBe(true);
+  });
+
+  it("createRelatedSession without completedAt", async () => {
+    const { createBlueprint, createMacroNode, createRelatedSession } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Related Session No Complete Test");
+    const n = createMacroNode(bp.id, { title: "RS Node 2", order: 0 });
+
+    const rs = createRelatedSession(n.id, bp.id, "related-session-2", "evaluate");
+    expect(rs.completedAt).toBeUndefined();
+  });
+
+  // ─── getNodeInfoForSessions batch lookup ──────────────────
+
+  it("getNodeInfoForSessions returns node info for sessions", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getNodeInfoForSessions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Node Info Test");
+    const n = createMacroNode(bp.id, { title: "Info Node", description: "My description", order: 0 });
+    const sessionId = `info-session-${randomUUID()}`;
+    createExecution(n.id, bp.id, sessionId, "primary");
+
+    const result = getNodeInfoForSessions([sessionId]);
+    expect(result.size).toBe(1);
+    const info = result.get(sessionId);
+    expect(info!.nodeTitle).toBe("Info Node");
+    expect(info!.nodeDescription).toBe("My description");
+    expect(info!.blueprintId).toBe(bp.id);
+  });
+
+  it("getNodeInfoForSessions returns empty map for empty input", async () => {
+    const { getNodeInfoForSessions } = await import("../plan-db.js");
+    const result = getNodeInfoForSessions([]);
+    expect(result.size).toBe(0);
+  });
+
+  // ─── createMacroNode order shifting ───────────────────────
+
+  it("createMacroNode shifts existing nodes at or above the new order", async () => {
+    const { createBlueprint, createMacroNode, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Order Shift Test");
+    const n0 = createMacroNode(bp.id, { title: "A", order: 0 });
+    const n1 = createMacroNode(bp.id, { title: "B", order: 1 });
+
+    // Insert at order 1, should push B to order 2
+    createMacroNode(bp.id, { title: "C", order: 1 });
+
+    const fetched = getBlueprint(bp.id);
+    const nodes = fetched!.nodes;
+    const nodeA = nodes.find((n) => n.id === n0.id);
+    const nodeB = nodes.find((n) => n.id === n1.id);
+    const nodeC = nodes.find((n) => n.title === "C");
+
+    expect(nodeA!.order).toBe(0);
+    expect(nodeC!.order).toBe(1);
+    expect(nodeB!.order).toBe(2);
+  });
+
+  // ─── Backward-compat updateNode alias ─────────────────────
+
+  it("backward-compat updateNode maps legacy field names", async () => {
+    const { createBlueprint, createMacroNode, updateNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("UpdateNode Compat Test");
+    const n = createMacroNode(bp.id, { title: "Legacy", order: 0 });
+
+    const updated = updateNode(bp.id, n.id, {
+      dependsOn: ["dep-1"],
+      seq: 5,
+    });
+    expect(updated).not.toBeNull();
+    expect(updated!.dependencies).toEqual(["dep-1"]);
+    expect(updated!.order).toBe(5);
+  });
 });

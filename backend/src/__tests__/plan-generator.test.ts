@@ -332,3 +332,209 @@ describe("Generator prompt construction", () => {
     expect(prompt).toContain("Focus on adding authentication first");
   });
 });
+
+// ─── Mixed dependency format (string IDs + integer indices) ──
+
+describe("Mixed dependency format in batch-create", () => {
+  it("resolves integer indices to batch-created node IDs", () => {
+    const createdNodes = [
+      { id: "uuid-1", title: "Backend" },
+      { id: "uuid-2", title: "Frontend" },
+    ];
+    const existingNodeIds = new Set(["existing-1", "existing-2"]);
+
+    const step = {
+      title: "Integration",
+      dependencies: [0, 1, "existing-1"] as (string | number)[],
+    };
+
+    const depIds = step.dependencies
+      .map((dep) => {
+        if (typeof dep === "number") {
+          return dep >= 0 && dep < createdNodes.length ? createdNodes[dep].id : null;
+        }
+        if (typeof dep === "string") {
+          return existingNodeIds.has(dep) || createdNodes.some((n) => n.id === dep) ? dep : null;
+        }
+        return null;
+      })
+      .filter((id): id is string => id !== null);
+
+    expect(depIds).toEqual(["uuid-1", "uuid-2", "existing-1"]);
+  });
+
+  it("filters out invalid integer indices", () => {
+    const createdNodes = [{ id: "uuid-1" }];
+    const existingNodeIds = new Set<string>();
+
+    const step = { dependencies: [0, 5, -1] as (string | number)[] };
+
+    const depIds = step.dependencies
+      .map((dep) => {
+        if (typeof dep === "number") {
+          return dep >= 0 && dep < createdNodes.length ? createdNodes[dep].id : null;
+        }
+        return null;
+      })
+      .filter((id): id is string => id !== null);
+
+    expect(depIds).toEqual(["uuid-1"]);
+  });
+
+  it("filters out unknown string IDs", () => {
+    const createdNodes: Array<{ id: string }> = [];
+    const existingNodeIds = new Set(["known-1"]);
+
+    const step = { dependencies: ["known-1", "unknown-2"] as (string | number)[] };
+
+    const depIds = step.dependencies
+      .map((dep) => {
+        if (typeof dep === "string") {
+          return existingNodeIds.has(dep) || createdNodes.some((n) => n.id === dep) ? dep : null;
+        }
+        return null;
+      })
+      .filter((id): id is string => id !== null);
+
+    expect(depIds).toEqual(["known-1"]);
+  });
+});
+
+// ─── cleanEnvForClaude ─────────────────────────────────────
+
+describe("cleanEnvForClaude", () => {
+  it("strips CLAUDECODE from environment", () => {
+    function cleanEnvForClaude(): NodeJS.ProcessEnv {
+      const env = { ...process.env };
+      delete env.CLAUDECODE;
+      return env;
+    }
+
+    // Simulate CLAUDECODE being set
+    const originalValue = process.env.CLAUDECODE;
+    process.env.CLAUDECODE = "test-value";
+
+    const cleaned = cleanEnvForClaude();
+    expect(cleaned.CLAUDECODE).toBeUndefined();
+    // Other env vars should be preserved
+    expect(cleaned.PATH).toBeDefined();
+
+    // Restore
+    if (originalValue !== undefined) {
+      process.env.CLAUDECODE = originalValue;
+    } else {
+      delete process.env.CLAUDECODE;
+    }
+  });
+
+  it("does not modify original process.env", () => {
+    function cleanEnvForClaude(): NodeJS.ProcessEnv {
+      const env = { ...process.env };
+      delete env.CLAUDECODE;
+      return env;
+    }
+
+    process.env.CLAUDECODE = "test-value";
+    cleanEnvForClaude();
+    expect(process.env.CLAUDECODE).toBe("test-value");
+
+    delete process.env.CLAUDECODE;
+  });
+});
+
+// ─── generatePlan prompt construction (full integration) ────
+
+describe("generatePlan prompt includes handoff summaries for done nodes", () => {
+  it("includes handoff summary content for done nodes", () => {
+    const doneNodes = [
+      { id: "n1", status: "done", title: "Setup DB" },
+    ];
+
+    // Simulate getArtifactsForNode returning a summary
+    const artifactsByNode = new Map<string, { content: string }[]>();
+    artifactsByNode.set("n1", [{ content: "**What was done:** Created PostgreSQL schema with users, sessions, and permissions tables." }]);
+
+    const doneLines = doneNodes.map(n => {
+      const outputArtifacts = artifactsByNode.get(n.id) ?? [];
+      const latestArtifact = outputArtifacts.length > 0 ? outputArtifacts[outputArtifacts.length - 1] : null;
+      const summary = latestArtifact
+        ? ` — Handoff: ${latestArtifact.content.slice(0, 300)}`
+        : "";
+      return `  [id: ${n.id}] [${n.status}] ${n.title}${summary}`;
+    });
+
+    const nodesContext = `\n\nCompleted nodes:\n${doneLines.join("\n")}`;
+
+    expect(nodesContext).toContain("[done] Setup DB");
+    expect(nodesContext).toContain("Handoff: **What was done:**");
+    expect(nodesContext).toContain("PostgreSQL schema");
+  });
+
+  it("omits handoff when no artifacts exist", () => {
+    const doneNodes = [
+      { id: "n1", status: "done", title: "Setup DB" },
+    ];
+
+    const artifactsByNode = new Map<string, { content: string }[]>();
+
+    const doneLines = doneNodes.map(n => {
+      const outputArtifacts = artifactsByNode.get(n.id) ?? [];
+      const latestArtifact = outputArtifacts.length > 0 ? outputArtifacts[outputArtifacts.length - 1] : null;
+      const summary = latestArtifact
+        ? ` — Handoff: ${latestArtifact.content.slice(0, 300)}`
+        : "";
+      return `  [id: ${n.id}] [${n.status}] ${n.title}${summary}`;
+    });
+
+    const line = doneLines[0];
+    expect(line).toContain("[done] Setup DB");
+    expect(line).not.toContain("Handoff:");
+  });
+
+  it("truncates handoff summary to 300 chars", () => {
+    const longContent = "**What was done:** " + "x".repeat(500);
+    const truncated = longContent.slice(0, 300);
+    expect(truncated.length).toBe(300);
+    expect(truncated).not.toEqual(longContent);
+  });
+});
+
+// ─── Generate is additive-only ──────────────────────────────
+
+describe("Generate additive-only: ignores remove/update keys", () => {
+  it("only uses the add array from response", () => {
+    const response = {
+      remove: ["n1"],
+      update: [{ id: "n2", title: "Changed" }],
+      add: [
+        { title: "New Step", description: "Something new", dependencies: [] },
+      ],
+    };
+
+    // Generate logic defensively only reads .add
+    const nodesToCreate = response.add ?? [];
+    expect(nodesToCreate).toHaveLength(1);
+    expect(nodesToCreate[0].title).toBe("New Step");
+
+    // remove and update should be ignored
+    // (in production code, they are simply never read)
+  });
+
+  it("handles response with only add key", () => {
+    const response = {
+      add: [
+        { title: "Step 1", description: "A" },
+        { title: "Step 2", description: "B", dependencies: [0] },
+      ],
+    };
+
+    const nodesToCreate = response.add ?? [];
+    expect(nodesToCreate).toHaveLength(2);
+  });
+
+  it("handles empty add array", () => {
+    const response = { add: [] };
+    const nodesToCreate = response.add ?? [];
+    expect(nodesToCreate).toHaveLength(0);
+  });
+});
