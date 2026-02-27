@@ -168,6 +168,19 @@ vi.mock("../plan-db.js", () => ({
   getNodeBySession: vi.fn(() => null),
   setExecutionBlocker: vi.fn(),
   setExecutionTaskSummary: vi.fn(),
+  setExecutionReportedStatus: vi.fn(),
+  archiveBlueprint: vi.fn((id: string) => {
+    if (id === "missing") return null;
+    return { id, title: "Archived BP", status: "draft", archivedAt: "2024-01-01T00:00:00Z", nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
+  }),
+  unarchiveBlueprint: vi.fn((id: string) => {
+    if (id === "missing") return null;
+    return { id, title: "Unarchived BP", status: "draft", nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
+  }),
+  getRelatedSessionsForNode: vi.fn(() => [
+    { id: "rs-1", nodeId: "node-1", blueprintId: "bp-1", sessionId: "session-1", type: "enrich", startedAt: "2024-01-01" },
+  ]),
+  createRelatedSession: vi.fn(),
 }));
 
 vi.mock("../plan-executor.js", () => ({
@@ -188,7 +201,17 @@ vi.mock("../plan-executor.js", () => ({
   })),
   addPendingTask: vi.fn(),
   removePendingTask: vi.fn(),
+  removeQueuedTask: vi.fn(() => ({ removed: true, running: false })),
   detectNewSession: vi.fn(() => null),
+  getGlobalQueueInfo: vi.fn(() => ({ active: false, totalPending: 0, tasks: [] })),
+  runClaudeInteractive: vi.fn(async () => ""),
+  withTimeout: vi.fn(async (promise: Promise<unknown>) => promise),
+  evaluateNodeCompletion: vi.fn(async () => null),
+  applyGraphMutations: vi.fn((_bpId: string, _nodeId: string, _eval: unknown, _bp: unknown) => ({
+    createdNodes: [{ id: "new-node-1", title: "Refinement", status: "pending" }],
+    rewiredDependencies: [],
+  })),
+  resumeNodeSession: vi.fn(async () => {}),
 }));
 
 vi.mock("../plan-generator.js", () => ({
@@ -218,7 +241,16 @@ import {
   getExecutionsForNode,
   setExecutionBlocker,
   setExecutionTaskSummary,
+  setExecutionReportedStatus,
+  archiveBlueprint,
+  unarchiveBlueprint,
+  getRelatedSessionsForNode,
 } from "../plan-db.js";
+import {
+  applyGraphMutations,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  getGlobalQueueInfo,
+} from "../plan-executor.js";
 // getQueueInfo is auto-mocked by vi.mock("../plan-executor.js")
 
 function createApp() {
@@ -652,6 +684,283 @@ describe("plan-routes", () => {
           order: 5,
         })
       );
+    });
+  });
+
+  // ─── Archive / Unarchive endpoints ────────────────────────
+
+  describe("POST /api/blueprints/:id/archive", () => {
+    it("archives a blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/archive");
+      expect(res.status).toBe(200);
+      expect(archiveBlueprint).toHaveBeenCalledWith("bp-1");
+      expect(res.body.archivedAt).toBeDefined();
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/archive");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/unarchive", () => {
+    it("unarchives a blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/unarchive");
+      expect(res.status).toBe(200);
+      expect(unarchiveBlueprint).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/unarchive");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── report-status callback endpoint ──────────────────────
+
+  describe("POST /api/blueprints/:id/executions/:execId/report-status", () => {
+    it("stores reported status 'done'", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/exec-1/report-status")
+        .send({ status: "done" });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(setExecutionReportedStatus).toHaveBeenCalledWith("exec-1", "done", undefined);
+    });
+
+    it("stores reported status 'failed' with reason", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/exec-1/report-status")
+        .send({ status: "failed", reason: "Tests didn't pass" });
+      expect(res.status).toBe(200);
+      expect(setExecutionReportedStatus).toHaveBeenCalledWith("exec-1", "failed", "Tests didn't pass");
+    });
+
+    it("stores reported status 'blocked'", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/exec-1/report-status")
+        .send({ status: "blocked", reason: "Need AWS credentials" });
+      expect(res.status).toBe(200);
+      expect(setExecutionReportedStatus).toHaveBeenCalledWith("exec-1", "blocked", "Need AWS credentials");
+    });
+
+    it("returns 400 for invalid status", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/exec-1/report-status")
+        .send({ status: "invalid" });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 for missing status", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/exec-1/report-status")
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/executions/exec-1/report-status")
+        .send({ status: "done" });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing execution", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/executions/missing-exec/report-status")
+        .send({ status: "done" });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── evaluation-callback endpoint ─────────────────────────
+
+  describe("POST /api/blueprints/:id/nodes/:nodeId/evaluation-callback", () => {
+    it("accepts COMPLETE evaluation with no mutations", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/evaluation-callback")
+        .send({ status: "COMPLETE", evaluation: "Task fully done", mutations: [] });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.status).toBe("COMPLETE");
+      // COMPLETE should not call applyGraphMutations
+      expect(applyGraphMutations).not.toHaveBeenCalled();
+    });
+
+    it("accepts NEEDS_REFINEMENT with INSERT_BETWEEN mutation", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/evaluation-callback")
+        .send({
+          status: "NEEDS_REFINEMENT",
+          evaluation: "Missing validation",
+          mutations: [{ action: "INSERT_BETWEEN", new_node: { title: "Add validation", description: "Add input validation" } }],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("NEEDS_REFINEMENT");
+      expect(applyGraphMutations).toHaveBeenCalled();
+    });
+
+    it("accepts HAS_BLOCKER with ADD_SIBLING mutation", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/evaluation-callback")
+        .send({
+          status: "HAS_BLOCKER",
+          evaluation: "Needs AWS creds",
+          mutations: [{ action: "ADD_SIBLING", new_node: { title: "Wait for creds", description: "Contact ops" } }],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("HAS_BLOCKER");
+      expect(applyGraphMutations).toHaveBeenCalled();
+    });
+
+    it("returns 400 for invalid status", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/evaluation-callback")
+        .send({ status: "INVALID", evaluation: "test", mutations: [] });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/evaluation-callback")
+        .send({ status: "COMPLETE", evaluation: "test", mutations: [] });
+      expect(res.status).toBe(404);
+    });
+
+    it("filters mutations without required fields", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/evaluation-callback")
+        .send({
+          status: "NEEDS_REFINEMENT",
+          evaluation: "test",
+          mutations: [
+            { action: "INSERT_BETWEEN", new_node: { title: "Valid", description: "desc" } },
+            { action: null, new_node: { title: "Invalid" } },
+            { action: "ADD_SIBLING" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      // applyGraphMutations should be called with only the valid mutation
+      expect(applyGraphMutations).toHaveBeenCalled();
+    });
+  });
+
+  // ─── batch-create endpoint ────────────────────────────────
+
+  describe("POST /api/blueprints/:blueprintId/nodes/batch-create", () => {
+    it("creates multiple nodes at once", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/batch-create")
+        .send([
+          { title: "Step A", description: "Do A" },
+          { title: "Step B", description: "Do B", dependencies: [0] },
+        ]);
+      expect(res.status).toBe(201);
+      expect(res.body.created).toBe(2);
+      expect(res.body.nodes).toHaveLength(2);
+    });
+
+    it("skips entries with missing title", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/batch-create")
+        .send([
+          { title: "Valid", description: "ok" },
+          { description: "no title" },
+        ]);
+      expect(res.status).toBe(201);
+      expect(res.body.created).toBe(1);
+    });
+
+    it("returns 400 for non-array body", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/batch-create")
+        .send({ title: "Not an array" });
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/batch-create")
+        .send([{ title: "Step" }]);
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── global-status endpoint ───────────────────────────────
+
+  describe("GET /api/global-status", () => {
+    it("returns global queue info", async () => {
+      const res = await request(app).get("/api/global-status");
+      expect(res.status).toBe(200);
+      expect(res.body.active).toBe(false);
+      expect(res.body.totalPending).toBe(0);
+      expect(res.body.tasks).toEqual([]);
+    });
+  });
+
+  // ─── related-sessions endpoint ────────────────────────────
+
+  describe("GET /api/blueprints/:id/nodes/:nodeId/related-sessions", () => {
+    it("returns related sessions for a node", async () => {
+      const res = await request(app).get("/api/blueprints/bp-1/nodes/node-1/related-sessions");
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(getRelatedSessionsForNode).toHaveBeenCalledWith("node-1");
+    });
+  });
+
+  // ─── includeArchived query param ──────────────────────────
+
+  describe("GET /api/blueprints with includeArchived", () => {
+    it("passes includeArchived=true filter", async () => {
+      await request(app).get("/api/blueprints?includeArchived=true");
+      expect(listBlueprints).toHaveBeenCalledWith(
+        expect.objectContaining({ includeArchived: true })
+      );
+    });
+
+    it("defaults includeArchived to false", async () => {
+      await request(app).get("/api/blueprints");
+      expect(listBlueprints).toHaveBeenCalledWith(
+        expect.objectContaining({ includeArchived: false })
+      );
+    });
+  });
+
+  // ─── Run node with dependency validation ──────────────────
+
+  describe("POST /api/blueprints/:id/nodes/:nodeId/run", () => {
+    it("queues a pending node for execution", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/run");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("queued");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/run");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Enrichment callback endpoint ─────────────────────────
+
+  describe("POST /api/enrichment-callback/:requestId", () => {
+    it("returns 404 for unknown request ID", async () => {
+      const res = await request(app)
+        .post("/api/enrichment-callback/unknown-id")
+        .send({ title: "Test", description: "Desc" });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for unregistered requestId even with missing title", async () => {
+      // "some-id" was never registered in enrichmentCallbacks map,
+      // so the endpoint returns 404 before reaching body validation
+      const res = await request(app)
+        .post("/api/enrichment-callback/some-id")
+        .send({ description: "No title" });
+      expect(res.status).toBe(404);
     });
   });
 });

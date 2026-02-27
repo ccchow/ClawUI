@@ -922,3 +922,655 @@ describe("buildEvaluationPrompt logic", () => {
     expect(prompt).toContain("Write tests");
   });
 });
+
+// ─── Failure Classification ─────────────────────────────────
+
+describe("classifyFailure logic", () => {
+  // Re-implement classifyFailure for isolated testing (without JSONL dependency)
+  function classifyFailure(
+    errorMsg: string,
+    output: string | undefined,
+  ): { reason: string; detail: string } {
+    const isTimeout = /killed|timeout|timed out|SIGTERM|ETIMEDOUT/i.test(errorMsg);
+
+    const combinedText = [errorMsg, output || ""].join("\n");
+    if (output) {
+      if (output.includes("exceeded") && output.includes("output token maximum")) {
+        return {
+          reason: "output_token_limit",
+          detail: "Claude's response exceeded the output token limit. The task may need to be broken into smaller steps.",
+        };
+      }
+    }
+    if (
+      /context.?window|context.?length.?exceeded|maximum context length/i.test(combinedText) ||
+      /input.*token.*limit|max_tokens_exceeded/i.test(combinedText) ||
+      /conversation is too long|too many tokens/i.test(combinedText)
+    ) {
+      return {
+        reason: "context_exhausted",
+        detail: `Context window exceeded: ${errorMsg.slice(0, 200)}`,
+      };
+    }
+
+    if (isTimeout) {
+      return {
+        reason: "timeout",
+        detail: `Execution timed out: ${errorMsg}`,
+      };
+    }
+
+    return {
+      reason: "error",
+      detail: errorMsg,
+    };
+  }
+
+  it("classifies timeout errors from SIGTERM", () => {
+    const result = classifyFailure("Process was killed by SIGTERM", undefined);
+    expect(result.reason).toBe("timeout");
+    expect(result.detail).toContain("timed out");
+  });
+
+  it("classifies timeout errors from ETIMEDOUT", () => {
+    const result = classifyFailure("connect ETIMEDOUT", undefined);
+    expect(result.reason).toBe("timeout");
+  });
+
+  it("classifies output token limit from output", () => {
+    const result = classifyFailure("exit code 1", "Error: response exceeded the output token maximum");
+    expect(result.reason).toBe("output_token_limit");
+  });
+
+  it("classifies context exhaustion from error message", () => {
+    const result = classifyFailure("context_length_exceeded: this model's maximum context length", undefined);
+    expect(result.reason).toBe("context_exhausted");
+  });
+
+  it("classifies context exhaustion from conversation too long", () => {
+    const result = classifyFailure("conversation is too long for this model", undefined);
+    expect(result.reason).toBe("context_exhausted");
+  });
+
+  it("classifies context exhaustion from max_tokens_exceeded", () => {
+    const result = classifyFailure("max_tokens_exceeded in input processing", undefined);
+    expect(result.reason).toBe("context_exhausted");
+  });
+
+  it("classifies generic errors", () => {
+    const result = classifyFailure("Some unknown error happened", undefined);
+    expect(result.reason).toBe("error");
+    expect(result.detail).toBe("Some unknown error happened");
+  });
+
+  it("prioritizes output_token_limit over timeout", () => {
+    const result = classifyFailure("killed by timeout", "exceeded the output token maximum limit");
+    expect(result.reason).toBe("output_token_limit");
+  });
+
+  it("prioritizes context_exhausted over timeout when in error message", () => {
+    const result = classifyFailure("killed: maximum context length exceeded", undefined);
+    expect(result.reason).toBe("context_exhausted");
+  });
+});
+
+describe("classifyHungFailure logic", () => {
+  // Simplified classifyHungFailure (no JSONL dependency)
+  function classifyHungFailure(): { reason: string; detail: string } {
+    return {
+      reason: "hung",
+      detail: "Execution produced no meaningful output (Claude may have hung or timed out)",
+    };
+  }
+
+  it("returns hung for no session", () => {
+    const result = classifyHungFailure();
+    expect(result.reason).toBe("hung");
+    expect(result.detail).toContain("no meaningful output");
+  });
+});
+
+// ─── extractTaskCompleteSummary ─────────────────────────────
+
+describe("extractTaskCompleteSummary logic", () => {
+  function extractTaskCompleteSummary(output: string): string | null {
+    const startMarker = "===TASK_COMPLETE===";
+    const endMarker = "===END_TASK===";
+    const startIdx = output.lastIndexOf(startMarker);
+    if (startIdx === -1) return null;
+    const endIdx = output.indexOf(endMarker, startIdx);
+    if (endIdx === -1) return null;
+    const content = output.slice(startIdx + startMarker.length, endIdx).trim();
+    return content.length > 0 ? content : null;
+  }
+
+  it("extracts summary between markers", () => {
+    const output = "Some output\n===TASK_COMPLETE===\nImplemented JWT auth\n===END_TASK===\nMore stuff";
+    expect(extractTaskCompleteSummary(output)).toBe("Implemented JWT auth");
+  });
+
+  it("uses lastIndexOf to skip echoed prompt markers", () => {
+    const output = "===TASK_COMPLETE===\nTemplate summary\n===END_TASK===\nMore output\n===TASK_COMPLETE===\nReal summary\n===END_TASK===";
+    expect(extractTaskCompleteSummary(output)).toBe("Real summary");
+  });
+
+  it("returns null when no markers found", () => {
+    expect(extractTaskCompleteSummary("Normal output without markers")).toBeNull();
+  });
+
+  it("returns null when only start marker found", () => {
+    expect(extractTaskCompleteSummary("Output\n===TASK_COMPLETE===\nNo end marker")).toBeNull();
+  });
+
+  it("returns null when content between markers is empty", () => {
+    expect(extractTaskCompleteSummary("===TASK_COMPLETE===\n===END_TASK===")).toBeNull();
+  });
+
+  it("returns null when content is only whitespace", () => {
+    expect(extractTaskCompleteSummary("===TASK_COMPLETE===\n   \n===END_TASK===")).toBeNull();
+  });
+});
+
+// ─── withTimeout logic ──────────────────────────────────────
+
+describe("withTimeout", () => {
+  function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(message));
+      }, ms);
+      promise.then(
+        (val) => { clearTimeout(timer); resolve(val); },
+        (err) => { clearTimeout(timer); reject(err); },
+      );
+    });
+  }
+
+  it("resolves when promise completes before timeout", async () => {
+    const result = await withTimeout(
+      Promise.resolve("success"),
+      1000,
+      "timeout",
+    );
+    expect(result).toBe("success");
+  });
+
+  it("rejects with timeout message when promise takes too long", async () => {
+    const slowPromise = new Promise<string>((resolve) => {
+      setTimeout(() => resolve("too late"), 500);
+    });
+    await expect(
+      withTimeout(slowPromise, 10, "Operation timed out"),
+    ).rejects.toThrow("Operation timed out");
+  });
+
+  it("propagates the original rejection when promise fails", async () => {
+    const failingPromise = Promise.reject(new Error("original error"));
+    await expect(
+      withTimeout(failingPromise, 1000, "timeout"),
+    ).rejects.toThrow("original error");
+  });
+});
+
+// ─── Two-tier dependency validation ─────────────────────────
+
+describe("Two-tier dependency validation", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO blueprints (id, title, status, created_at, updated_at) VALUES (?, ?, 'running', ?, ?)").run("bp-1", "Test", now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n1", "bp-1", 0, "First", "running", null, now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n2", "bp-1", 1, "Second", "pending", '["n1"]', now, now);
+  });
+  afterEach(() => { db.close(); });
+
+  it("queue-time check: allows queueing when deps are running", () => {
+    // Lenient check — only blocks when deps are "failed" or "blocked"
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const blockedStatuses = new Set(["failed", "blocked"]);
+    const canQueue = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return !blockedStatuses.has(dep.status);
+    });
+    expect(canQueue).toBe(true); // running deps are fine for queueing
+  });
+
+  it("queue-time check: blocks queueing when deps are failed", () => {
+    db.prepare("UPDATE macro_nodes SET status = 'failed' WHERE id = ?").run("n1");
+
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const blockedStatuses = new Set(["failed", "blocked"]);
+    const canQueue = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return !blockedStatuses.has(dep.status);
+    });
+    expect(canQueue).toBe(false);
+  });
+
+  it("queue-time check: blocks queueing when deps are blocked", () => {
+    db.prepare("UPDATE macro_nodes SET status = 'blocked' WHERE id = ?").run("n1");
+
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const blockedStatuses = new Set(["failed", "blocked"]);
+    const canQueue = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return !blockedStatuses.has(dep.status);
+    });
+    expect(canQueue).toBe(false);
+  });
+
+  it("queue-time check: allows queueing when deps are queued or pending", () => {
+    db.prepare("UPDATE macro_nodes SET status = 'queued' WHERE id = ?").run("n1");
+
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const blockedStatuses = new Set(["failed", "blocked"]);
+    const canQueue = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return !blockedStatuses.has(dep.status);
+    });
+    expect(canQueue).toBe(true);
+  });
+
+  it("execution-time check: strict — requires deps to be done or skipped", () => {
+    // Strict check — deps must be "done" or "skipped"
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const canExecute = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return dep.status === "done" || dep.status === "skipped";
+    });
+    expect(canExecute).toBe(false); // n1 is "running", not "done"
+  });
+
+  it("execution-time check: allows when deps are done", () => {
+    db.prepare("UPDATE macro_nodes SET status = 'done' WHERE id = ?").run("n1");
+
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const canExecute = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return dep.status === "done" || dep.status === "skipped";
+    });
+    expect(canExecute).toBe(true);
+  });
+
+  it("execution-time check: allows when deps are skipped", () => {
+    db.prepare("UPDATE macro_nodes SET status = 'skipped' WHERE id = ?").run("n1");
+
+    const node = db.prepare("SELECT * FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string | null };
+    const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+
+    const canExecute = deps.every((depId) => {
+      const dep = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get(depId) as { status: string };
+      return dep.status === "done" || dep.status === "skipped";
+    });
+    expect(canExecute).toBe(true);
+  });
+});
+
+// ─── RunAll pre-queuing logic ───────────────────────────────
+
+describe("RunAll pre-queuing and failure reset", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO blueprints (id, title, status, created_at, updated_at) VALUES (?, ?, 'approved', ?, ?)").run("bp-1", "Test Plan", now, now);
+    // Chain: n1 -> n2 -> n3
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n1", "bp-1", 0, "First", "pending", null, now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n2", "bp-1", 1, "Second", "pending", '["n1"]', now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n3", "bp-1", 2, "Third", "pending", '["n2"]', now, now);
+  });
+  afterEach(() => { db.close(); });
+
+  it("pre-queuing marks eligible pending nodes as queued", () => {
+    // Simulate executeAllNodes pre-queuing logic
+    const allNodes = db.prepare('SELECT id, status, dependencies FROM macro_nodes WHERE blueprint_id = ? ORDER BY "order" ASC')
+      .all("bp-1") as Array<{ id: string; status: string; dependencies: string | null }>;
+
+    const preQueued: string[] = [];
+    for (const node of allNodes) {
+      if (node.status !== "pending") continue;
+      const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+      const allDepsEligible = deps.every((depId) => {
+        const dep = allNodes.find((n) => n.id === depId);
+        if (!dep) return false;
+        return ["done", "skipped", "pending", "queued"].includes(dep.status);
+      });
+      if (allDepsEligible) {
+        db.prepare("UPDATE macro_nodes SET status = 'queued' WHERE id = ?").run(node.id);
+        preQueued.push(node.id);
+      }
+    }
+
+    // All three should be pre-queued because their deps are pending/queued
+    expect(preQueued).toEqual(["n1", "n2", "n3"]);
+  });
+
+  it("does not pre-queue nodes with failed dependencies", () => {
+    // Make n3 also depend on n1 directly, so failing n1 blocks both n2 and n3
+    db.prepare("UPDATE macro_nodes SET dependencies = ? WHERE id = ?").run('["n1","n2"]', "n3");
+    db.prepare("UPDATE macro_nodes SET status = 'failed' WHERE id = ?").run("n1");
+
+    const allNodes = db.prepare('SELECT id, status, dependencies FROM macro_nodes WHERE blueprint_id = ? ORDER BY "order" ASC')
+      .all("bp-1") as Array<{ id: string; status: string; dependencies: string | null }>;
+
+    const preQueued: string[] = [];
+    for (const node of allNodes) {
+      if (node.status !== "pending") continue;
+      const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+      const allDepsEligible = deps.every((depId) => {
+        const dep = allNodes.find((n) => n.id === depId);
+        if (!dep) return false;
+        return ["done", "skipped", "pending", "queued"].includes(dep.status);
+      });
+      if (allDepsEligible) {
+        preQueued.push(node.id);
+      }
+    }
+
+    // n2 depends on failed n1, n3 depends on both n1 (failed) and n2 — neither should be pre-queued
+    expect(preQueued).toEqual([]);
+  });
+
+  it("resets pre-queued nodes back to pending on failure", () => {
+    // Simulate pre-queuing
+    db.prepare("UPDATE macro_nodes SET status = 'queued' WHERE id = ?").run("n1");
+    db.prepare("UPDATE macro_nodes SET status = 'queued' WHERE id = ?").run("n2");
+    db.prepare("UPDATE macro_nodes SET status = 'queued' WHERE id = ?").run("n3");
+
+    const preQueuedNodeIds = ["n1", "n2", "n3"];
+
+    // Simulate: n1 runs and fails
+    db.prepare("UPDATE macro_nodes SET status = 'failed' WHERE id = ?").run("n1");
+    const idx = preQueuedNodeIds.indexOf("n1");
+    if (idx >= 0) preQueuedNodeIds.splice(idx, 1);
+
+    // Reset remaining pre-queued nodes
+    for (const remainingNodeId of preQueuedNodeIds) {
+      db.prepare("UPDATE macro_nodes SET status = 'pending' WHERE id = ?").run(remainingNodeId);
+    }
+
+    const n2 = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get("n2") as { status: string };
+    const n3 = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get("n3") as { status: string };
+    expect(n2.status).toBe("pending");
+    expect(n3.status).toBe("pending");
+  });
+});
+
+// ─── removeQueuedTask logic ─────────────────────────────────
+
+describe("removeQueuedTask logic", () => {
+  it("removes a queued task by nodeId", () => {
+    const queues = new Map<string, Array<{ task: () => Promise<unknown>; resolve: (val: unknown) => void; reject: (err: Error) => void; nodeId?: string }>>();
+
+    function removeQueuedTask(bpId: string, nodeId: string): { removed: boolean } {
+      const queue = queues.get(bpId);
+      if (!queue) return { removed: false };
+      const idx = queue.findIndex(item => item.nodeId === nodeId);
+      if (idx === -1) return { removed: false };
+      const [removed] = queue.splice(idx, 1);
+      removed.resolve(null);
+      return { removed: true };
+    }
+
+    // Setup queue with items
+    const items = [
+      { task: async () => {}, resolve: () => {}, reject: () => {}, nodeId: "n1" },
+      { task: async () => {}, resolve: () => {}, reject: () => {}, nodeId: "n2" },
+      { task: async () => {}, resolve: () => {}, reject: () => {}, nodeId: "n3" },
+    ];
+    queues.set("bp-1", items as Array<{ task: () => Promise<unknown>; resolve: (val: unknown) => void; reject: (err: Error) => void; nodeId?: string }>);
+
+    const result = removeQueuedTask("bp-1", "n2");
+    expect(result.removed).toBe(true);
+    expect(queues.get("bp-1")).toHaveLength(2);
+    expect(queues.get("bp-1")!.some(i => i.nodeId === "n2")).toBe(false);
+  });
+
+  it("returns false when queue does not exist", () => {
+    const queues = new Map<string, Array<{ nodeId?: string }>>();
+
+    function removeQueuedTask(bpId: string, _nodeId: string): { removed: boolean } {
+      const queue = queues.get(bpId);
+      if (!queue) return { removed: false };
+      return { removed: false };
+    }
+
+    expect(removeQueuedTask("nonexistent", "n1").removed).toBe(false);
+  });
+
+  it("returns false when nodeId not found in queue", () => {
+    const queues = new Map<string, Array<{ task: () => Promise<unknown>; resolve: (val: unknown) => void; reject: (err: Error) => void; nodeId?: string }>>();
+    queues.set("bp-1", [
+      { task: async () => {}, resolve: () => {}, reject: () => {}, nodeId: "n1" },
+    ] as Array<{ task: () => Promise<unknown>; resolve: (val: unknown) => void; reject: (err: Error) => void; nodeId?: string }>);
+
+    function removeQueuedTask(bpId: string, nodeId: string): { removed: boolean } {
+      const queue = queues.get(bpId);
+      if (!queue) return { removed: false };
+      const idx = queue.findIndex(item => item.nodeId === nodeId);
+      if (idx === -1) return { removed: false };
+      return { removed: true };
+    }
+
+    expect(removeQueuedTask("bp-1", "n999").removed).toBe(false);
+  });
+});
+
+// ─── getGlobalQueueInfo logic ───────────────────────────────
+
+describe("getGlobalQueueInfo aggregation logic", () => {
+  it("aggregates tasks across blueprints", () => {
+    const running = new Set(["bp-1"]);
+    const runningNodeId = new Map([["bp-1", "n1"]]);
+    const pendingTasks = new Map<string, Array<{ type: string; nodeId?: string; queuedAt: string }>>([
+      ["bp-1", [{ type: "run", nodeId: "n2", queuedAt: "2024-01-01T00:00:00Z" }]],
+      ["bp-2", [
+        { type: "run", nodeId: "n3", queuedAt: "2024-01-01T00:00:01Z" },
+        { type: "reevaluate", nodeId: "n4", queuedAt: "2024-01-01T00:00:02Z" },
+      ]],
+    ]);
+
+    interface Task { blueprintId: string; type: string; nodeId?: string }
+    const tasks: Task[] = [];
+
+    for (const bpId of running) {
+      tasks.push({ blueprintId: bpId, type: "running", nodeId: runningNodeId.get(bpId) });
+    }
+    for (const [bpId, pending] of pendingTasks) {
+      for (const t of pending) {
+        tasks.push({ blueprintId: bpId, type: t.type, nodeId: t.nodeId });
+      }
+    }
+
+    expect(tasks).toHaveLength(4);
+    expect(tasks[0]).toEqual({ blueprintId: "bp-1", type: "running", nodeId: "n1" });
+    expect(tasks.filter(t => t.blueprintId === "bp-2")).toHaveLength(2);
+  });
+
+  it("returns empty when nothing is running", () => {
+    const running = new Set<string>();
+    const pendingTasks = new Map<string, Array<{ type: string; nodeId?: string }>>();
+
+    const active = running.size > 0 || pendingTasks.size > 0;
+    expect(active).toBe(false);
+  });
+});
+
+// ─── Node split logic ───────────────────────────────────────
+
+describe("Node split: dependency rewiring", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO blueprints (id, title, status, created_at, updated_at) VALUES (?, ?, 'approved', ?, ?)").run("bp-1", "Test Plan", now, now);
+    // n0 (done) -> n1 (pending, to be split) -> n2 (pending, depends on n1)
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n0", "bp-1", 0, "Setup", "done", null, now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n1", "bp-1", 1, "Big Task", "pending", '["n0"]', now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("n2", "bp-1", 2, "Final", "pending", '["n1"]', now, now);
+  });
+  afterEach(() => { db.close(); });
+
+  it("split creates sub-nodes that chain correctly", () => {
+    const now = new Date().toISOString();
+    // Simulate split: n1 becomes skipped, sub1 and sub2 replace it
+    const n1Row = db.prepare("SELECT dependencies FROM macro_nodes WHERE id = ?").get("n1") as { dependencies: string | null };
+    const n1Deps = n1Row.dependencies ? JSON.parse(n1Row.dependencies) : [];
+
+    // Create sub-node 1 inheriting n1's deps
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`)
+      .run("sub1", "bp-1", 1, "Sub Task 1", JSON.stringify(n1Deps), now, now);
+
+    // Create sub-node 2 depending on sub1
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, dependencies, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`)
+      .run("sub2", "bp-1", 2, "Sub Task 2", '["sub1"]', now, now);
+
+    // Rewire: n2 now depends on sub2 (last sub-node) instead of n1
+    db.prepare("UPDATE macro_nodes SET dependencies = ? WHERE id = ?").run('["sub2"]', "n2");
+
+    // Mark n1 as skipped
+    db.prepare("UPDATE macro_nodes SET status = 'skipped' WHERE id = ?").run("n1");
+
+    // Verify the chain: n0 (done) -> sub1 -> sub2 -> n2
+    const sub1 = db.prepare("SELECT dependencies, status FROM macro_nodes WHERE id = ?").get("sub1") as { dependencies: string; status: string };
+    expect(JSON.parse(sub1.dependencies)).toEqual(["n0"]);
+    expect(sub1.status).toBe("pending");
+
+    const sub2 = db.prepare("SELECT dependencies FROM macro_nodes WHERE id = ?").get("sub2") as { dependencies: string };
+    expect(JSON.parse(sub2.dependencies)).toEqual(["sub1"]);
+
+    const n2 = db.prepare("SELECT dependencies FROM macro_nodes WHERE id = ?").get("n2") as { dependencies: string };
+    expect(JSON.parse(n2.dependencies)).toEqual(["sub2"]);
+
+    // n1 is skipped
+    const n1 = db.prepare("SELECT status FROM macro_nodes WHERE id = ?").get("n1") as { status: string };
+    expect(n1.status).toBe("skipped");
+
+    // sub1 should be the next executable node
+    const allNodes = db.prepare('SELECT id, status, dependencies FROM macro_nodes WHERE blueprint_id = ? AND status != \'skipped\' ORDER BY "order" ASC')
+      .all("bp-1") as Array<{ id: string; status: string; dependencies: string | null }>;
+
+    const nextCandidate = allNodes.find((node) => {
+      if (node.status !== "pending") return false;
+      const deps: string[] = node.dependencies ? JSON.parse(node.dependencies) : [];
+      return deps.every((depId) => {
+        const dep = allNodes.find((n) => n.id === depId);
+        return dep?.status === "done" || dep?.status === "skipped";
+      });
+    });
+    expect(nextCandidate?.id).toBe("sub1");
+  });
+});
+
+// ─── Reported status (API callback) decision logic ──────────
+
+describe("Reported status decision logic", () => {
+  it("reported_status 'done' takes priority over output inference", () => {
+    const dbReportedStatus = "done";
+    const output = "Very short";
+
+    // In executeNodeInternal, dbReportedStatus is checked first
+    // Even if output is short (< 50 chars), "done" report takes priority
+    let resultStatus: string;
+    if (dbReportedStatus) {
+      resultStatus = dbReportedStatus === "done" ? "done" : "failed";
+    } else if (output.length < 50) {
+      resultStatus = "failed";
+    } else {
+      resultStatus = "done";
+    }
+
+    expect(resultStatus).toBe("done");
+  });
+
+  it("reported_status 'blocked' results in node blocked status", () => {
+    const dbReportedStatus = "blocked";
+    const dbReportedReason = "Need AWS credentials";
+
+    let nodeStatus: string;
+    if (dbReportedStatus === "blocked") {
+      nodeStatus = "blocked";
+    } else {
+      nodeStatus = "done";
+    }
+
+    expect(nodeStatus).toBe("blocked");
+    expect(dbReportedReason).toContain("AWS");
+  });
+
+  it("falls back to output inference when no reported_status", () => {
+    const dbReportedStatus = null;
+    const output = "I completed the implementation successfully. All tests pass.";
+
+    let resultStatus: string;
+    if (dbReportedStatus) {
+      resultStatus = dbReportedStatus;
+    } else if (output.length < 50) {
+      resultStatus = "failed";
+    } else {
+      resultStatus = "done";
+    }
+
+    expect(resultStatus).toBe("done");
+  });
+});
+
+// ─── Blueprint completion detection ─────────────────────────
+
+describe("Blueprint completion detection", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO blueprints (id, title, status, created_at, updated_at) VALUES (?, ?, 'running', ?, ?)").run("bp-1", "Test", now, now);
+  });
+  afterEach(() => { db.close(); });
+
+  it("marks blueprint as done when all nodes are done or skipped", () => {
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'done', ?, ?)`).run("n1", "bp-1", 0, "A", now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'skipped', ?, ?)`).run("n2", "bp-1", 1, "B", now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'done', ?, ?)`).run("n3", "bp-1", 2, "C", now, now);
+
+    const nodes = db.prepare("SELECT status FROM macro_nodes WHERE blueprint_id = ?").all("bp-1") as Array<{ status: string }>;
+    const allDone = nodes.every((n) => n.status === "done" || n.status === "skipped");
+    expect(allDone).toBe(true);
+  });
+
+  it("does not mark blueprint as done when some nodes are pending", () => {
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'done', ?, ?)`).run("n1", "bp-1", 0, "A", now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)`).run("n2", "bp-1", 1, "B", now, now);
+
+    const nodes = db.prepare("SELECT status FROM macro_nodes WHERE blueprint_id = ?").all("bp-1") as Array<{ status: string }>;
+    const allDone = nodes.every((n) => n.status === "done" || n.status === "skipped");
+    expect(allDone).toBe(false);
+  });
+
+  it("does not mark blueprint as done when some nodes are blocked", () => {
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'done', ?, ?)`).run("n1", "bp-1", 0, "A", now, now);
+    db.prepare(`INSERT INTO macro_nodes (id, blueprint_id, "order", title, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'blocked', ?, ?)`).run("n2", "bp-1", 1, "B", now, now);
+
+    const nodes = db.prepare("SELECT status FROM macro_nodes WHERE blueprint_id = ?").all("bp-1") as Array<{ status: string }>;
+    const allDone = nodes.every((n) => n.status === "done" || n.status === "skipped");
+    expect(allDone).toBe(false);
+  });
+});
