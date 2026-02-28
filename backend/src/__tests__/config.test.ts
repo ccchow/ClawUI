@@ -144,7 +144,7 @@ describe("config.ts", () => {
       it("prefers ~/.local/bin/claude over /usr/local/bin/claude", async () => {
         mockExistsSync.mockImplementation((p: any) => {
           const s = String(p);
-          return s.includes(".local/bin/claude") || s === "/usr/local/bin/claude";
+          return s.includes(".local/bin/claude") || s.includes(".local\\bin\\claude") || s === "/usr/local/bin/claude";
         });
         const { CLAUDE_PATH } = await import("../config.js");
         expect(CLAUDE_PATH).toContain(".local");

@@ -5,12 +5,13 @@
  * env cleaning, session detection) into a single class implementing AgentRuntime.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { CLAUDE_PATH, EXPECT_PATH } from "./config.js";
+import { CLAUDE_PATH, EXPECT_PATH, CLAUDE_CLI_JS } from "./config.js";
+import { cleanEnvForClaude, stripAnsi } from "./cli-utils.js";
 import { createLogger } from "./logger.js";
 import type { AgentRuntime, AgentCapabilities } from "./agent-runtime.js";
 import { registerRuntime } from "./agent-runtime.js";
@@ -18,6 +19,60 @@ import { registerRuntime } from "./agent-runtime.js";
 const log = createLogger("agent-claude");
 
 const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
+
+// ─── Windows spawn helper ────────────────────────────────────
+
+/**
+ * Spawn Claude CLI directly on Windows (no expect/TTY needed).
+ * Returns captured stdout (ANSI-stripped) and the child PID.
+ */
+function spawnClaudeWindows(
+  args: string[],
+  opts: { cwd?: string; timeout?: number },
+): Promise<{ stdout: string; pid?: number }> {
+  return new Promise((resolve, reject) => {
+    const cmd = CLAUDE_CLI_JS ? process.execPath : "claude";
+    const spawnArgs = CLAUDE_CLI_JS ? [CLAUDE_CLI_JS, ...args] : args;
+    const useShell = !CLAUDE_CLI_JS;
+
+    log.debug(`Spawning Claude (Windows): args=${args.slice(0, 4).join(" ")}, cwd=${opts.cwd || process.cwd()}`);
+
+    const child = spawn(cmd, spawnArgs, {
+      timeout: opts.timeout ?? EXEC_TIMEOUT,
+      cwd: opts.cwd || process.cwd(),
+      env: cleanEnvForClaude(),
+      shell: useShell,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    const pid = child.pid;
+    child.stdin.end();
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    child.on("error", (err) => {
+      reject(new Error(`Claude CLI spawn error: ${err.message}`));
+    });
+
+    child.on("close", (code) => {
+      const clean = stripAnsi(stdout).trim();
+
+      if (clean.length > 0) {
+        resolve({ stdout: clean, pid });
+        return;
+      }
+      if (code !== 0) {
+        reject(new Error(`Claude CLI error (exit ${code}): ${stderr.slice(0, 500)}`));
+        return;
+      }
+      resolve({ stdout: clean, pid });
+    });
+  });
+}
 
 export class ClaudeAgentRuntime implements AgentRuntime {
   readonly type = "claude" as const;
@@ -40,27 +95,27 @@ export class ClaudeAgentRuntime implements AgentRuntime {
   }
 
   cleanEnv(): NodeJS.ProcessEnv {
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-    return env;
-  }
-
-  /**
-   * Strip ANSI escape codes and carriage returns from CLI output.
-   */
-  private stripAnsi(text: string): string {
-    return text
-      .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
-      .replace(/\x1B\][^\x07]*\x07/g, "")
-      .replace(/\r/g, "")
-      .trim();
+    return cleanEnvForClaude();
   }
 
   /**
    * Run Claude in text output mode (--output-format text).
-   * Uses expect for TTY, captures output via temp file to avoid echo contamination.
+   * Uses expect for TTY on Unix; direct spawn on Windows.
    */
   runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+    // ── Windows: direct spawn ──
+    if (process.platform === "win32") {
+      return (async () => {
+        const { stdout, pid } = await spawnClaudeWindows(
+          ["--dangerously-skip-permissions", "--output-format", "text", "-p", prompt],
+          { cwd, timeout: EXEC_TIMEOUT },
+        );
+        if (pid && onPid) onPid(pid);
+        return stdout;
+      })();
+    }
+
+    // ── Unix: expect script ──
     return new Promise((resolve, reject) => {
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
@@ -111,13 +166,13 @@ close $of
           timeout: EXEC_TIMEOUT,
           maxBuffer: 10 * 1024 * 1024,
           cwd: cwd || process.cwd(),
-          env: this.cleanEnv(),
+          env: cleanEnvForClaude(),
         },
         (error) => {
           // Read output from file (avoids TTY echo contamination)
           let clean = "";
           try {
-            clean = this.stripAnsi(readFileSync(outputFile, "utf-8"));
+            clean = stripAnsi(readFileSync(outputFile, "utf-8")).trim();
           } catch { /* no output file */ }
 
           // Cleanup
@@ -149,6 +204,15 @@ close $of
    * Used for tasks where Claude directly calls API endpoints.
    */
   runSessionInteractive(prompt: string, cwd?: string): Promise<string> {
+    // ── Windows: direct spawn ──
+    if (process.platform === "win32") {
+      return spawnClaudeWindows(
+        ["--dangerously-skip-permissions", "-p", prompt],
+        { cwd, timeout: EXEC_TIMEOUT },
+      ).then(({ stdout }) => stdout);
+    }
+
+    // ── Unix: expect script ──
     return new Promise((resolve, reject) => {
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
@@ -175,7 +239,7 @@ catch {wait}
           timeout: EXEC_TIMEOUT,
           maxBuffer: 10 * 1024 * 1024,
           cwd: cwd || process.cwd(),
-          env: this.cleanEnv(),
+          env: cleanEnvForClaude(),
         },
         (error, stdout) => {
           try { unlinkSync(tmpExpect); } catch { /* ignore */ }
@@ -196,6 +260,19 @@ catch {wait}
    * Resume an existing session by ID with a continuation prompt.
    */
   resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+    // ── Windows: direct spawn ──
+    if (process.platform === "win32") {
+      return (async () => {
+        const { stdout, pid } = await spawnClaudeWindows(
+          ["--dangerously-skip-permissions", "--output-format", "text", "--resume", sessionId, "-p", prompt],
+          { cwd, timeout: EXEC_TIMEOUT },
+        );
+        if (pid && onPid) onPid(pid);
+        return stdout;
+      })();
+    }
+
+    // ── Unix: expect script ──
     return new Promise((resolve, reject) => {
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
@@ -246,12 +323,12 @@ close $of
           timeout: EXEC_TIMEOUT,
           maxBuffer: 10 * 1024 * 1024,
           cwd: cwd || process.cwd(),
-          env: this.cleanEnv(),
+          env: cleanEnvForClaude(),
         },
         (error) => {
           let clean = "";
           try {
-            clean = this.stripAnsi(readFileSync(outputFile, "utf-8"));
+            clean = stripAnsi(readFileSync(outputFile, "utf-8")).trim();
           } catch { /* no output file */ }
 
           try { unlinkSync(tmpExpect); } catch { /* ignore */ }
@@ -314,6 +391,21 @@ close $of
  * log_user 0, etc.). The runtime class methods are used by plan-executor.ts.
  */
 export function runClaudeTextMode(prompt: string, cwd?: string): Promise<string> {
+  // ── Windows: direct spawn ──
+  if (process.platform === "win32") {
+    return spawnClaudeWindows(
+      ["--dangerously-skip-permissions", "--output-format", "text", "-p", prompt],
+      { cwd, timeout: 200_000 },
+    ).then(({ stdout }) => {
+      if (stdout.length === 0) {
+        throw new Error("Claude returned empty output.");
+      }
+      log.debug(`Claude output length: ${stdout.length}, first 200 chars: ${stdout.slice(0, 200).replace(/\n/g, "\\n")}`);
+      return stdout;
+    });
+  }
+
+  // ── Unix: expect script ──
   return new Promise((resolve, reject) => {
     const promptFile = join(tmpdir(), `clawui-gen-${randomUUID()}.txt`);
     const outputFile = join(tmpdir(), `clawui-gen-${randomUUID()}.out`);
@@ -351,14 +443,11 @@ close $of
 `;
     writeFileSync(expectFile, expectScript, "utf-8");
 
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-
     execFile(EXPECT_PATH, [expectFile], {
       timeout: 200_000,
       maxBuffer: 10 * 1024 * 1024,
       cwd: cwd || process.cwd(),
-      env,
+      env: cleanEnvForClaude(),
     }, (error) => {
       let output = "";
       try {
@@ -369,11 +458,7 @@ close $of
       try { unlinkSync(outputFile); } catch { /* */ }
       try { unlinkSync(expectFile); } catch { /* */ }
 
-      output = output
-        .replace(/\x1B\[[0-9;]*[a-zA-Z]/g, "")
-        .replace(/\x1B\][^\x07]*\x07/g, "")
-        .replace(/\r/g, "")
-        .trim();
+      output = stripAnsi(output).trim();
 
       if (output.length === 0) {
         reject(new Error(`Claude returned empty output. expect error: ${error?.message?.slice(0, 300) ?? "none"}`));
@@ -392,6 +477,15 @@ close $of
 export function runClaudeInteractiveMode(prompt: string, cwd?: string): Promise<string> {
   const INTERACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 min
 
+  // ── Windows: direct spawn ──
+  if (process.platform === "win32") {
+    return spawnClaudeWindows(
+      ["--dangerously-skip-permissions", "-p", prompt],
+      { cwd, timeout: INTERACTIVE_TIMEOUT },
+    ).then(({ stdout }) => stdout);
+  }
+
+  // ── Unix: expect script ──
   return new Promise((resolve, reject) => {
     const tmpFile = join(tmpdir(), `clawui-gen-prompt-${randomUUID()}.txt`);
     writeFileSync(tmpFile, prompt, "utf-8");
@@ -411,9 +505,6 @@ catch {wait}
     const tmpExpect = join(tmpdir(), `clawui-gen-expect-${randomUUID()}.exp`);
     writeFileSync(tmpExpect, fullScript, "utf-8");
 
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
-
     execFile(
       EXPECT_PATH,
       [tmpExpect],
@@ -421,7 +512,7 @@ catch {wait}
         timeout: INTERACTIVE_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
         cwd: cwd || process.cwd(),
-        env,
+        env: cleanEnvForClaude(),
       },
       (error, stdout) => {
         try { unlinkSync(tmpExpect); } catch { /* ignore */ }
