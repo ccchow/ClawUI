@@ -143,16 +143,18 @@ describe("MarkdownContent", () => {
     const { container } = render(
       <MarkdownContent content="Hello" maxHeight="200px" />
     );
-    const div = container.firstChild as HTMLElement;
-    expect(div.style.maxHeight).toBe("200px");
+    const wrapper = container.firstChild as HTMLElement;
+    const innerDiv = wrapper.firstChild as HTMLElement;
+    expect(innerDiv.style.maxHeight).toBe("200px");
   });
 
   it("renders with maxHeight=none", () => {
     const { container } = render(
       <MarkdownContent content="Hello" maxHeight="none" />
     );
-    const div = container.firstChild as HTMLElement;
-    expect(div.style.maxHeight).toBe("");
+    const wrapper = container.firstChild as HTMLElement;
+    const innerDiv = wrapper.firstChild as HTMLElement;
+    expect(innerDiv.style.maxHeight).toBe("");
   });
 
   it("copy button has aria-label", () => {

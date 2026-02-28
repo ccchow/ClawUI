@@ -244,7 +244,7 @@ function CodeBlock({ content, lang }: { content: string; lang?: string }) {
           onClick={handleCopy}
           title="Copy to clipboard"
           aria-label={copied ? "Copied" : "Copy to clipboard"}
-          className="opacity-40 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-bg-hover"
+          className="opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1.5 sm:p-1 rounded hover:bg-bg-hover"
         >
           {copied ? (
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent-green">
@@ -274,17 +274,46 @@ export function MarkdownContent({
   maxHeight?: string | "none";
   className?: string;
 }) {
+  const [copiedAll, setCopiedAll] = useState(false);
   const blocks = useMemo(() => parseBlocks(content), [content]);
+
+  const handleCopyAll = useCallback(() => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 2000);
+    }).catch(() => { /* clipboard not available */ });
+  }, [content]);
 
   if (blocks.length === 0) return null;
 
   const heightStyle = maxHeight === "none" ? undefined : { maxHeight };
+  const showCopyAll = content.length >= 50;
 
   return (
-    <div
-      className={`space-y-3 text-sm text-text-primary leading-relaxed ${maxHeight !== "none" ? "overflow-y-auto" : ""} ${className}`}
-      style={heightStyle}
-    >
+    <div className="relative group/md">
+      {showCopyAll && (
+        <button
+          onClick={handleCopyAll}
+          title="Copy all content"
+          aria-label={copiedAll ? "Copied" : "Copy all content"}
+          className="absolute top-1 right-1 z-10 opacity-70 sm:opacity-0 sm:group-hover/md:opacity-100 transition-opacity p-1.5 sm:p-1 rounded hover:bg-bg-hover"
+        >
+          {copiedAll ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent-green">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          )}
+        </button>
+      )}
+      <div
+        className={`space-y-3 text-sm text-text-primary leading-relaxed ${maxHeight !== "none" ? "overflow-y-auto" : ""} ${className}`}
+        style={heightStyle}
+      >
       {blocks.map((block, i) => {
         switch (block.type) {
           case "code":
@@ -345,6 +374,7 @@ export function MarkdownContent({
             );
         }
       })}
+      </div>
     </div>
   );
 }

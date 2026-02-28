@@ -13,6 +13,9 @@ export interface TimelineNode {
   toolInput?: string;
   toolResult?: string;
   toolUseId?: string;
+  // Enrichment fields (merged from enrichments.json at query time)
+  bookmarked?: boolean;
+  annotation?: string;
 }
 
 export interface SessionMeta {

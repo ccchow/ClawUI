@@ -106,6 +106,17 @@ router.get("/api/sessions/:id/timeline", (req, res) => {
       res.status(404).json({ error: "Session not found or empty" });
       return;
     }
+
+    // Merge node enrichments (bookmarks, annotations) from enrichments.json
+    const enrichments = getEnrichments();
+    for (const node of nodes) {
+      const enrichment = enrichments.nodes[node.id];
+      if (enrichment) {
+        if (enrichment.bookmarked !== undefined) node.bookmarked = enrichment.bookmarked;
+        if (enrichment.annotation !== undefined) node.annotation = enrichment.annotation;
+      }
+    }
+
     res.json(nodes);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
