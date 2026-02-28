@@ -226,6 +226,7 @@ A well-configured environment = higher-quality nodes + fewer retries = significa
 ## 🔮 Coming Soon
 
 - **OpenClaw/Pi Support** — Open protocol for agent orchestration UIs to work with any coding agent backend.
+- **Codex CLI Support**
 - **Windows Support**
 
 ## 🤝 Contributing
