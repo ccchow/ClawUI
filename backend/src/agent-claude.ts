@@ -16,6 +16,7 @@ import { createLogger } from "./logger.js";
 import type { AgentRuntime, AgentCapabilities } from "./agent-runtime.js";
 import { registerRuntime } from "./agent-runtime.js";
 
+const log = createLogger("agent-claude");
 const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
 
 // ─── Windows spawn helper ────────────────────────────────────
