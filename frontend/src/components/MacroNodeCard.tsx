@@ -595,39 +595,41 @@ export function MacroNodeCard({
 
         {/* Edit mode description */}
         {isEditing && (
-          <div className="px-4 pb-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+          <div className="px-4 pb-4" onClick={(e) => e.stopPropagation()}>
             <MarkdownEditor
               value={editDescription}
               onChange={setEditDescription}
               placeholder="Description (supports Markdown and image paste)"
               disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
+              actions={
+                <>
+                  <button
+                    onClick={handleEditSave}
+                    disabled={!editTitle.trim() || saving || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
+                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {saving ? "Saving..." : "Save"}
+                  </button>
+                  <button
+                    onClick={handleEnrich}
+                    disabled={!editTitle.trim() || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={enriching || enrichQueued ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
+                    className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {enriching || enrichQueued ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
+                  </button>
+                  <button
+                    onClick={handleEditCancel}
+                    disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
+                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Cancel
+                  </button>
+                </>
+              }
             />
-            <div className="flex gap-2">
-              <button
-                onClick={handleEditSave}
-                disabled={!editTitle.trim() || saving || enriching || enrichQueued || reevaluating || reevaluateQueued}
-                title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
-                className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {saving ? "Saving..." : "Save"}
-              </button>
-              <button
-                onClick={handleEnrich}
-                disabled={!editTitle.trim() || enriching || enrichQueued || reevaluating || reevaluateQueued}
-                title={enriching || enrichQueued ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
-                className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {enriching || enrichQueued ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
-              </button>
-              <button
-                onClick={handleEditCancel}
-                disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
-                title={enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
-                className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Cancel
-              </button>
-            </div>
           </div>
         )}
 
