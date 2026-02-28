@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.js.map
 *.d.ts.map
+*.tsbuildinfo
 .env
 .DS_Store
 coverage/
@@ -16,6 +17,7 @@ coverage/
 
 # ClawUI runtime data (local to each installation)
 .clawui/
+.clawui-test/
 
 # Screenshots
 dashboard-*.png
