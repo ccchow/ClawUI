@@ -136,6 +136,20 @@ export function MacroNodeCard({
     }
   }, [enrichQueued, isEditing, node.title, node.description]);
 
+  // Clear optimistic running flag once node status transitions to queued/running/done/blocked
+  useEffect(() => {
+    if (running && node.status !== "pending" && node.status !== "failed") {
+      setRunning(false);
+    }
+  }, [running, node.status]);
+
+  // Clear optimistic resume flag once node status transitions away from failed
+  useEffect(() => {
+    if (resumingExecId && node.status !== "failed") {
+      setResumingExecId(null);
+    }
+  }, [resumingExecId, node.status]);
+
   useEffect(() => {
     if (!mobileMenuOpen) return;
     const handler = (e: MouseEvent) => {
@@ -159,14 +173,15 @@ export function MacroNodeCard({
     if (!blueprintId || running) return;
     setRunning(true);
     setWarning(null);
-    runNode(blueprintId, node.id)
-      .catch((err) => {
-        setWarning(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        setRunning(false);
-        onRefresh?.();
-      });
+    try {
+      await runNode(blueprintId, node.id);
+      // Fire-and-forget resolved — keep running=true as optimistic state.
+      // onRefresh triggers parent poll; useEffect clears running once status transitions.
+      onRefresh?.();
+    } catch (err) {
+      setWarning(err instanceof Error ? err.message : String(err));
+      setRunning(false);
+    }
   };
 
   const handleEditStart = (e: React.MouseEvent) => {
@@ -727,11 +742,8 @@ export function MacroNodeCard({
                                 e.stopPropagation();
                                 setResumingExecId(exec.id);
                                 resumeNodeSession(blueprintId, node.id, exec.id)
-                                  .catch(() => {})
-                                  .finally(() => {
-                                    setResumingExecId(null);
-                                    onRefresh?.();
-                                  });
+                                  .then(() => onRefresh?.())
+                                  .catch(() => setResumingExecId(null));
                               }}
                               disabled={resumingExecId === exec.id || running}
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-green-600/15 text-green-500 hover:bg-green-600/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"

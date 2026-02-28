@@ -205,6 +205,20 @@ export default function NodeDetailPage() {
     }
   }, [enrichQueued, editing, node]);
 
+  // Clear optimistic running flag once node status transitions to queued/running/done/blocked
+  useEffect(() => {
+    if (running && node && node.status !== "pending" && node.status !== "failed") {
+      setRunning(false);
+    }
+  }, [running, node]);
+
+  // Clear optimistic resume flag once node status transitions away from failed
+  useEffect(() => {
+    if (resumingExecId && node && node.status !== "failed") {
+      setResumingExecId(null);
+    }
+  }, [resumingExecId, node]);
+
   // Detect status transition from running/queued → done/failed/blocked and start post-completion polling
   useEffect(() => {
     const prev = prevStatusRef.current;
@@ -322,14 +336,15 @@ export default function NodeDetailPage() {
     if (running) return;
     setRunning(true);
     setWarning(null);
-    runNode(blueprintId, nodeId)
-      .catch((err) => {
-        setWarning(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        setRunning(false);
-        loadData();
-      });
+    try {
+      await runNode(blueprintId, nodeId);
+      // Fire-and-forget resolved — keep running=true as optimistic state.
+      // loadData triggers poll; useEffect clears running once status transitions.
+      loadData();
+    } catch (err) {
+      setWarning(err instanceof Error ? err.message : String(err));
+      setRunning(false);
+    }
   };
 
   const handleEnrich = async () => {
@@ -1261,10 +1276,10 @@ export default function NodeDetailPage() {
                             onClick={() => {
                               setResumingExecId(exec.id);
                               resumeNodeSession(blueprintId, nodeId, exec.id)
-                                .catch((err) => setWarning(err instanceof Error ? err.message : String(err)))
-                                .finally(() => {
+                                .then(() => loadData())
+                                .catch((err) => {
+                                  setWarning(err instanceof Error ? err.message : String(err));
                                   setResumingExecId(null);
-                                  loadData();
                                 });
                             }}
                             disabled={resumingExecId === exec.id || isRunning}
