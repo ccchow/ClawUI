@@ -686,7 +686,7 @@ describe("OpenClawAgentRuntime", () => {
   describe("runSession", () => {
     it("executes openclaw agent with --json flag", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, JSON.stringify({ message: { content: "Done!" } }), "");
         return { pid: 12345 };
       });
@@ -705,7 +705,7 @@ describe("OpenClawAgentRuntime", () => {
     it("calls onPid callback with process ID", async () => {
       const runtime = new OpenClawAgentRuntime();
       const onPid = vi.fn();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, '{"message":{"content":"ok"}}', "");
         return { pid: 42 };
       });
@@ -716,7 +716,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("returns stdout on error if output is present", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(new Error("exit code 1"), '{"message":{"content":"partial result"}}', "some stderr");
         return { pid: 1 };
       });
@@ -727,7 +727,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("rejects on error when no output", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(new Error("CLI crashed"), "", "fatal error");
         return { pid: 1 };
       });
@@ -737,7 +737,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("handles plain text output (non-JSON)", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, "Plain text response from openclaw", "");
         return { pid: 1 };
       });
@@ -756,7 +756,7 @@ describe("OpenClawAgentRuntime", () => {
           ],
         },
       };
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, JSON.stringify(response), "");
         return { pid: 1 };
       });
@@ -769,7 +769,7 @@ describe("OpenClawAgentRuntime", () => {
   describe("resumeSession", () => {
     it("uses the provided session ID (not a new UUID)", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, '{"message":{"content":"Resumed"}}', "");
         return { pid: 99 };
       });
@@ -788,7 +788,7 @@ describe("OpenClawAgentRuntime", () => {
     it("calls onPid callback", async () => {
       const runtime = new OpenClawAgentRuntime();
       const onPid = vi.fn();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(null, '{"message":{"content":"ok"}}', "");
         return { pid: 77 };
       });
@@ -799,7 +799,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("returns partial output on error", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(new Error("timeout"), "partial output text", "");
         return { pid: 1 };
       });
@@ -810,7 +810,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("rejects when error and no output", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(new Error("fail"), "", "");
         return { pid: 1 };
       });
@@ -822,7 +822,7 @@ describe("OpenClawAgentRuntime", () => {
   describe("runSessionInteractive", () => {
     it("executes without --json flag", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         // Verify no --json flag
         expect(args).not.toContain("--json");
         cb(null, "interactive output", "");
@@ -835,7 +835,7 @@ describe("OpenClawAgentRuntime", () => {
 
     it("rejects on error", async () => {
       const runtime = new OpenClawAgentRuntime();
-      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+      mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
         cb(new Error("interactive failed"), "", "err");
         return { pid: 1 };
       });
@@ -882,9 +882,9 @@ describe("OpenClawAgentRuntime", () => {
       });
 
       // stat returns newer mtime for both
-      mockStatSync.mockImplementation((p: string) => ({
+      mockStatSync.mockReturnValue({
         mtime: afterTime,
-      }));
+      });
 
       // First file matches CWD, second doesn't
       mockReadFileSync.mockImplementation((p: string) => {
@@ -1053,7 +1053,7 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
 
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       cb(null, '{"message":{"content":"ok"}}', "");
       return { pid: 1 };
     });
@@ -1071,7 +1071,7 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
 
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       cb(null, '{"message":{"content":"ok"}}', "");
       return { pid: 1 };
     });
@@ -1088,7 +1088,7 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
 
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       cb(null, '{"message":{"content":"ok"}}', "");
       return { pid: 1 };
     });
@@ -1105,7 +1105,7 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
 
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       cb(null, '{"message":{"content":"ok"}}', "");
       return { pid: 1 };
     });
@@ -1122,7 +1122,7 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
 
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: Function) => {
+    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
       cb(null, '{"message":{"content":"ok"}}', "");
       return { pid: 1 };
     });

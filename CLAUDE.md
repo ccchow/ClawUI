@@ -74,7 +74,7 @@ Next.js 14, React 18, Tailwind CSS 3, dark/light theme via `next-themes`. For de
 - **Node numbering**: Always use `node.order + 1` for display numbers, never array index
 - **Session ID validation**: All endpoints must call `validateSessionId()` before shell commands. See [`docs/BACKEND-ARCHITECTURE.md`](docs/BACKEND-ARCHITECTURE.md) for security patterns.
 - **Error sanitization**: Never expose internal error messages in API responses — use `safeError()` helper
-- **Agent runtime side-effect imports**: Modules using `getActiveRuntime()` or `getRegisteredRuntimes()` must import all runtime modules as side-effects. Currently done in `plan-executor.ts` and `db.ts`.
+- **Agent runtime side-effect imports**: Modules using `getActiveRuntime()` or `getRegisteredRuntimes()` must import all runtime modules as side-effects. Currently done in `plan-executor.ts`, `plan-generator.ts`, and `db.ts`.
 
 ## Key Design Decisions
 
@@ -102,6 +102,8 @@ For the full list, see [`docs/CODING-GOTCHAS.md`](docs/CODING-GOTCHAS.md). Most 
 - **In-memory queue vs SQLite**: `blueprintQueues`/`blueprintPendingTasks` are in-memory only. `requeueOrphanedNodes()` bridges on startup.
 - **Project path encoding**: Hyphens in directory names are ambiguous. `decodeProjectPath()` uses filesystem-aware backtracking — never use naive `replace(/-/g, "/")`.
 - **Multi-agent project ID namespacing**: Claude IDs unprefixed, Pi `pi:<dirName>`, OpenClaw `openclaw:<encodedCwd>`. Account for prefix differences when comparing.
+- **OpenClaw session file locations**: Local sessions in `~/.openclaw/agents/<agent-name>/sessions/*.jsonl`. Docker instances store sessions in their own config dir (e.g. `~/.openclaw/openclaw-<instance>/agents/`).
+- **OpenClaw Docker config**: Custom model providers in `openclaw.json` under `models.providers.<name>` require `baseUrl`, `apiKey` (supports `env:VAR_NAME`), `api`, and `models[]`. Invalid keys cause startup failure — use `openclaw doctor --fix`.
 - **New exports need mock updates**: All `vi.mock()` blocks must include new exports or Vitest throws "[vitest] No 'exportName' export is defined on the mock".
 - **Plan system type sync**: `backend/src/plan-db.ts` types (`NodeExecution`, `MacroNode`, `Blueprint`, `Artifact`) must stay in sync with `frontend/src/lib/api.ts` mirror types. When adding fields to backend row-to-object helpers, update the frontend interface too.
 - **plan-db tests share real DB**: Tests use `.clawui/index.db` (not isolated). Use unique `projectCwd` / session IDs (`randomUUID()`) in tests to avoid collisions and N+1 query timeouts from `listBlueprints()` scanning all rows.
@@ -118,7 +120,7 @@ All config is centralized in `backend/src/config.ts`. See `.env.example` for def
 - `LOG_LEVEL` — Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)
 - `CLAWUI_DEV` — Set to `1` to reuse existing auth token across backend restarts and enable dev UI features (default: unset, token rotates every restart). Exposed to frontend via `GET /api/dev/status`.
 - `AGENT_TYPE` — Select agent runtime: `claude` (default), `openclaw` (OpenClaw), `pi` (Pi Mono). Used by `getActiveRuntime()` factory in `agent-runtime.ts`.
-- `OPENCLAW_PATH` — Path to OpenClaw CLI binary (auto-detected: checks `~/.local/bin/openclaw`, `/usr/local/bin/openclaw`, then PATH)
+- `OPENCLAW_PATH` — Path to OpenClaw CLI binary (auto-detected: checks `~/.local/bin/openclaw`, `/usr/local/bin/openclaw`, then PATH). Docker instances run on custom ports (e.g. 19000/19001) separate from local gateway (18789); CLI connects to local gateway by default.
 - `PI_PATH` — Path to Pi CLI binary (auto-detected: checks `~/.local/bin/pi`, `/usr/local/bin/pi`, then PATH, then falls back to `npx @mariozechner/pi-coding-agent`)
 
 ## Development Environments

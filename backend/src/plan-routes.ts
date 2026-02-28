@@ -35,7 +35,7 @@ import {
 import type { ArtifactType, ExecutionType, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
 import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
-import { runClaudeInteractiveGen, getApiBase, getAuthParam } from "./plan-generator.js";
+import { runAgentInteractive, getApiBase, getAuthParam } from "./plan-generator.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 
@@ -343,7 +343,7 @@ Replace the placeholder values with your actual enriched title and description. 
       addPendingTask(blueprintId, { type: "enrich", nodeId: enrichNodeId, queuedAt: new Date().toISOString() });
       enqueueBlueprintTask(blueprintId, async () => {
         try {
-          await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+          await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
         } finally {
           removePendingTask(blueprintId, enrichNodeId, "enrich");
         }
@@ -373,7 +373,7 @@ Replace the placeholder values with your actual enriched title and description. 
       let resultPromise: ReturnType<typeof waitForEnrichmentCallback>;
       await enqueueBlueprintTask(blueprintId, async () => {
         resultPromise = waitForEnrichmentCallback(requestId);
-        await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+        await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
       });
 
       const result = await resultPromise!;
@@ -466,7 +466,7 @@ Replace the placeholder values with your actual updated title and description. M
     const reevCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runClaudeInteractiveGen(prompt, reevCwd || undefined);
+        await runAgentInteractive(prompt, reevCwd || undefined);
         captureRelatedSession(reevCwd, reevBefore, nodeId, blueprintId, "reevaluate");
       } finally {
         removePendingTask(blueprintId, nodeId, "reevaluate");
@@ -587,7 +587,7 @@ Guidelines for decomposition:
     const splitCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runClaudeInteractiveGen(prompt, splitCwd || undefined);
+        await runAgentInteractive(prompt, splitCwd || undefined);
         captureRelatedSession(splitCwd, splitBefore, nodeId, blueprintId, "split");
       } finally {
         removePendingTask(blueprintId, nodeId, "split");
@@ -686,7 +686,7 @@ Replace the nodeId values with actual IDs from the available nodes list above. U
     const smartDepsCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runClaudeInteractiveGen(prompt, smartDepsCwd || undefined);
+        await runAgentInteractive(prompt, smartDepsCwd || undefined);
         captureRelatedSession(smartDepsCwd, smartDepsBefore, nodeId, blueprintId, "smart_deps");
       } finally {
         removePendingTask(blueprintId, nodeId, "smart_deps");

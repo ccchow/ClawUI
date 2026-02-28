@@ -1,26 +1,31 @@
 import { getBlueprint, getArtifactsForNode } from "./plan-db.js";
 import { PORT } from "./config.js";
 import { LOCAL_AUTH_TOKEN } from "./auth.js";
-import { runClaudeTextMode, runClaudeInteractiveMode } from "./agent-claude.js";
+import { getActiveRuntime } from "./agent-runtime.js";
+
+// Side-effect imports: ensure all runtimes are registered before getActiveRuntime()
+import "./agent-claude.js";
+import "./agent-pimono.js";
+import "./agent-openclaw.js";
 
 /**
- * Run Claude in text output mode (no tool use). Used for simple tasks that
- * only need text output (e.g., enrich-node, artifact generation).
+ * Run the active agent in text output mode (no tool use). Used for simple tasks
+ * that only need text output (e.g., enrich-node, artifact generation).
  *
- * Delegates to agent-claude.ts runClaudeTextMode.
+ * Routes through AgentRuntime so the configured AGENT_TYPE is respected.
  */
-export function runClaude(prompt: string, cwd?: string): Promise<string> {
-  return runClaudeTextMode(prompt, cwd);
+export function runAgentText(prompt: string, cwd?: string): Promise<string> {
+  return getActiveRuntime().runSession(prompt, cwd);
 }
 
 /**
- * Run Claude in interactive mode (full tool use). Used for tasks where
- * Claude directly calls ClawUI API endpoints.
+ * Run the active agent in interactive mode (full tool use). Used for tasks where
+ * the agent directly calls ClawUI API endpoints.
  *
- * Delegates to agent-claude.ts runClaudeInteractiveMode.
+ * Routes through AgentRuntime so the configured AGENT_TYPE is respected.
  */
-export function runClaudeInteractiveGen(prompt: string, cwd?: string): Promise<string> {
-  return runClaudeInteractiveMode(prompt, cwd);
+export function runAgentInteractive(prompt: string, cwd?: string): Promise<string> {
+  return getActiveRuntime().runSessionInteractive(prompt, cwd);
 }
 
 /**
@@ -111,5 +116,5 @@ Rules:
 - If no new work is needed, do not call the API.
 - Make ONE batch-create call with ALL new nodes.`;
 
-  await runClaudeInteractiveGen(prompt, blueprint.projectCwd || undefined);
+  await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
 }
