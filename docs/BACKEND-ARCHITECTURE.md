@@ -22,6 +22,8 @@ Detailed backend file descriptions for ClawUI. Referenced from [CLAUDE.md](../CL
 - **agent-pimono.ts** — `PiMonoAgentRuntime implements AgentRuntime`. Pi Mono CLI invocation via `-p` print mode (no TTY/expect needed). Sessions in `~/.pi/agent/sessions/--<encoded-cwd>--/`. CWD encoding: `/Users/foo/bar` → `--Users-foo-bar--` (double-dash delimited). Exports `parsePiSessionFile()` for JSONL→TimelineNode[] conversion (handles version 3 tree-structured messages with id/parentId linearization) and `analyzePiSessionHealth()` for failure/context analysis. Self-registers via side-effect import.
 - **agent-openclaw.ts** — `OpenClawAgentRuntime implements AgentRuntime`. OpenClaw CLI invocation via `openclaw agent --session-id <id> --message <prompt>` (no TTY/expect needed — clean JSON output). `--json` flag for structured output, omitted for interactive mode. Sessions in `~/.openclaw/agents/<agent-name>/sessions/*.jsonl`. Session discovery scans all agent subdirs and matches by `cwd` field in session header. Exports `parseOpenClawSessionFile()` for JSONL→TimelineNode[] conversion and `analyzeOpenClawSessionHealth()` for failure/context analysis. Self-registers via side-effect import.
 
+- **agent-codex.ts** — `CodexAgentRuntime implements AgentRuntime`. Codex CLI invocation via `codex exec --json --full-auto` (no TTY/expect needed — clean JSONL output). Sessions in `~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl` (date-organized, not path-organized). `--json` flag for structured output, omitted for interactive mode. Session discovery walks date-organized directory tree recursively, matching by `cwd` field in `session_meta` header. Exports `parseCodexSessionFile()` for JSONL→TimelineNode[] conversion and `analyzeCodexSessionHealth()` for failure/context analysis. Self-registers via side-effect import.
+
 ## OpenClaw Agent Runtime (Detailed)
 
 The OpenClaw agent runtime (`agent-openclaw.ts`) is the newest agent backend. Unlike Claude Code (which requires TTY/expect for CLI interaction), OpenClaw outputs clean JSON — no terminal emulation needed.
@@ -122,6 +124,99 @@ OpenClaw organizes sessions by agent name, not by project path (unlike Claude's 
 }
 ```
 
+## Codex CLI Agent Runtime (Detailed)
+
+The Codex CLI agent runtime (`agent-codex.ts`) integrates OpenAI's Codex CLI. Unlike Claude Code (which requires TTY/expect), Codex outputs clean JSONL — no terminal emulation needed.
+
+### CLI Invocation
+
+```
+codex exec --json --full-auto [-C <cwd>] "<prompt>"
+```
+
+- **Text mode** (`runSession`): `--json --full-auto` produces JSONL output with `event_msg` events. The `extractOutput()` method finds the last `agent_message` or `task_complete` event.
+- **Interactive mode** (`runSessionInteractive`): `--full-auto` without `--json`. Used for tasks where the agent calls API endpoints via curl.
+- **Resume** (`resumeSession`): `codex exec resume <sessionId> "<prompt>" --json --full-auto`.
+- **Timeout**: 30-minute `EXEC_TIMEOUT` per invocation, 10MB max buffer.
+- **Environment**: `cleanEnv()` strips `CODEX_HOME` and `CODEX_SESSION` to prevent session nesting.
+
+### Binary Resolution
+
+Priority order (via `resolveCodexPath()`):
+1. `CODEX_PATH` env var
+2. `~/.local/bin/codex`
+3. `/opt/homebrew/bin/codex`
+4. `/usr/local/bin/codex`
+5. `which codex` (PATH lookup)
+6. Bare `"codex"` fallback
+
+### Session JSONL Format
+
+Sessions stored in `~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl`. Each line is a JSON event:
+
+| Event Type | Key Fields | Timeline Mapping |
+|---|---|---|
+| `session_meta` | `payload.id`, `payload.cwd`, `payload.cli_version` | Skipped (header metadata) |
+| `response_item` (message) | `payload.role`, `payload.content` | `user` or `assistant` node; `developer` role skipped |
+| `response_item` (function_call) | `payload.name`, `payload.call_id`, `payload.arguments` | `tool_use` node |
+| `response_item` (function_call_output) | `payload.call_id`, `payload.output` | `tool_result` node |
+| `event_msg` (agent_message) | `payload.message` | `assistant` node |
+| `event_msg` (turn_aborted) | `payload.message` | `system` node |
+| `event_msg` (token_count) | `payload.total_tokens` | Skipped (tracked by health analysis) |
+| `turn_context` | `payload.turn_id`, `payload.cwd`, `payload.model` | Skipped (metadata) |
+
+**Content blocks** in message events can be:
+- `{ type: "input_text", text: "..." }` — user input text
+- `{ type: "output_text", text: "..." }` — assistant output text
+- `{ type: "reasoning", text: "..." }` — skipped in timeline (internal reasoning)
+
+### Session Discovery & Project Mapping
+
+Codex organizes sessions by date, not by project path (unlike Claude's `~/.claude/projects/<encoded-path>/` structure). Discovery works by:
+
+1. `getSessionsDir()` → `~/.codex/sessions/`
+2. Recursively walk `YYYY/MM/DD/` directory tree
+3. For each `.jsonl` file, read the first line (`session_meta`) to get the `payload.cwd` field
+4. Match `cwd` against the target project path
+
+**Project ID namespacing**: `codex:<encodedCwd>` where encoding is `cwd.replace(/\//g, "-").replace(/^-/, "")`. Example: `/Users/foo/project` → `codex:Users-foo-project`.
+
+**`detectNewSession()`** walks all date dirs for files modified after a given timestamp, matching by header `cwd`. Returns the newest matching session ID.
+
+**`findSessionFile()`** walks all date dirs looking for a filename containing the session UUID.
+
+### Session Health Analysis
+
+`analyzeCodexSessionHealth()` reads the full JSONL and tracks:
+
+- **Token usage**: Peak from `event_msg` with `type: "token_count"` and `total_tokens` field
+- **Error events**: `error` and `api_error` event types with message field
+- **Turn aborts**: `turn_aborted` event type
+
+**Context pressure**: Always `"none"` — Codex does not have compaction like Claude/OpenClaw.
+
+**Failure reason inference**:
+- `context_exhausted` — error mentions "context" or "token limit"
+- `output_token_limit` — error mentions "output" + "token"
+- `error` — any other API error, or turn_aborted (when no API error present)
+
+### Integration Points
+
+- **db.ts**: `syncCodexSessions()` walks date-organized dirs, reads `session_meta` headers for CWD, creates `codex:`-prefixed project IDs. `parseSessionForAgent("codex")` delegates to `parseCodexSessionFile()`.
+- **plan-executor.ts**: Side-effect import registers the runtime. `getActiveRuntime()` returns `CodexAgentRuntime` when `AGENT_TYPE=codex`.
+- **routes.ts**: `/api/sessions/:id/health` dispatches to `analyzeCodexSessionHealth()` for sessions with `agent_type = "codex"`.
+
+### Capabilities
+
+```typescript
+{
+  supportsResume: true,        // codex exec resume <sessionId>
+  supportsInteractive: true,   // Native tool use without --json
+  supportsTextOutput: true,    // --json flag for structured output
+  supportsDangerousMode: false // No permission-skip flag
+}
+```
+
 ## Plan System Files
 
 - **plan-db.ts** — Plan/Blueprint SQLite tables (`plans`, `plan_nodes`, `node_related_sessions`) + CRUD operations. `blueprints` and `macro_nodes` tables have `agent_type` column. `createBlueprint()` accepts optional `agentType` param.
@@ -139,4 +234,4 @@ OpenClaw organizes sessions by agent name, not by project path (unlike Claude's 
 
 ## Frontend API Client
 
-`lib/api.ts` — all requests use relative `/api/*` paths routed through the Next.js proxy. Auth token read from `localStorage` and attached via `x-clawui-token` header. `next.config.mjs` has rewrites proxying `/api/*` → `http://localhost:3001/api/*`. Exports `AgentType` (`"claude" | "openclaw" | "pi"`), `AgentInfo` interface, `getAgents()`. `getProjects(agentType?)` and `getSessions(projectId, filters?, agentType?)` accept optional agent filtering. `Blueprint`, `MacroNode` types include optional `agentType` field.
+`lib/api.ts` — all requests use relative `/api/*` paths routed through the Next.js proxy. Auth token read from `localStorage` and attached via `x-clawui-token` header. `next.config.mjs` has rewrites proxying `/api/*` → `http://localhost:3001/api/*`. Exports `AgentType` (`"claude" | "openclaw" | "pi" | "codex"`), `AgentInfo` interface, `getAgents()`. `getProjects(agentType?)` and `getSessions(projectId, filters?, agentType?)` accept optional agent filtering. `Blueprint`, `MacroNode` types include optional `agentType` field.

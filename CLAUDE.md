@@ -47,7 +47,7 @@ Express server on port 3001. ESM (`"type": "module"`), uses `tsx watch` for dev.
 
 **Core files:** config.ts, logger.ts, db.ts (SQLite), jsonl-parser.ts, cli-runner.ts (expect/TTY), enrichment.ts, app-state.ts, auth.ts, routes.ts, index.ts.
 
-**Agent runtimes:** agent-runtime.ts (interface + registry), agent-claude.ts, agent-pimono.ts, agent-openclaw.ts. All self-register via side-effect import.
+**Agent runtimes:** agent-runtime.ts (interface + registry), agent-claude.ts, agent-pimono.ts, agent-openclaw.ts, agent-codex.ts. All self-register via side-effect import.
 
 **Plan system:** plan-db.ts (tables + CRUD), plan-routes.ts (API), plan-generator.ts (AI decomposition), plan-executor.ts (execution + artifacts + evaluation). See [`docs/PLAN-EXECUTION.md`](docs/PLAN-EXECUTION.md).
 
@@ -101,12 +101,20 @@ For the full list, see [`docs/CODING-GOTCHAS.md`](docs/CODING-GOTCHAS.md). Most 
 - **CLI output echo**: Claude CLI echoes the full prompt. Use depth-counting brace extraction, last-to-first (see `extractTitleDescJson` in `plan-routes.ts`).
 - **In-memory queue vs SQLite**: `blueprintQueues`/`blueprintPendingTasks` are in-memory only. `requeueOrphanedNodes()` bridges on startup.
 - **Project path encoding**: Hyphens in directory names are ambiguous. `decodeProjectPath()` uses filesystem-aware backtracking — never use naive `replace(/-/g, "/")`.
-- **Multi-agent project ID namespacing**: Claude IDs unprefixed, Pi `pi:<dirName>`, OpenClaw `openclaw:<encodedCwd>`. Account for prefix differences when comparing.
+- **Multi-agent project ID namespacing**: Claude IDs unprefixed, Pi `pi:<dirName>`, OpenClaw `openclaw:<encodedCwd>`, Codex `codex:<encodedCwd>`. Account for prefix differences when comparing.
 - **OpenClaw session file locations**: Local sessions in `~/.openclaw/agents/<agent-name>/sessions/*.jsonl`. Docker instances store sessions in their own config dir (e.g. `~/.openclaw/openclaw-<instance>/agents/`).
+- **Codex session file locations**: Sessions in `~/.codex/sessions/YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl` (date-organized, not path-organized). First line uses `{type:"session_meta", payload:{id, cwd, ...}}` — note `cwd` is nested under `payload`, unlike Claude/OpenClaw top-level fields.
 - **OpenClaw Docker config**: Custom model providers in `openclaw.json` under `models.providers.<name>` require `baseUrl`, `apiKey` (supports `env:VAR_NAME`), `api`, and `models[]`. Invalid keys cause startup failure — use `openclaw doctor --fix`.
 - **New exports need mock updates**: All `vi.mock()` blocks must include new exports or Vitest throws "[vitest] No 'exportName' export is defined on the mock".
+- **Adding new AgentType variants**: Besides updating the union type and `resolveAgentType()` valid array, also update: `agentNames` in `db.ts:getAvailableAgents()`, side-effect imports in `db.ts`/`plan-executor.ts`/`plan-generator.ts`, `parseSessionNodes()` switch in `db.ts`, `syncAllForAgent()` switch + sync function in `db.ts`, `findSessionFileAcrossRuntimes()` case in `db.ts`, health analysis switch + import in `routes.ts`, `vi.mock()` block in `routes.test.ts`, and frontend: `AgentType` union in `api.ts`, `AGENT_COLORS` + `AGENT_LABELS` in `AgentSelector.tsx` (which also contains `AgentBadge` — no separate file).
 - **Plan system type sync**: `backend/src/plan-db.ts` types (`NodeExecution`, `MacroNode`, `Blueprint`, `Artifact`) must stay in sync with `frontend/src/lib/api.ts` mirror types. When adding fields to backend row-to-object helpers, update the frontend interface too.
 - **plan-db tests share real DB**: Tests use `.clawui/index.db` (not isolated). Use unique `projectCwd` / session IDs (`randomUUID()`) in tests to avoid collisions and N+1 query timeouts from `listBlueprints()` scanning all rows.
+- **Codex sandbox blocks localhost**: `--full-auto` forces `workspace-write` sandbox which blocks network calls (curl exit 7). Use `--dangerously-bypass-approvals-and-sandbox` for any mode where Codex needs to call back to ClawUI API endpoints (generation, execution, enrichment, reevaluation, smart-deps).
+- **Codex trust requirement**: `codex exec` requires the working directory to be in `~/.codex/config.toml` under `[projects."<path>"]` with `trust_level = "trusted"` AND be a git repo. macOS `/tmp` → `/private/tmp` symlink means both paths may need trust entries. Use `--skip-git-repo-check` to bypass.
+- **Timeline node IDs must be globally unique**: `timeline_nodes.id` is PRIMARY KEY across all sessions. Agent JSONL parsers must use session-scoped prefixes (e.g., `${sessionId.slice(0,12)}-${lineNum}`), not plain `line-N`.
+- **syncSessionFile needs project ensurance**: Single-session sync (e.g., execution polling `detectNewSession`) may encounter a project not yet in the `projects` table. `syncSessionFile` ensures the project exists before INSERT to prevent `SQLITE_CONSTRAINT_FOREIGNKEY`.
+- **OpenClaw multi-dir sync stale cleanup**: `syncOpenClawSessions()` is called per directory (local + Docker). Must pass a shared `seenProjectIds` set across all calls, then run `cleanupStaleOpenClawProjects()` once at the end — otherwise earlier directories' projects get incorrectly deleted as stale.
+- **Non-Anthropic models and shell JSON**: GPT-4o (and similar) fail on complex nested JSON quoting in shell curl commands (e.g. enrich, split callbacks). Simple JSON payloads (arrays, flat objects) work. This affects any AI process where `buildNodePrompt()` instructs the agent to call back with nested JSON bodies.
 
 ## Environment Variables
 
@@ -119,9 +127,11 @@ All config is centralized in `backend/src/config.ts`. See `.env.example` for def
 - `EXPECT_PATH` — Path to `expect` binary (auto-detected: checks `/usr/bin/expect`, `/usr/local/bin/expect`, `/opt/local/bin/expect`, `/opt/homebrew/bin/expect`, then PATH)
 - `LOG_LEVEL` — Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)
 - `CLAWUI_DEV` — Set to `1` to reuse existing auth token across backend restarts and enable dev UI features (default: unset, token rotates every restart). Exposed to frontend via `GET /api/dev/status`.
-- `AGENT_TYPE` — Select agent runtime: `claude` (default), `openclaw` (OpenClaw), `pi` (Pi Mono). Used by `getActiveRuntime()` factory in `agent-runtime.ts`.
+- `AGENT_TYPE` — Select agent runtime: `claude` (default), `openclaw` (OpenClaw), `pi` (Pi Mono), `codex` (Codex CLI). Used by `getActiveRuntime()` factory in `agent-runtime.ts`.
 - `OPENCLAW_PATH` — Path to OpenClaw CLI binary (auto-detected: checks `~/.local/bin/openclaw`, `/usr/local/bin/openclaw`, then PATH). Docker instances run on custom ports (e.g. 19000/19001) separate from local gateway (18789); CLI connects to local gateway by default.
 - `PI_PATH` — Path to Pi CLI binary (auto-detected: checks `~/.local/bin/pi`, `/usr/local/bin/pi`, then PATH, then falls back to `npx @mariozechner/pi-coding-agent`)
+- `CODEX_PATH` — Path to Codex CLI binary (auto-detected: checks `~/.local/bin/codex`, `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, then PATH)
+- `OPENCLAW_PROFILE` — OpenClaw profile name for Docker instances. Adds `--profile <name>` to CLI invocations and scans `~/.openclaw/openclaw-<name>/agents/` for Docker sessions (default: unset).
 
 ## Development Environments
 

@@ -25,6 +25,7 @@ import { getActiveRuntime } from "./agent-runtime.js";
 import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
 import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
 import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
+import "./agent-codex.js"; // Side-effect: registers CodexAgentRuntime
 
 // ─── Pending task tracking (in-memory, for queue status API) ─
 

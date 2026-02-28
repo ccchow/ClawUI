@@ -316,20 +316,39 @@ export function analyzeOpenClawSessionHealth(sessionId: string, knownFilePath?: 
   let filePath: string | null = knownFilePath ?? null;
 
   if (!filePath) {
-    const agentsDir = join(homedir(), ".openclaw", "agents");
-    if (!existsSync(agentsDir)) return null;
+    // Scan local + Docker instance directories for session files
+    const openclawRoot = join(homedir(), ".openclaw");
+    const agentsDirs: string[] = [];
 
-    // Scan all agent directories for session files
-    const agents = readdirSync(agentsDir, { withFileTypes: true });
-    for (const agent of agents) {
-      if (!agent.isDirectory()) continue;
-      const sessionsDir = join(agentsDir, agent.name, "sessions");
-      if (!existsSync(sessionsDir)) continue;
-      const candidate = join(sessionsDir, `${sessionId}.jsonl`);
-      if (existsSync(candidate)) {
-        filePath = candidate;
-        break;
+    // Local agents dir
+    const localAgentsDir = join(openclawRoot, "agents");
+    if (existsSync(localAgentsDir)) agentsDirs.push(localAgentsDir);
+
+    // Docker instance dirs: ~/.openclaw/openclaw-*/agents/
+    if (existsSync(openclawRoot)) {
+      try {
+        const entries = readdirSync(openclawRoot, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory() || !entry.name.startsWith("openclaw-")) continue;
+          const dockerAgentsDir = join(openclawRoot, entry.name, "agents");
+          if (existsSync(dockerAgentsDir)) agentsDirs.push(dockerAgentsDir);
+        }
+      } catch { /* skip */ }
+    }
+
+    for (const agentsDir of agentsDirs) {
+      const agents = readdirSync(agentsDir, { withFileTypes: true });
+      for (const agent of agents) {
+        if (!agent.isDirectory()) continue;
+        const sessionsDir = join(agentsDir, agent.name, "sessions");
+        if (!existsSync(sessionsDir)) continue;
+        const candidate = join(sessionsDir, `${sessionId}.jsonl`);
+        if (existsSync(candidate)) {
+          filePath = candidate;
+          break;
+        }
       }
+      if (filePath) break;
     }
   }
 
@@ -464,6 +483,46 @@ export class OpenClawAgentRuntime implements AgentRuntime {
     return join(homedir(), ".openclaw", "agents");
   }
 
+  /**
+   * Return all OpenClaw agent directories (local + Docker instances).
+   * Docker instances store sessions at ~/.openclaw/openclaw-<name>/agents/.
+   */
+  getAllSessionsDirs(): string[] {
+    const dirs: string[] = [];
+
+    // Local agents dir
+    const localDir = this.getSessionsDir();
+    if (existsSync(localDir)) dirs.push(localDir);
+
+    // Docker instance dirs: ~/.openclaw/openclaw-*/agents/
+    const openclawRoot = join(homedir(), ".openclaw");
+    if (existsSync(openclawRoot)) {
+      try {
+        const entries = readdirSync(openclawRoot, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          if (!entry.name.startsWith("openclaw-")) continue;
+          const dockerAgentsDir = join(openclawRoot, entry.name, "agents");
+          if (existsSync(dockerAgentsDir)) {
+            dirs.push(dockerAgentsDir);
+          }
+        }
+      } catch {
+        // Can't read directory — skip
+      }
+    }
+
+    return dirs;
+  }
+
+  /**
+   * Build CLI prefix args (e.g., --profile) based on OPENCLAW_PROFILE env var.
+   */
+  private profileArgs(): string[] {
+    const profile = process.env.OPENCLAW_PROFILE;
+    return profile ? ["--profile", profile] : [];
+  }
+
   encodeProjectCwd(cwd: string): string {
     // OpenClaw uses agent-name-based dirs, not path encoding.
     // Return a sanitized version of the path for directory matching.
@@ -486,6 +545,7 @@ export class OpenClawAgentRuntime implements AgentRuntime {
     return new Promise((resolve, reject) => {
       const sessionId = randomUUID();
       const args = [
+        ...this.profileArgs(),
         "agent",
         "--session-id", sessionId,
         "--message", prompt,
@@ -533,6 +593,7 @@ export class OpenClawAgentRuntime implements AgentRuntime {
     return new Promise((resolve, reject) => {
       const sessionId = randomUUID();
       const args = [
+        ...this.profileArgs(),
         "agent",
         "--session-id", sessionId,
         "--message", prompt,
@@ -569,6 +630,7 @@ export class OpenClawAgentRuntime implements AgentRuntime {
   resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
+        ...this.profileArgs(),
         "agent",
         "--session-id", sessionId,
         "--message", prompt,
@@ -615,42 +677,41 @@ export class OpenClawAgentRuntime implements AgentRuntime {
    * We scan all agent dirs and match sessions by reading the session header's cwd field.
    */
   detectNewSession(projectCwd: string, beforeTimestamp: Date): string | null {
-    const agentsDir = this.getSessionsDir();
-    if (!existsSync(agentsDir)) return null;
-
     let newestId: string | null = null;
     let newestMtime = beforeTimestamp.getTime();
 
-    // Scan all agent directories
-    let agents: string[];
-    try {
-      agents = readdirSync(agentsDir);
-    } catch {
-      return null;
-    }
-
-    for (const agentName of agents) {
-      const sessionsDir = join(agentsDir, agentName, "sessions");
-      if (!existsSync(sessionsDir)) continue;
-
-      let files: string[];
+    // Scan all agent directories (local + Docker instances)
+    for (const agentsDir of this.getAllSessionsDirs()) {
+      let agents: string[];
       try {
-        files = readdirSync(sessionsDir);
+        agents = readdirSync(agentsDir);
       } catch {
         continue;
       }
 
-      for (const file of files) {
-        if (!file.endsWith(".jsonl")) continue;
-        const filePath = join(sessionsDir, file);
-        const stat = statSync(filePath);
-        if (stat.mtime.getTime() <= beforeTimestamp.getTime()) continue;
+      for (const agentName of agents) {
+        const sessionsDir = join(agentsDir, agentName, "sessions");
+        if (!existsSync(sessionsDir)) continue;
 
-        // Check if this session's cwd matches the project
-        if (this.matchesProjectCwd(filePath, projectCwd)) {
-          if (stat.mtime.getTime() > newestMtime) {
-            newestMtime = stat.mtime.getTime();
-            newestId = basename(file, ".jsonl");
+        let files: string[];
+        try {
+          files = readdirSync(sessionsDir);
+        } catch {
+          continue;
+        }
+
+        for (const file of files) {
+          if (!file.endsWith(".jsonl")) continue;
+          const filePath = join(sessionsDir, file);
+          const stat = statSync(filePath);
+          if (stat.mtime.getTime() <= beforeTimestamp.getTime()) continue;
+
+          // Check if this session's cwd matches the project
+          if (this.matchesProjectCwd(filePath, projectCwd)) {
+            if (stat.mtime.getTime() > newestMtime) {
+              newestMtime = stat.mtime.getTime();
+              newestId = basename(file, ".jsonl");
+            }
           }
         }
       }
@@ -708,21 +769,21 @@ export class OpenClawAgentRuntime implements AgentRuntime {
    * Find a session JSONL file by ID across all agent directories.
    */
   findSessionFile(sessionId: string): string | null {
-    const agentsDir = this.getSessionsDir();
-    if (!existsSync(agentsDir)) return null;
+    // Scan all agent directories (local + Docker instances)
+    for (const agentsDir of this.getAllSessionsDirs()) {
+      let agents: string[];
+      try {
+        agents = readdirSync(agentsDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name);
+      } catch {
+        continue;
+      }
 
-    let agents: string[];
-    try {
-      agents = readdirSync(agentsDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name);
-    } catch {
-      return null;
-    }
-
-    for (const agentName of agents) {
-      const candidate = join(agentsDir, agentName, "sessions", `${sessionId}.jsonl`);
-      if (existsSync(candidate)) return candidate;
+      for (const agentName of agents) {
+        const candidate = join(agentsDir, agentName, "sessions", `${sessionId}.jsonl`);
+        if (existsSync(candidate)) return candidate;
+      }
     }
 
     return null;

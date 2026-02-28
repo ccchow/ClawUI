@@ -10,7 +10,7 @@ function authHeaders(): Record<string, string> {
   return token ? { "x-clawui-token": token } : {};
 }
 
-export type AgentType = "claude" | "openclaw" | "pi";
+export type AgentType = "claude" | "openclaw" | "pi" | "codex";
 
 export interface AgentInfo {
   name: string;

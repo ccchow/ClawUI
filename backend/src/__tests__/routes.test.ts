@@ -69,6 +69,11 @@ vi.mock("../agent-pimono.js", () => ({
 
 vi.mock("../agent-openclaw.js", () => ({
   analyzeOpenClawSessionHealth: vi.fn(() => null),
+  OpenClawAgentRuntime: vi.fn(),
+}));
+
+vi.mock("../agent-codex.js", () => ({
+  analyzeCodexSessionHealth: vi.fn(() => null),
 }));
 
 import router from "../routes.js";

@@ -7,6 +7,7 @@ import { getActiveRuntime } from "./agent-runtime.js";
 import "./agent-claude.js";
 import "./agent-pimono.js";
 import "./agent-openclaw.js";
+import "./agent-codex.js";
 
 /**
  * Run the active agent in text output mode (no tool use). Used for simple tasks

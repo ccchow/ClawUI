@@ -8,6 +8,7 @@ import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from ".
 import type { AgentType } from "./agent-runtime.js";
 import { analyzePiSessionHealth } from "./agent-pimono.js";
 import { analyzeOpenClawSessionHealth } from "./agent-openclaw.js";
+import { analyzeCodexSessionHealth } from "./agent-codex.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
 import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
 import { createLogger } from "./logger.js";
@@ -300,6 +301,9 @@ router.get("/api/sessions/:id/health", (req, res) => {
         break;
       case "openclaw":
         analysis = analyzeOpenClawSessionHealth(sessionId);
+        break;
+      case "codex":
+        analysis = analyzeCodexSessionHealth(sessionId);
         break;
       case "claude":
       default:

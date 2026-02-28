@@ -118,7 +118,7 @@ export const CLAUDE_CLI_JS = resolveClaudeCliJs(CLAUDE_PATH);
 /** Which backend AI agent to use. Default: "claude". */
 function resolveAgentType(): AgentType {
   const raw = process.env.AGENT_TYPE || "claude";
-  const valid: AgentType[] = ["claude", "openclaw", "pi"];
+  const valid: AgentType[] = ["claude", "openclaw", "pi", "codex"];
   if (valid.includes(raw as AgentType)) return raw as AgentType;
   return "claude";
 }
@@ -150,6 +150,13 @@ function resolveOpenClawPath(): string | null {
 export const OPENCLAW_PATH = resolveOpenClawPath();
 
 /**
+ * Optional OpenClaw profile name for targeting Docker instances.
+ * When set, adds `--profile <name>` to all OpenClaw CLI invocations and
+ * scans `~/.openclaw/openclaw-<name>/agents/` for Docker instance sessions.
+ */
+export const OPENCLAW_PROFILE = process.env.OPENCLAW_PROFILE || null;
+
+/**
  * Resolve the path to the Pi Mono binary.
  * Priority: PI_PATH env → common install locations → PATH lookup via `which`.
  */
@@ -172,3 +179,28 @@ function resolvePiPath(): string | null {
 }
 
 export const PI_PATH = resolvePiPath();
+
+/**
+ * Resolve the path to the Codex CLI binary.
+ * Priority: CODEX_PATH env → common install locations → PATH lookup via `which`.
+ */
+function resolveCodexPath(): string | null {
+  if (process.env.CODEX_PATH) {
+    return process.env.CODEX_PATH;
+  }
+  const candidates = [
+    join(homedir(), ".local", "bin", "codex"),
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  try {
+    const resolved = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf-8" }).trim();
+    if (resolved) return resolved;
+  } catch { /* not in PATH */ }
+  return null;
+}
+
+export const CODEX_PATH = resolveCodexPath();

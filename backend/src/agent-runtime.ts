@@ -1,13 +1,13 @@
 /**
  * Agent Runtime abstraction layer.
  *
- * Defines the interface that all AI agent backends (Claude Code, OpenClaw, Pi Mono)
+ * Defines the interface that all AI agent backends (Claude Code, OpenClaw, Pi Mono, Codex CLI)
  * must implement, plus a registry/factory for runtime selection.
  */
 
 // ─── Types ───────────────────────────────────────────────────
 
-export type AgentType = "claude" | "openclaw" | "pi";
+export type AgentType = "claude" | "openclaw" | "pi" | "codex";
 
 export interface AgentCapabilities {
   /** Supports --resume flag for session continuation */

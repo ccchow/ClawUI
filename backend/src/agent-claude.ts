@@ -168,7 +168,7 @@ close $of
           cwd: cwd || process.cwd(),
           env: cleanEnvForClaude(),
         },
-        (error) => {
+        (error, _stdout, stderr) => {
           // Read output from file (avoids TTY echo contamination)
           let clean = "";
           try {
@@ -185,7 +185,7 @@ close $of
             return;
           }
           if (error) {
-            reject(new Error(`Claude CLI error: ${error.message}`));
+            reject(new Error(`Claude CLI error: ${error.message}${stderr ? `\n${stderr.slice(0, 1000)}` : ""}`));
             return;
           }
           resolve(clean);
@@ -241,12 +241,12 @@ catch {wait}
           cwd: cwd || process.cwd(),
           env: cleanEnvForClaude(),
         },
-        (error, stdout) => {
+        (error, stdout, stderr) => {
           try { unlinkSync(tmpExpect); } catch { /* ignore */ }
           try { unlinkSync(tmpFile); } catch { /* ignore */ }
 
           if (error) {
-            reject(new Error(`Claude interactive failed: ${error.message}`));
+            reject(new Error(`Claude interactive failed: ${error.message}${stderr ? `\n${stderr.slice(0, 1000)}` : ""}`));
             return;
           }
 
@@ -325,7 +325,7 @@ close $of
           cwd: cwd || process.cwd(),
           env: cleanEnvForClaude(),
         },
-        (error) => {
+        (error, _stdout, stderr) => {
           let clean = "";
           try {
             clean = stripAnsi(readFileSync(outputFile, "utf-8")).trim();
@@ -340,7 +340,7 @@ close $of
             return;
           }
           if (error) {
-            reject(new Error(`Claude CLI resume error: ${error.message}`));
+            reject(new Error(`Claude CLI resume error: ${error.message}${stderr ? `\n${stderr.slice(0, 1000)}` : ""}`));
             return;
           }
           resolve(clean);

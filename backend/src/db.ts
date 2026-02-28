@@ -8,10 +8,12 @@ import { createLogger } from "./logger.js";
 import { getRegisteredRuntimes } from "./agent-runtime.js";
 import type { AgentType, AgentRuntime } from "./agent-runtime.js";
 import { parsePiSessionFile } from "./agent-pimono.js";
-import { parseOpenClawSessionFile } from "./agent-openclaw.js";
+import { parseOpenClawSessionFile, OpenClawAgentRuntime } from "./agent-openclaw.js";
+import { parseCodexSessionFile } from "./agent-codex.js";
 import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
 import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
 import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
+import "./agent-codex.js"; // Side-effect: registers CodexAgentRuntime
 
 const log = createLogger("db");
 
@@ -113,6 +115,8 @@ function parseSessionNodes(filePath: string, raw: string | undefined, agentType:
       return parsePiSessionFile(filePath, raw);
     case "openclaw":
       return parseOpenClawSessionFile(filePath, raw);
+    case "codex":
+      return parseCodexSessionFile(filePath, raw);
     case "claude":
     default:
       return parseTimelineRaw(filePath, raw);
@@ -152,9 +156,20 @@ function syncAllForAgent(agentType: AgentType, runtime: AgentRuntime): void {
       // Both Claude and Pi use flat project dirs: <projectDir>/*.jsonl
       syncFlatProjectDirs(sessionsDir, agentType);
       break;
-    case "openclaw":
+    case "openclaw": {
       // OpenClaw: <agentName>/sessions/*.jsonl — group by CWD from session headers
-      syncOpenClawSessions(sessionsDir);
+      // Scan local dir + Docker instance dirs (openclaw-*/agents/)
+      const openclawDirs = (runtime as OpenClawAgentRuntime).getAllSessionsDirs();
+      const seenProjectIds = new Set<string>();
+      for (const dir of openclawDirs) {
+        syncOpenClawSessions(dir, seenProjectIds);
+      }
+      cleanupStaleOpenClawProjects(seenProjectIds);
+      break;
+    }
+    case "codex":
+      // Codex: YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl — group by CWD from session_meta
+      syncCodexSessions(sessionsDir);
       break;
   }
 }
@@ -247,14 +262,17 @@ function syncFlatProjectDirs(sessionsDir: string, agentType: AgentType): void {
  * Structure: <agentsDir>/<agentName>/sessions/<sessionId>.jsonl
  * Sessions are grouped into projects by CWD from session headers.
  */
-function syncOpenClawSessions(agentsDir: string): void {
+/**
+ * Scan a single OpenClaw agents directory and sync sessions into the DB.
+ * Collects seen project IDs into the provided set for stale cleanup.
+ */
+function syncOpenClawSessions(agentsDir: string, allSeenProjectIds?: Set<string>): void {
   const agentType: AgentType = "openclaw";
   const agentEntries = readdirSync(agentsDir, { withFileTypes: true });
   log.debug(`syncAll[openclaw]: scanning ${agentEntries.length} agent dirs in ${agentsDir}`);
 
   // Collect all sessions with their project IDs
   const projectSessions = new Map<string, { sessionId: string; filePath: string; projectName: string; decodedPath: string }[]>();
-  const seenProjectIds = new Set<string>();
 
   for (const agentEntry of agentEntries) {
     if (!agentEntry.isDirectory()) continue;
@@ -274,7 +292,7 @@ function syncOpenClawSessions(agentsDir: string): void {
       const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
       const projectId = `openclaw:${encodedCwd}`;
 
-      seenProjectIds.add(projectId);
+      allSeenProjectIds?.add(projectId);
 
       const decodedPath = cwdForProject;
       const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
@@ -322,8 +340,13 @@ function syncOpenClawSessions(agentsDir: string): void {
       db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...staleSessionIds);
     }
   }
+}
 
-  // Clean up stale OpenClaw projects
+/**
+ * Clean up stale OpenClaw projects not seen in any directory scan.
+ */
+function cleanupStaleOpenClawProjects(seenProjectIds: Set<string>): void {
+  const agentType: AgentType = "openclaw";
   const existingProjects = db.prepare(
     "SELECT id FROM projects WHERE agent_type = ?"
   ).all(agentType) as { id: string }[];
@@ -342,6 +365,122 @@ function syncOpenClawSessions(agentsDir: string): void {
 }
 
 /**
+ * Sync sessions from Codex's date-organized directory structure.
+ * Structure: <sessionsDir>/YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl
+ * Sessions are grouped into projects by CWD from session_meta headers.
+ */
+function syncCodexSessions(sessionsDir: string): void {
+  const agentType: AgentType = "codex";
+  log.debug(`syncAll[codex]: scanning ${sessionsDir}`);
+
+  // Collect all sessions with their project IDs by walking the date tree
+  const projectSessions = new Map<string, { sessionId: string; filePath: string; projectName: string; decodedPath: string }[]>();
+  const seenProjectIds = new Set<string>();
+
+  walkCodexSessionDir(sessionsDir, (filePath) => {
+    const { cwd, id } = readCodexSessionHeader(filePath);
+    if (!id) return; // Skip files without valid session_meta
+
+    const sessionId = id;
+    const cwdForProject = cwd || "unknown";
+    const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+    const projectId = `codex:${encodedCwd}`;
+
+    seenProjectIds.add(projectId);
+
+    const decodedPath = cwdForProject;
+    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+
+    const sessions = projectSessions.get(projectId) ?? [];
+    sessions.push({ sessionId, filePath, projectName, decodedPath });
+    projectSessions.set(projectId, sessions);
+  });
+
+  // Upsert projects and sync sessions
+  for (const [projectId, sessions] of projectSessions) {
+    const { projectName, decodedPath } = sessions[0];
+
+    db.prepare(`
+      INSERT INTO projects (id, name, decoded_path, session_count, updated_at, agent_type)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        decoded_path = excluded.decoded_path,
+        session_count = excluded.session_count,
+        updated_at = excluded.updated_at,
+        agent_type = excluded.agent_type
+    `).run(projectId, projectName || projectId, decodedPath, sessions.length, new Date().toISOString(), agentType);
+
+    const seenSessionIds = new Set<string>();
+
+    for (const { sessionId, filePath } of sessions) {
+      seenSessionIds.add(sessionId);
+      syncSessionFile(sessionId, projectId, filePath, agentType);
+    }
+
+    // Clean up stale sessions for this project
+    const existingSessions = db.prepare(
+      "SELECT id FROM sessions WHERE project_id = ?"
+    ).all(projectId) as { id: string }[];
+
+    const staleSessionIds = existingSessions
+      .filter((row) => !seenSessionIds.has(row.id))
+      .map((row) => row.id);
+
+    if (staleSessionIds.length > 0) {
+      const placeholders = staleSessionIds.map(() => "?").join(",");
+      db.prepare(`DELETE FROM timeline_nodes WHERE session_id IN (${placeholders})`).run(...staleSessionIds);
+      db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...staleSessionIds);
+    }
+  }
+
+  // Clean up stale Codex projects
+  const existingProjects = db.prepare(
+    "SELECT id FROM projects WHERE agent_type = ?"
+  ).all(agentType) as { id: string }[];
+
+  const staleProjectIds = existingProjects
+    .filter((row) => !seenProjectIds.has(row.id))
+    .map((row) => row.id);
+
+  if (staleProjectIds.length > 0) {
+    for (const projectId of staleProjectIds) {
+      db.prepare("DELETE FROM timeline_nodes WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?)").run(projectId);
+      db.prepare("DELETE FROM sessions WHERE project_id = ?").run(projectId);
+      db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
+    }
+  }
+}
+
+/**
+ * Walk the Codex sessions directory tree recursively, calling callback for each .jsonl file.
+ */
+function walkCodexSessionDir(dir: string, callback: (filePath: string) => void): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    let stat;
+    try {
+      stat = statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      walkCodexSessionDir(fullPath, callback);
+    } else if (entry.endsWith(".jsonl")) {
+      callback(fullPath);
+    }
+  }
+}
+
+/**
  * Read the session header (first line) of an OpenClaw JSONL file to extract CWD.
  */
 function readOpenClawSessionHeader(filePath: string): { cwd?: string; agentName?: string } {
@@ -352,6 +491,25 @@ function readOpenClawSessionHeader(filePath: string): { cwd?: string; agentName?
     const header = JSON.parse(firstLine) as { type?: string; cwd?: string; agentName?: string };
     if (header.type === "session") {
       return { cwd: header.cwd, agentName: header.agentName };
+    }
+  } catch {
+    // Can't read or parse — skip
+  }
+  return {};
+}
+
+/**
+ * Read the session header (first line) of a Codex JSONL file to extract CWD.
+ * Codex format: {type:"session_meta", payload:{id, cwd, ...}}
+ */
+function readCodexSessionHeader(filePath: string): { cwd?: string; id?: string } {
+  try {
+    const raw = readFileSync(filePath, "utf-8");
+    const firstNewline = raw.indexOf("\n");
+    const firstLine = firstNewline >= 0 ? raw.slice(0, firstNewline) : raw;
+    const header = JSON.parse(firstLine) as { type?: string; payload?: { id?: string; cwd?: string } };
+    if (header.type === "session_meta" && header.payload) {
+      return { cwd: header.payload.cwd, id: header.payload.id };
     }
   } catch {
     // Can't read or parse — skip
@@ -413,23 +571,39 @@ function findSessionFileAcrossRuntimes(sessionId: string, agentType: AgentType):
 
   if (agentType === "openclaw") {
     // OpenClaw: agents/<agent>/sessions/<sessionId>.jsonl
-    let agents: { name: string; isDirectory: () => boolean }[];
-    try {
-      agents = readdirSync(sessionsDir, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-
-    for (const agentEntry of agents) {
-      if (!agentEntry.isDirectory()) continue;
-      const filePath = join(sessionsDir, agentEntry.name, "sessions", `${sessionId}.jsonl`);
-      if (existsSync(filePath)) {
-        const { cwd } = readOpenClawSessionHeader(filePath);
-        const cwdForProject = cwd || agentEntry.name;
-        const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
-        const projectId = `openclaw:${encodedCwd}`;
-        return { filePath, projectId };
+    // Scan local + Docker instance dirs
+    const openclawDirs = (runtime as OpenClawAgentRuntime).getAllSessionsDirs();
+    for (const agentsDir of openclawDirs) {
+      let agents: { name: string; isDirectory: () => boolean }[];
+      try {
+        agents = readdirSync(agentsDir, { withFileTypes: true });
+      } catch {
+        continue;
       }
+
+      for (const agentEntry of agents) {
+        if (!agentEntry.isDirectory()) continue;
+        const filePath = join(agentsDir, agentEntry.name, "sessions", `${sessionId}.jsonl`);
+        if (existsSync(filePath)) {
+          const { cwd } = readOpenClawSessionHeader(filePath);
+          const cwdForProject = cwd || agentEntry.name;
+          const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+          const projectId = `openclaw:${encodedCwd}`;
+          return { filePath, projectId };
+        }
+      }
+    }
+  } else if (agentType === "codex") {
+    // Codex: YYYY/MM/DD/rollout-<datetime>-<UUID>.jsonl (date-organized)
+    // Use the runtime's findSessionFile to walk the tree
+    const codexRuntime = runtime as import("./agent-codex.js").CodexAgentRuntime;
+    const filePath = codexRuntime.findSessionFile(sessionId);
+    if (filePath) {
+      const { cwd: sessionCwd } = readCodexSessionHeader(filePath);
+      const cwdForProject = sessionCwd || "unknown";
+      const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+      const projectId = `codex:${encodedCwd}`;
+      return { filePath, projectId };
     }
   } else {
     // Claude & Pi: <projectDir>/<sessionId>.jsonl
@@ -488,6 +662,11 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string,
         const obj = JSON.parse(line);
         if (obj.slug) slug = obj.slug;
         if (obj.cwd) cwd = obj.cwd;
+        // Codex: cwd and timestamp are in payload for session_meta
+        if (obj.type === "session_meta" && obj.payload) {
+          if (obj.payload.cwd) cwd = obj.payload.cwd;
+          if (obj.payload.timestamp && !createdAt) createdAt = obj.payload.timestamp;
+        }
         if (obj.timestamp && !createdAt) createdAt = obj.timestamp;
       } catch {
         // skip
@@ -521,6 +700,19 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string,
   const writeSession = db.transaction(() => {
     // Clear existing nodes
     db.prepare("DELETE FROM timeline_nodes WHERE session_id = ?").run(sessionId);
+
+    // Ensure the project exists before inserting the session (foreign key constraint).
+    // During full sync, projects are created first. But single-session sync (e.g.,
+    // session detection during execution polling) may encounter a new project.
+    const projectExists = db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId);
+    if (!projectExists) {
+      const decodedPath = cwd || projectId;
+      const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/") || projectId;
+      db.prepare(`
+        INSERT INTO projects (id, name, decoded_path, session_count, updated_at, agent_type)
+        VALUES (?, ?, ?, 1, ?, ?)
+      `).run(projectId, projectName, decodedPath, new Date().toISOString(), agentType);
+    }
 
     // Upsert session
     db.prepare(`
@@ -733,6 +925,7 @@ export function getAvailableAgents(): AgentInfo[] {
     claude: "Claude Code",
     openclaw: "OpenClaw",
     pi: "Pi Mono",
+    codex: "Codex CLI",
   };
 
   for (const [agentType] of runtimes) {

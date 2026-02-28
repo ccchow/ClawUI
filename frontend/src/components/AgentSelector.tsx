@@ -23,12 +23,19 @@ export const AGENT_COLORS: Record<AgentType, { bg: string; text: string; border:
     border: "border-accent-blue/30",
     dot: "bg-accent-blue",
   },
+  codex: {
+    bg: "bg-accent-amber/15",
+    text: "text-accent-amber",
+    border: "border-accent-amber/30",
+    dot: "bg-accent-amber",
+  },
 };
 
 export const AGENT_LABELS: Record<AgentType, string> = {
   claude: "Claude",
   openclaw: "OpenClaw",
   pi: "Pi Mono",
+  codex: "Codex",
 };
 
 /** Small pill badge showing agent type with color coding */
