@@ -90,8 +90,9 @@ export class ClaudeAgentRuntime implements AgentRuntime {
 
   encodeProjectCwd(cwd: string): string {
     return cwd
-      .replace(/\/\./g, "/-")   // encode leading dots in path components
-      .replace(/\//g, "-");      // encode path separators
+      .replace(/:/g, "-")          // replace drive letter colon (C: → C-)
+      .replace(/[/\\]\./g, "/-")   // encode leading dots in path components
+      .replace(/[/\\]/g, "-");     // encode path separators (both / and \)
   }
 
   cleanEnv(): NodeJS.ProcessEnv {
