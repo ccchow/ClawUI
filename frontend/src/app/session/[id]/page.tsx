@@ -24,6 +24,7 @@ import { PromptInput } from "@/components/PromptInput";
 import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
 
 const POLL_INTERVAL = 5_000;
+const POLL_INTERVAL_RUNNING = 2_000;
 
 function SessionInfoHeader({
   sessionId,
@@ -183,6 +184,11 @@ export default function SessionPage() {
   // Fingerprint for poll dedup: detects both count changes and content replacement (synthetic → real nodes)
   const pollFingerprintRef = useRef("");
 
+  // Refs for live-polling during a run (allows fetchNodes to read without re-creation)
+  const runningRef = useRef(false);
+  const thinkingNodeRef = useRef<TimelineNode | null>(null);
+  const preRunNodeCountRef = useRef(0);
+
   // Session enrichment meta
   const [sessionMeta, setSessionMeta] = useState<{
     alias?: string;
@@ -204,13 +210,26 @@ export default function SessionPage() {
     async () => {
       try {
         const n = await getTimeline(id);
-        // Fingerprint includes count + last node ID to detect both new nodes
-        // and content replacement (e.g., synthetic optimistic → real parsed nodes)
         const last = n[n.length - 1];
-        const fp = `${n.length}-${last?.id ?? ""}`;
-        if (fp !== pollFingerprintRef.current) {
-          setNodes(n);
-          pollFingerprintRef.current = fp;
+
+        if (runningRef.current && thinkingNodeRef.current) {
+          // During a run: only update display once server has new content beyond pre-run state.
+          // This ensures the optimistic user message stays visible until the real node appears.
+          if (n.length > preRunNodeCountRef.current) {
+            const fp = `${n.length}-${last?.id ?? ""}-running`;
+            if (fp !== pollFingerprintRef.current) {
+              setNodes([...n, thinkingNodeRef.current]);
+              pollFingerprintRef.current = fp;
+            }
+          }
+          // If no new content yet, keep optimistic state unchanged
+        } else {
+          // Normal polling: replace nodes if fingerprint changed
+          const fp = `${n.length}-${last?.id ?? ""}`;
+          if (fp !== pollFingerprintRef.current) {
+            setNodes(n);
+            pollFingerprintRef.current = fp;
+          }
         }
         setLastRefresh(Date.now());
       } catch {
@@ -284,16 +303,15 @@ export default function SessionPage() {
     }
   }, [id, suggestions]);
 
-  // Auto-refresh poll
+  // Auto-refresh poll (faster 2s interval during active runs for live streaming)
   useEffect(() => {
     if (!autoRefresh || loading) return;
 
     const interval = setInterval(() => {
-      // Only poll when tab is visible and not running a prompt
-      if (!document.hidden && !running) {
+      if (!document.hidden) {
         fetchNodes();
       }
-    }, POLL_INTERVAL);
+    }, running ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
 
     return () => clearInterval(interval);
   }, [autoRefresh, loading, running, fetchNodes]);
@@ -313,12 +331,25 @@ export default function SessionPage() {
 
   const handleRun = async (prompt: string) => {
     setRunning(true);
+    runningRef.current = true;
     setError(null);
     setSuggestions([]);
 
     const userNodeId = `run-${Date.now()}`;
     const thinkingNodeId = `thinking-${Date.now()}`;
     const now = new Date().toISOString();
+
+    const thinkingNode: TimelineNode = {
+      id: thinkingNodeId,
+      type: "system" as const,
+      timestamp: now,
+      title: "⏳ Claude Code is working...",
+      content: prompt,
+    };
+
+    // Store refs for live-polling during the run
+    preRunNodeCountRef.current = nodes.length;
+    thinkingNodeRef.current = thinkingNode;
 
     // Optimistic UI: immediately show user message + thinking indicator
     setNodes((prev) => {
@@ -331,13 +362,7 @@ export default function SessionPage() {
           title: prompt.slice(0, 120),
           content: prompt,
         },
-        {
-          id: thinkingNodeId,
-          type: "system" as const,
-          timestamp: now,
-          title: "⏳ Claude Code is working...",
-          content: prompt,
-        },
+        thinkingNode,
       ];
       pollFingerprintRef.current = `${updated.length}-${thinkingNodeId}`;
       return updated;
@@ -376,6 +401,8 @@ export default function SessionPage() {
       pollFingerprintRef.current = "";
     } finally {
       setRunning(false);
+      runningRef.current = false;
+      thinkingNodeRef.current = null;
     }
   };
 

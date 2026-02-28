@@ -62,6 +62,11 @@ export function MacroNodeCard({
     (t) => t.nodeId === node.id && t.type === "reevaluate"
   ) ?? false;
 
+  // Check if there's a pending enrich task for this node
+  const enrichQueued = pendingTasks?.some(
+    (t) => t.nodeId === node.id && t.type === "enrich"
+  ) ?? false;
+
   // Queue position: only count "run" tasks, derive position from array order
   const queuePosition = isQueued
     ? (pendingTasks?.filter(t => t.type === "run").findIndex(t => t.nodeId === node.id) ?? -1) + 1
@@ -117,6 +122,19 @@ export function MacroNodeCard({
       setEditDescription(node.description || "");
     }
   }, [reevaluateQueued, isEditing, node.title, node.description]);
+
+  // Track enrichQueued transitions: clear optimistic state and sync fields on completion
+  const prevEnrichQueuedRef = useRef(false);
+  useEffect(() => {
+    if (enrichQueued) setEnriching(false); // polling picked up pending task — clear optimistic flag
+    const wasQueued = prevEnrichQueuedRef.current;
+    prevEnrichQueuedRef.current = enrichQueued;
+    if (wasQueued && !enrichQueued && isEditing) {
+      // Enrich completed: update edit fields with fresh node data
+      setEditTitle(node.title);
+      setEditDescription(node.description || "");
+    }
+  }, [enrichQueued, isEditing, node.title, node.description]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return;
@@ -248,18 +266,19 @@ export function MacroNodeCard({
         description: editDescription.trim() || undefined,
         nodeId: node.id,
       });
-      // Existing node enrichment is now fire-and-forget (returns {status: "queued"}).
-      // Trigger refresh so polling picks up the result when Claude finishes.
+      // Fire-and-forget: keep enriching=true as optimistic flag until polling
+      // picks up the pending "enrich" task (enrichQueued), then enrichQueued
+      // takes over the loading state. enriching is cleared in the useEffect above.
       if ("status" in result) {
         onRefresh?.();
+        // Don't setEnriching(false) — enrichQueued will take over
       } else {
         setEditTitle(result.title);
         setEditDescription(result.description);
+        setEnriching(false);
         onNodeUpdated?.();
       }
     } catch {
-      // ignore enrichment errors silently
-    } finally {
       setEnriching(false);
     }
   };
@@ -301,8 +320,8 @@ export function MacroNodeCard({
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   onClick={(e) => e.stopPropagation()}
-                  readOnly={enriching || reevaluating || reevaluateQueued}
-                  className={`flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30${enriching || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
+                  readOnly={enriching || enrichQueued || reevaluating || reevaluateQueued}
+                  className={`flex-1 min-w-0 px-2 py-1 rounded-md bg-bg-tertiary border border-accent-blue text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent-blue/30${enriching || enrichQueued || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
                   autoFocus
                 />
               ) : blueprintId ? (
@@ -339,19 +358,20 @@ export function MacroNodeCard({
                     </button>
                   </div>
                 ) : (
-                  <>
+                  <div className="relative">
                     <p ref={descRef} className="text-sm text-text-muted line-clamp-2">
                       {stripMarkdown(node.description)}
                     </p>
                     {descOverflows && (
                       <button
                         onClick={(e) => { e.stopPropagation(); setDescExpanded(true); }}
-                        className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-0.5"
+                        className="absolute bottom-0 right-0 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors pl-6"
+                        style={{ background: 'linear-gradient(to right, transparent, rgb(var(--bg-secondary)) 40%)' }}
                       >
                         Show more
                       </button>
                     )}
-                  </>
+                  </div>
                 )}
               </div>
             )}
@@ -580,29 +600,29 @@ export function MacroNodeCard({
               value={editDescription}
               onChange={setEditDescription}
               placeholder="Description (supports Markdown and image paste)"
-              disabled={enriching || reevaluating || reevaluateQueued}
+              disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
             />
             <div className="flex gap-2">
               <button
                 onClick={handleEditSave}
-                disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
-                title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
+                disabled={!editTitle.trim() || saving || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
                 className="px-3 py-1.5 rounded-lg bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {saving ? "Saving..." : "Save"}
               </button>
               <button
                 onClick={handleEnrich}
-                disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
-                title={enriching ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
+                disabled={!editTitle.trim() || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                title={enriching || enrichQueued ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
                 className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 rounded-lg bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
+                {enriching || enrichQueued ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
               </button>
               <button
                 onClick={handleEditCancel}
-                disabled={enriching || reevaluating || reevaluateQueued}
-                title={enriching || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
+                disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
+                title={enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
                 className="px-3 py-1.5 rounded-lg border border-border-primary text-text-secondary text-xs hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Cancel
@@ -627,19 +647,20 @@ export function MacroNodeCard({
                     </button>
                   </div>
                 ) : (
-                  <>
+                  <div className="relative">
                     <p ref={descRef} className="text-sm text-text-muted line-clamp-2">
                       {stripMarkdown(node.description)}
                     </p>
                     {descOverflows && (
                       <button
                         onClick={(e) => { e.stopPropagation(); setDescExpanded(true); }}
-                        className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors mt-0.5"
+                        className="absolute bottom-0 right-0 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors pl-6"
+                        style={{ background: 'linear-gradient(to right, transparent, rgb(var(--bg-secondary)) 40%)' }}
                       >
                         Show more
                       </button>
                     )}
-                  </>
+                  </div>
                 )}
               </div>
             )}
@@ -733,9 +754,16 @@ export function MacroNodeCard({
             )}
 
             {node.error && (
-              <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-2">
-                {node.error}
-              </div>
+              node.error.includes("Execution interrupted by server restart") ? (
+                <div className="text-sm text-accent-amber bg-accent-amber/10 rounded-lg p-2 flex items-start gap-1.5">
+                  <span className="flex-shrink-0">&#9888;</span>
+                  <span>Interrupted by server restart — auto-recovery will attempt to resume.</span>
+                </div>
+              ) : (
+                <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-2">
+                  {node.error}
+                </div>
+              )
             )}
           </div>
         )}

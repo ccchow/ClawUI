@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { type Blueprint, type BlueprintStatus, listBlueprints, archiveBlueprint as archiveBlueprintApi, unarchiveBlueprint as unarchiveBlueprintApi } from "@/lib/api";
+import { type Blueprint, type BlueprintStatus, listBlueprints, archiveBlueprint as archiveBlueprintApi, unarchiveBlueprint as unarchiveBlueprintApi, starBlueprint as starBlueprintApi, unstarBlueprint as unstarBlueprintApi } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 
@@ -61,6 +61,8 @@ export default function BlueprintsPage() {
     initialStatus && VALID_BP_STATUSES.has(initialStatus) ? initialStatus as BlueprintStatus | "all" : "approved"
   );
   const [showArchived, setShowArchivedRaw] = useState(searchParams.get("archived") === "1");
+  // Optimistic star overrides: blueprintId -> starred value
+  const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
   const statusFilterRef = useRef(statusFilter);
   const showArchivedRef = useRef(showArchived);
 
@@ -105,8 +107,21 @@ export default function BlueprintsPage() {
     loadBlueprints();
   }, [loadBlueprints]);
 
+  // Apply star overrides to blueprints for optimistic UI
+  const effectiveBlueprints = useMemo(() => {
+    if (Object.keys(starOverrides).length === 0) return blueprints;
+    return blueprints.map((bp) =>
+      bp.id in starOverrides ? { ...bp, starred: starOverrides[bp.id] } : bp
+    );
+  }, [blueprints, starOverrides]);
+
+  // Clear star overrides when blueprints prop updates (server caught up)
+  useEffect(() => {
+    setStarOverrides({});
+  }, [blueprints]);
+
   const filtered = useMemo(() => {
-    let list = blueprints;
+    let list = effectiveBlueprints;
     // When showing archived, filter to only archived if toggle is on
     // When not showing archived, the API already excludes them
     if (showArchived) {
@@ -115,24 +130,49 @@ export default function BlueprintsPage() {
     if (statusFilter !== "all") {
       list = list.filter((bp) => bp.status === statusFilter);
     }
+    // Sort: starred first, then by updatedAt descending
+    list = [...list].sort((a, b) => {
+      const aStarred = a.starred ? 1 : 0;
+      const bStarred = b.starred ? 1 : 0;
+      if (bStarred !== aStarred) return bStarred - aStarred;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
     return list;
-  }, [blueprints, statusFilter, showArchived]);
+  }, [effectiveBlueprints, statusFilter, showArchived]);
 
   // Count per status for badge display
   const statusCounts = useMemo(() => {
     const relevantBps = showArchived
-      ? blueprints.filter((bp) => bp.archivedAt)
-      : blueprints;
+      ? effectiveBlueprints.filter((bp) => bp.archivedAt)
+      : effectiveBlueprints;
     const counts: Record<string, number> = { all: relevantBps.length };
     for (const bp of relevantBps) {
       counts[bp.status] = (counts[bp.status] || 0) + 1;
     }
     return counts;
-  }, [blueprints, showArchived]);
+  }, [effectiveBlueprints, showArchived]);
 
   const archivedCount = useMemo(() => {
-    return blueprints.filter((bp) => bp.archivedAt).length;
-  }, [blueprints]);
+    return effectiveBlueprints.filter((bp) => bp.archivedAt).length;
+  }, [effectiveBlueprints]);
+
+  const handleToggleStar = useCallback(async (e: React.MouseEvent, bp: Blueprint) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const newStarred = !bp.starred;
+    // Optimistic update
+    setStarOverrides((prev) => ({ ...prev, [bp.id]: newStarred }));
+    try {
+      if (newStarred) {
+        await starBlueprintApi(bp.id);
+      } else {
+        await unstarBlueprintApi(bp.id);
+      }
+    } catch {
+      // Revert on error
+      setStarOverrides((prev) => ({ ...prev, [bp.id]: !newStarred }));
+    }
+  }, []);
 
   const handleArchive = useCallback(async (e: React.MouseEvent, bpId: string) => {
     e.preventDefault();
@@ -240,7 +280,7 @@ export default function BlueprintsPage() {
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-text-muted">
-          {blueprints.length === 0 && !showArchived ? (
+          {effectiveBlueprints.length === 0 && !showArchived ? (
             <div className="flex flex-col items-center gap-3">
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted/40">
                 <rect x="8" y="6" width="32" height="36" rx="3" />
@@ -289,6 +329,21 @@ export default function BlueprintsPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 mb-1 min-w-0">
+                      {/* Star button */}
+                      <button
+                        onClick={(e) => handleToggleStar(e, bp)}
+                        className={`flex-shrink-0 p-2 -m-1 rounded-lg transition-all active:scale-[0.9] ${
+                          bp.starred
+                            ? "text-accent-amber"
+                            : "text-text-muted/30 hover:text-accent-amber/60"
+                        }`}
+                        title={bp.starred ? "Unstar" : "Star"}
+                        aria-label={bp.starred ? "Unstar blueprint" : "Star blueprint"}
+                      >
+                        <svg className="w-4 h-4" viewBox="0 0 16 16" fill={bp.starred ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2">
+                          <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
+                        </svg>
+                      </button>
                       <StatusIndicator status={bp.status} />
                       <span className="font-medium text-text-primary truncate min-w-0">
                         {bp.title}

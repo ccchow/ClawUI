@@ -48,25 +48,27 @@ describe("plan-db", () => {
     expect(getBlueprint("non-existent-id")).toBeNull();
   });
 
-  it("listBlueprints returns all blueprints", async () => {
+  it("listBlueprints returns all blueprints", { timeout: 30_000 }, async () => {
     const { createBlueprint, listBlueprints } = await import("../plan-db.js");
 
-    const bp = createBlueprint(`List Test ${randomUUID()}`);
-    const list = listBlueprints();
+    const cwd = `/tmp/list-test-${randomUUID()}`;
+    const bp = createBlueprint(`List Test ${randomUUID()}`, undefined, cwd);
+    const list = listBlueprints({ projectCwd: cwd });
     expect(list.length).toBeGreaterThan(0);
     expect(list.some((b) => b.id === bp.id)).toBe(true);
   });
 
-  it("listBlueprints filters by status", async () => {
+  it("listBlueprints filters by status", { timeout: 30_000 }, async () => {
     const { createBlueprint, updateBlueprint, listBlueprints } = await import("../plan-db.js");
 
-    const bp = createBlueprint(`Filter Test ${randomUUID()}`);
+    const cwd = `/tmp/filter-test-${randomUUID()}`;
+    const bp = createBlueprint(`Filter Test ${randomUUID()}`, undefined, cwd);
     updateBlueprint(bp.id, { status: "approved" });
 
-    const drafts = listBlueprints({ status: "draft" });
+    const drafts = listBlueprints({ status: "draft", projectCwd: cwd });
     expect(drafts.every((b) => b.status === "draft")).toBe(true);
 
-    const approved = listBlueprints({ status: "approved" });
+    const approved = listBlueprints({ status: "approved", projectCwd: cwd });
     expect(approved.some((b) => b.id === bp.id)).toBe(true);
   });
 
@@ -383,24 +385,123 @@ describe("plan-db", () => {
     expect(unarchiveBlueprint("nonexistent")).toBeNull();
   });
 
-  it("listBlueprints excludes archived by default", async () => {
+  it("listBlueprints excludes archived by default", { timeout: 30_000 }, async () => {
     const { createBlueprint, archiveBlueprint, listBlueprints } = await import("../plan-db.js");
 
-    const bp = createBlueprint(`Archived List Test ${randomUUID()}`);
+    const cwd = `/tmp/archived-list-test-${randomUUID()}`;
+    const bp = createBlueprint(`Archived List Test ${randomUUID()}`, undefined, cwd);
     archiveBlueprint(bp.id);
 
-    const list = listBlueprints();
+    const list = listBlueprints({ projectCwd: cwd });
     expect(list.some((b) => b.id === bp.id)).toBe(false);
   });
 
-  it("listBlueprints includes archived when includeArchived=true", async () => {
+  it("listBlueprints includes archived when includeArchived=true", { timeout: 30_000 }, async () => {
     const { createBlueprint, archiveBlueprint, listBlueprints } = await import("../plan-db.js");
 
-    const bp = createBlueprint(`Archived Include Test ${randomUUID()}`);
+    const cwd = `/tmp/archived-include-test-${randomUUID()}`;
+    const bp = createBlueprint(`Archived Include Test ${randomUUID()}`, undefined, cwd);
     archiveBlueprint(bp.id);
 
-    const list = listBlueprints({ includeArchived: true });
+    const list = listBlueprints({ includeArchived: true, projectCwd: cwd });
     expect(list.some((b) => b.id === bp.id)).toBe(true);
+  });
+
+  // ─── Star / Unstar ──────────────────────────────────────────
+
+  it("starBlueprint sets starred to true", async () => {
+    const { createBlueprint, starBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Star Test");
+    expect(bp.starred).toBeFalsy();
+
+    const starred = starBlueprint(bp.id);
+    expect(starred).not.toBeNull();
+    expect(starred!.starred).toBe(true);
+  });
+
+  it("starBlueprint returns null for non-existent id", async () => {
+    const { starBlueprint } = await import("../plan-db.js");
+    expect(starBlueprint("nonexistent")).toBeNull();
+  });
+
+  it("unstarBlueprint clears starred", async () => {
+    const { createBlueprint, starBlueprint, unstarBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Unstar Test");
+    starBlueprint(bp.id);
+
+    const unstarred = unstarBlueprint(bp.id);
+    expect(unstarred).not.toBeNull();
+    expect(unstarred!.starred).toBeFalsy();
+  });
+
+  it("unstarBlueprint returns null for non-existent id", async () => {
+    const { unstarBlueprint } = await import("../plan-db.js");
+    expect(unstarBlueprint("nonexistent")).toBeNull();
+  });
+
+  it("starBlueprint does not change blueprint status", async () => {
+    const { createBlueprint, updateBlueprint, starBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Star Status Test");
+    updateBlueprint(bp.id, { status: "approved" });
+
+    const starred = starBlueprint(bp.id);
+    expect(starred).not.toBeNull();
+    expect(starred!.status).toBe("approved");
+    expect(starred!.starred).toBe(true);
+  });
+
+  it("unstarBlueprint does not change blueprint status", async () => {
+    const { createBlueprint, updateBlueprint, starBlueprint, unstarBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Unstar Status Test");
+    updateBlueprint(bp.id, { status: "running" });
+    starBlueprint(bp.id);
+
+    const unstarred = unstarBlueprint(bp.id);
+    expect(unstarred).not.toBeNull();
+    expect(unstarred!.status).toBe("running");
+    expect(unstarred!.starred).toBeFalsy();
+  });
+
+  it("starBlueprint does not create executions or change node statuses", async () => {
+    const { createBlueprint, createMacroNode, starBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Star No Exec Test");
+    createMacroNode(bp.id, { title: "Node 1", order: 0 });
+    createMacroNode(bp.id, { title: "Node 2", order: 1 });
+
+    const beforeStar = getBlueprint(bp.id);
+    expect(beforeStar!.nodes).toHaveLength(2);
+    const nodeStatusesBefore = beforeStar!.nodes.map((n) => n.status);
+    const execCountBefore = beforeStar!.nodes.reduce((sum, n) => sum + n.executions.length, 0);
+
+    starBlueprint(bp.id);
+
+    const afterStar = getBlueprint(bp.id);
+    expect(afterStar!.nodes).toHaveLength(2);
+    const nodeStatusesAfter = afterStar!.nodes.map((n) => n.status);
+    const execCountAfter = afterStar!.nodes.reduce((sum, n) => sum + n.executions.length, 0);
+
+    expect(nodeStatusesAfter).toEqual(nodeStatusesBefore);
+    expect(execCountAfter).toBe(execCountBefore);
+  });
+
+  it("listBlueprints returns starred blueprints first", { timeout: 30_000 }, async () => {
+    const { createBlueprint, starBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const cwd = `/tmp/starred-order-test-${randomUUID()}`;
+    const bp1 = createBlueprint(`Starred Order A ${randomUUID()}`, undefined, cwd);
+    const bp2 = createBlueprint(`Starred Order B ${randomUUID()}`, undefined, cwd);
+    starBlueprint(bp1.id);
+
+    const list = listBlueprints({ projectCwd: cwd });
+    const idx1 = list.findIndex((b) => b.id === bp1.id);
+    const idx2 = list.findIndex((b) => b.id === bp2.id);
+    // Starred bp1 should appear before non-starred bp2
+    expect(idx1).toBeLessThan(idx2);
   });
 
   // ─── Execution callback columns ───────────────────────────
@@ -512,13 +613,14 @@ describe("plan-db", () => {
   it("getStaleRunningExecutions returns running executions", async () => {
     const { createBlueprint, createMacroNode, createExecution, getStaleRunningExecutions } = await import("../plan-db.js");
 
+    const sessionId = `stale-session-${randomUUID()}`;
     const bp = createBlueprint("Stale Exec Test", "desc", "/tmp/stale-test");
     const n = createMacroNode(bp.id, { title: "Stale", order: 0 });
-    createExecution(n.id, bp.id, "stale-session", "primary");
+    createExecution(n.id, bp.id, sessionId, "primary");
 
     const stale = getStaleRunningExecutions();
     expect(stale.length).toBeGreaterThan(0);
-    const found = stale.find((e) => e.sessionId === "stale-session");
+    const found = stale.find((e) => e.sessionId === sessionId);
     expect(found).toBeDefined();
     expect(found!.blueprintId).toBe(bp.id);
     expect(found!.nodeId).toBe(n.id);
@@ -534,6 +636,121 @@ describe("plan-db", () => {
 
     const orphaned = getOrphanedQueuedNodes();
     expect(orphaned.some((o) => o.id === n.id && o.blueprintId === bp.id)).toBe(true);
+  });
+
+  it("getOrphanedQueuedNodes returns empty when no queued nodes exist", async () => {
+    const { createBlueprint, createMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp = createBlueprint("No Orphans Plan");
+    createMacroNode(bp.id, { title: "Pending Node", order: 0 });
+    // Node stays in default 'pending' status — should not appear as orphaned
+
+    const orphaned = getOrphanedQueuedNodes();
+    expect(orphaned.every((o) => o.blueprintId !== bp.id)).toBe(true);
+  });
+
+  it("getOrphanedQueuedNodes excludes non-queued statuses", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Mixed Status Orphan Test");
+    const pending = createMacroNode(bp.id, { title: "Pending", order: 0 });
+    const running = createMacroNode(bp.id, { title: "Running", order: 1 });
+    const done = createMacroNode(bp.id, { title: "Done", order: 2 });
+    const failed = createMacroNode(bp.id, { title: "Failed", order: 3 });
+    const queued = createMacroNode(bp.id, { title: "Queued", order: 4 });
+
+    updateMacroNode(bp.id, running.id, { status: "running" });
+    updateMacroNode(bp.id, done.id, { status: "done" });
+    updateMacroNode(bp.id, failed.id, { status: "failed" });
+    updateMacroNode(bp.id, queued.id, { status: "queued" });
+    // pending stays at default
+
+    const orphaned = getOrphanedQueuedNodes();
+    const bpOrphans = orphaned.filter((o) => o.blueprintId === bp.id);
+
+    expect(bpOrphans).toHaveLength(1);
+    expect(bpOrphans[0].id).toBe(queued.id);
+    // Verify excluded statuses don't appear
+    expect(bpOrphans.some((o) => o.id === pending.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === running.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === done.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === failed.id)).toBe(false);
+  });
+
+  it("getOrphanedQueuedNodes returns multiple queued nodes across blueprints", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp1 = createBlueprint("Orphan BP1");
+    const bp2 = createBlueprint("Orphan BP2");
+    const n1 = createMacroNode(bp1.id, { title: "Q1", order: 0 });
+    const n2 = createMacroNode(bp1.id, { title: "Q2", order: 1 });
+    const n3 = createMacroNode(bp2.id, { title: "Q3", order: 0 });
+
+    updateMacroNode(bp1.id, n1.id, { status: "queued" });
+    updateMacroNode(bp1.id, n2.id, { status: "queued" });
+    updateMacroNode(bp2.id, n3.id, { status: "queued" });
+
+    const orphaned = getOrphanedQueuedNodes();
+
+    // All three queued nodes should appear
+    expect(orphaned.some((o) => o.id === n1.id && o.blueprintId === bp1.id)).toBe(true);
+    expect(orphaned.some((o) => o.id === n2.id && o.blueprintId === bp1.id)).toBe(true);
+    expect(orphaned.some((o) => o.id === n3.id && o.blueprintId === bp2.id)).toBe(true);
+  });
+
+  it("getOrphanedQueuedNodes maps blueprint_id to blueprintId correctly", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Field Mapping Test");
+    const n = createMacroNode(bp.id, { title: "Mapped Node", order: 0 });
+    updateMacroNode(bp.id, n.id, { status: "queued" });
+
+    const orphaned = getOrphanedQueuedNodes();
+    const found = orphaned.find((o) => o.id === n.id);
+
+    expect(found).toBeDefined();
+    // Verify camelCase field mapping (not snake_case from DB)
+    expect(found!.blueprintId).toBe(bp.id);
+    expect((found as Record<string, unknown>)["blueprint_id"]).toBeUndefined();
+  });
+
+  it("getOrphanedQueuedNodes excludes all non-queued statuses including blocked and skipped", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getOrphanedQueuedNodes } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Full Mixed Status Orphan Test");
+    const pending = createMacroNode(bp.id, { title: "Pending", order: 0 });
+    const running = createMacroNode(bp.id, { title: "Running", order: 1 });
+    const done = createMacroNode(bp.id, { title: "Done", order: 2 });
+    const failed = createMacroNode(bp.id, { title: "Failed", order: 3 });
+    const blocked = createMacroNode(bp.id, { title: "Blocked", order: 4 });
+    const skipped = createMacroNode(bp.id, { title: "Skipped", order: 5 });
+    const queued1 = createMacroNode(bp.id, { title: "Queued 1", order: 6 });
+    const queued2 = createMacroNode(bp.id, { title: "Queued 2", order: 7 });
+
+    updateMacroNode(bp.id, running.id, { status: "running" });
+    updateMacroNode(bp.id, done.id, { status: "done" });
+    updateMacroNode(bp.id, failed.id, { status: "failed" });
+    updateMacroNode(bp.id, blocked.id, { status: "blocked" });
+    updateMacroNode(bp.id, skipped.id, { status: "skipped" });
+    updateMacroNode(bp.id, queued1.id, { status: "queued" });
+    updateMacroNode(bp.id, queued2.id, { status: "queued" });
+    // pending stays at default
+
+    const orphaned = getOrphanedQueuedNodes();
+    const bpOrphans = orphaned.filter((o) => o.blueprintId === bp.id);
+
+    // Only the two queued nodes should be detected
+    expect(bpOrphans).toHaveLength(2);
+    const orphanIds = bpOrphans.map((o) => o.id).sort();
+    expect(orphanIds).toEqual([queued1.id, queued2.id].sort());
+
+    // Verify every non-queued status is excluded
+    expect(bpOrphans.some((o) => o.id === pending.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === running.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === done.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === failed.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === blocked.id)).toBe(false);
+    expect(bpOrphans.some((o) => o.id === skipped.id)).toBe(false);
   });
 
   it("recoverStaleExecutions marks dead executions as failed", async () => {
@@ -658,5 +875,313 @@ describe("plan-db", () => {
     expect(updated).not.toBeNull();
     expect(updated!.dependencies).toEqual(["dep-1"]);
     expect(updated!.order).toBe(5);
+  });
+
+  // ─── Comprehensive field mapping tests ─────────────────────
+  // Verify every entity type maps snake_case DB columns to camelCase TS properties
+  // and that no snake_case keys leak into the returned objects.
+
+  const SNAKE_CASE_FIELDS = [
+    "project_cwd", "created_at", "updated_at", "archived_at", "agent_type",
+    "blueprint_id", "parallel_group", "estimated_minutes", "actual_minutes",
+    "source_node_id", "target_node_id", "node_id", "session_id",
+    "input_context", "output_summary", "context_tokens_used",
+    "parent_execution_id", "cli_pid", "blocker_info", "task_summary",
+    "failure_reason", "reported_status", "reported_reason",
+    "compact_count", "peak_tokens", "context_pressure",
+    "started_at", "completed_at",
+  ];
+
+  function assertNoSnakeCaseKeys(obj: Record<string, unknown>) {
+    const keys = Object.keys(obj);
+    for (const snake of SNAKE_CASE_FIELDS) {
+      expect(keys).not.toContain(snake);
+    }
+    // Extra safety: no key with underscore that isn't a known exception
+    const underscoreKeys = keys.filter((k) => k.includes("_"));
+    expect(underscoreKeys).toEqual([]);
+  }
+
+  it("Blueprint field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, starBlueprint, archiveBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("BP Field Map", "desc", "/tmp/field-map");
+    starBlueprint(bp.id);
+    archiveBlueprint(bp.id);
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched).not.toBeNull();
+
+    // Verify all expected camelCase fields
+    expect(fetched.id).toBe(bp.id);
+    expect(fetched.title).toBe("BP Field Map");
+    expect(fetched.description).toBe("desc");
+    expect(fetched.status).toBe("draft");
+    expect(fetched.projectCwd).toBe("/tmp/field-map");
+    expect(fetched.starred).toBe(true);
+    expect(fetched.archivedAt).toBeDefined();
+    expect(fetched.createdAt).toBeDefined();
+    expect(fetched.updatedAt).toBeDefined();
+    expect(Array.isArray(fetched.nodes)).toBe(true);
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(fetched as unknown as Record<string, unknown>);
+  });
+
+  it("Blueprint field mapping in listBlueprints", async () => {
+    const { createBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const cwd = `/tmp/list-fm-${randomUUID()}`;
+    const bp = createBlueprint(`List FM ${randomUUID()}`, "desc", cwd);
+    const list = listBlueprints({ includeArchived: true, projectCwd: cwd });
+    const found = list.find((b) => b.id === bp.id)!;
+    expect(found).toBeDefined();
+
+    assertNoSnakeCaseKeys(found as unknown as Record<string, unknown>);
+    expect(found.createdAt).toBeDefined();
+    expect(found.updatedAt).toBeDefined();
+  });
+
+  it("MacroNode field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Node FM Test");
+    const dep = createMacroNode(bp.id, { title: "Dep", order: 0 });
+    const node = createMacroNode(bp.id, {
+      title: "Full Node",
+      description: "detailed desc",
+      order: 1,
+      dependencies: [dep.id],
+      parallelGroup: "group-a",
+      prompt: "Do the thing",
+      estimatedMinutes: 30,
+      agentType: "claude",
+    });
+
+    // Set additional fields via update
+    updateMacroNode(bp.id, node.id, {
+      actualMinutes: 25,
+      error: "Something failed",
+    });
+
+    const fetched = getBlueprint(bp.id)!;
+    const fetchedNode = fetched.nodes.find((n) => n.id === node.id)!;
+    expect(fetchedNode).toBeDefined();
+
+    // Verify all camelCase fields
+    expect(fetchedNode.id).toBe(node.id);
+    expect(fetchedNode.blueprintId).toBe(bp.id);
+    expect(fetchedNode.order).toBe(1);
+    expect(fetchedNode.title).toBe("Full Node");
+    expect(fetchedNode.description).toBe("detailed desc");
+    expect(fetchedNode.dependencies).toEqual([dep.id]);
+    expect(fetchedNode.parallelGroup).toBe("group-a");
+    expect(fetchedNode.prompt).toBe("Do the thing");
+    expect(fetchedNode.estimatedMinutes).toBe(30);
+    expect(fetchedNode.actualMinutes).toBe(25);
+    expect(fetchedNode.error).toBe("Something failed");
+    expect(fetchedNode.agentType).toBe("claude");
+    expect(fetchedNode.createdAt).toBeDefined();
+    expect(fetchedNode.updatedAt).toBeDefined();
+    expect(Array.isArray(fetchedNode.inputArtifacts)).toBe(true);
+    expect(Array.isArray(fetchedNode.outputArtifacts)).toBe(true);
+    expect(Array.isArray(fetchedNode.executions)).toBe(true);
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(fetchedNode as unknown as Record<string, unknown>);
+  });
+
+  it("Artifact field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, createMacroNode, createArtifact, getArtifactsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Art FM Test");
+    const n1 = createMacroNode(bp.id, { title: "Src", order: 0 });
+    const n2 = createMacroNode(bp.id, { title: "Tgt", order: 1 });
+
+    createArtifact(bp.id, n1.id, "handoff_summary", "summary content", n2.id);
+
+    const outputArts = getArtifactsForNode(n1.id, "output");
+    expect(outputArts).toHaveLength(1);
+    const art = outputArts[0];
+
+    // Verify all camelCase fields
+    expect(art.id).toBeDefined();
+    expect(art.type).toBe("handoff_summary");
+    expect(art.content).toBe("summary content");
+    expect(art.sourceNodeId).toBe(n1.id);
+    expect(art.targetNodeId).toBe(n2.id);
+    expect(art.blueprintId).toBe(bp.id);
+    expect(art.createdAt).toBeDefined();
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(art as unknown as Record<string, unknown>);
+  });
+
+  it("NodeExecution field mapping: all camelCase, no snake_case leakage", async () => {
+    const {
+      createBlueprint, createMacroNode, createExecution, updateExecution,
+      setExecutionBlocker, setExecutionTaskSummary, setExecutionReportedStatus,
+      getExecution,
+    } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Exec FM Test");
+    const n = createMacroNode(bp.id, { title: "EFM", order: 0 });
+
+    const parentExec = createExecution(n.id, bp.id, "parent-sess", "primary", "input ctx");
+    const exec = createExecution(n.id, bp.id, "child-sess", "retry", "child input", parentExec.id, "running", undefined, undefined, 42);
+
+    // Populate all remaining fields via update + setters
+    updateExecution(exec.id, {
+      status: "failed",
+      outputSummary: "Completed with errors",
+      contextTokensUsed: 150000,
+      completedAt: "2024-06-15T12:00:00Z",
+      failureReason: "context_exhausted",
+      compactCount: 2,
+      peakTokens: 180000,
+      contextPressure: "high",
+    });
+    setExecutionBlocker(exec.id, JSON.stringify({ type: "technical_limitation" }));
+    setExecutionTaskSummary(exec.id, "Tried to implement auth");
+    setExecutionReportedStatus(exec.id, "failed", "Tests didn't pass");
+
+    const fetched = getExecution(exec.id)!;
+    expect(fetched).not.toBeNull();
+
+    // Verify all camelCase fields
+    expect(fetched.id).toBe(exec.id);
+    expect(fetched.nodeId).toBe(n.id);
+    expect(fetched.blueprintId).toBe(bp.id);
+    expect(fetched.sessionId).toBe("child-sess");
+    expect(fetched.type).toBe("retry");
+    expect(fetched.status).toBe("failed");
+    expect(fetched.inputContext).toBe("child input");
+    expect(fetched.outputSummary).toBe("Completed with errors");
+    expect(fetched.contextTokensUsed).toBe(150000);
+    expect(fetched.parentExecutionId).toBe(parentExec.id);
+    expect(fetched.cliPid).toBe(42);
+    expect(fetched.blockerInfo).toBeDefined();
+    expect(fetched.taskSummary).toBe("Tried to implement auth");
+    expect(fetched.failureReason).toBe("context_exhausted");
+    expect(fetched.reportedStatus).toBe("failed");
+    expect(fetched.reportedReason).toBe("Tests didn't pass");
+    expect(fetched.compactCount).toBe(2);
+    expect(fetched.peakTokens).toBe(180000);
+    expect(fetched.contextPressure).toBe("high");
+    expect(fetched.startedAt).toBeDefined();
+    expect(fetched.completedAt).toBe("2024-06-15T12:00:00Z");
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(fetched as unknown as Record<string, unknown>);
+  });
+
+  it("NodeExecution field mapping via getExecutionsForNode", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getExecutionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Exec List FM Test");
+    const n = createMacroNode(bp.id, { title: "ELFM", order: 0 });
+    createExecution(n.id, bp.id, `sess-${randomUUID()}`, "primary", "ctx");
+
+    const execs = getExecutionsForNode(n.id);
+    expect(execs.length).toBeGreaterThan(0);
+
+    for (const exec of execs) {
+      assertNoSnakeCaseKeys(exec as unknown as Record<string, unknown>);
+      expect(exec.nodeId).toBe(n.id);
+      expect(exec.blueprintId).toBe(bp.id);
+      expect(exec.startedAt).toBeDefined();
+    }
+  });
+
+  it("NodeExecution field mapping via getExecutionBySession", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getExecutionBySession } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Exec By Sess FM Test");
+    const n = createMacroNode(bp.id, { title: "EBSFM", order: 0 });
+    const sessId = `fm-sess-${randomUUID()}`;
+    createExecution(n.id, bp.id, sessId, "primary");
+
+    const fetched = getExecutionBySession(sessId)!;
+    expect(fetched).not.toBeNull();
+    assertNoSnakeCaseKeys(fetched as unknown as Record<string, unknown>);
+    expect(fetched.sessionId).toBe(sessId);
+    expect(fetched.nodeId).toBe(n.id);
+  });
+
+  it("RelatedSession field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, createMacroNode, createRelatedSession, getRelatedSessionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("RS FM Test");
+    const n = createMacroNode(bp.id, { title: "RSFM", order: 0 });
+
+    createRelatedSession(n.id, bp.id, "rs-session-fm", "evaluate", "2024-01-01T00:00:00Z", "2024-01-01T00:05:00Z");
+
+    const sessions = getRelatedSessionsForNode(n.id);
+    const found = sessions.find((s) => s.sessionId === "rs-session-fm")!;
+    expect(found).toBeDefined();
+
+    // Verify all camelCase fields
+    expect(found.id).toBeDefined();
+    expect(found.nodeId).toBe(n.id);
+    expect(found.blueprintId).toBe(bp.id);
+    expect(found.sessionId).toBe("rs-session-fm");
+    expect(found.type).toBe("evaluate");
+    expect(found.startedAt).toBe("2024-01-01T00:00:00Z");
+    expect(found.completedAt).toBe("2024-01-01T00:05:00Z");
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(found as unknown as Record<string, unknown>);
+  });
+
+  it("StaleExecution field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getStaleRunningExecutions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Stale FM Test", "desc", "/tmp/stale-fm");
+    const n = createMacroNode(bp.id, { title: "SFM", order: 0 });
+    const sessId = `stale-fm-${randomUUID()}`;
+    createExecution(n.id, bp.id, sessId, "primary");
+
+    const stale = getStaleRunningExecutions();
+    const found = stale.find((e) => e.sessionId === sessId);
+    expect(found).toBeDefined();
+
+    // Verify camelCase fields
+    expect(found!.id).toBeDefined();
+    expect(found!.nodeId).toBe(n.id);
+    expect(found!.blueprintId).toBe(bp.id);
+    expect(found!.sessionId).toBe(sessId);
+    expect(found!.projectCwd).toBe("/tmp/stale-fm");
+    expect(found!.startedAt).toBeDefined();
+
+    // Verify no snake_case keys
+    assertNoSnakeCaseKeys(found as unknown as Record<string, unknown>);
+  });
+
+  it("Nested field mapping: Blueprint → MacroNode → Execution all camelCase", async () => {
+    const { createBlueprint, createMacroNode, createExecution, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Nested FM Test", "nested desc", "/tmp/nested-fm");
+    const n = createMacroNode(bp.id, { title: "Nested Node", description: "node desc", order: 0, dependencies: [] });
+    createExecution(n.id, bp.id, `nested-sess-${randomUUID()}`, "primary", "input");
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched).not.toBeNull();
+
+    // Blueprint level
+    assertNoSnakeCaseKeys(fetched as unknown as Record<string, unknown>);
+    expect(fetched.projectCwd).toBe("/tmp/nested-fm");
+
+    // MacroNode level
+    expect(fetched.nodes).toHaveLength(1);
+    const fetchedNode = fetched.nodes[0];
+    assertNoSnakeCaseKeys(fetchedNode as unknown as Record<string, unknown>);
+    expect(fetchedNode.blueprintId).toBe(bp.id);
+
+    // Execution level
+    expect(fetchedNode.executions).toHaveLength(1);
+    const fetchedExec = fetchedNode.executions[0];
+    assertNoSnakeCaseKeys(fetchedExec as unknown as Record<string, unknown>);
+    expect(fetchedExec.nodeId).toBe(n.id);
+    expect(fetchedExec.blueprintId).toBe(bp.id);
   });
 });

@@ -19,6 +19,8 @@ import {
   recoverNodeSession,
   archiveBlueprint as archiveBlueprintApi,
   unarchiveBlueprint as unarchiveBlueprintApi,
+  starBlueprint as starBlueprintApi,
+  unstarBlueprint as unstarBlueprintApi,
 } from "@/lib/api";
 import { AgentBadge } from "@/components/AgentSelector";
 import { StatusIndicator } from "@/components/StatusIndicator";
@@ -539,6 +541,35 @@ export default function BlueprintDetailPage() {
       {/* Header */}
       <div className="mb-6">
         <div className="flex items-center gap-3 mb-2 min-w-0 overflow-hidden">
+          {/* Star toggle */}
+          <button
+            onClick={async () => {
+              const newStarred = !blueprint.starred;
+              // Optimistic update
+              setBlueprint((prev) => prev ? { ...prev, starred: newStarred } : prev);
+              try {
+                if (newStarred) {
+                  await starBlueprintApi(id);
+                } else {
+                  await unstarBlueprintApi(id);
+                }
+              } catch {
+                // Revert on error
+                setBlueprint((prev) => prev ? { ...prev, starred: !newStarred } : prev);
+              }
+            }}
+            className={`flex-shrink-0 p-1 rounded-lg transition-all active:scale-[0.9] ${
+              blueprint.starred
+                ? "text-accent-amber"
+                : "text-text-muted/30 hover:text-accent-amber/60"
+            }`}
+            title={blueprint.starred ? "Unstar" : "Star"}
+            aria-label={blueprint.starred ? "Unstar blueprint" : "Star blueprint"}
+          >
+            <svg className="w-5 h-5" viewBox="0 0 16 16" fill={blueprint.starred ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.2">
+              <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
+            </svg>
+          </button>
           <StatusIndicator status={blueprint.status} />
           {editingTitle ? (
             <input
@@ -900,55 +931,51 @@ export default function BlueprintDetailPage() {
               </div>
             )}
             {/* Bottom action bar */}
-            <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  disabled={!nodeTitle.trim() || enriching}
-                  onClick={handleSmartCreate}
-                  title={enriching ? "AI is enriching the node..." : !nodeTitle.trim() ? "Enter a node title first" : "AI enriches the title and description, then creates the node"}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                >
-                  {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddNode(false);
-                    setNodeTitle("");
-                    setNodeDescription("");
-                    setNodeDeps([]);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] whitespace-nowrap"
-                >
-                  Cancel
-                </button>
-              </div>
+            <div className="flex items-center gap-1.5 px-3 pb-2.5">
               <button
                 type="submit"
                 disabled={!nodeTitle.trim() || addingNode}
                 title={addingNode ? "Adding node..." : !nodeTitle.trim() ? "Enter a node title first" : "Add node to blueprint"}
                 aria-label="Add node"
-                className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed ${
-                  nodeTitle.trim()
-                    ? "p-2 bg-accent-blue text-white hover:bg-accent-blue/90"
-                    : "p-2 text-text-muted"
-                }`}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {addingNode ? (
-                  <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" strokeOpacity="0.25" /><path d="M12 2a10 10 0 0 1 10 10" /></svg>
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" strokeOpacity="0.25" /><path d="M12 2a10 10 0 0 1 10 10" /></svg>
                 ) : (
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+                  <svg className="w-3.5 h-3.5 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
                 )}
+                {addingNode ? "Adding..." : "Add"}
+              </button>
+              <button
+                type="button"
+                disabled={!nodeTitle.trim() || enriching}
+                onClick={handleSmartCreate}
+                title={enriching ? "AI is enriching the node..." : !nodeTitle.trim() ? "Enter a node title first" : "AI enriches the title and description, then creates the node"}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+              >
+                {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddNode(false);
+                  setNodeTitle("");
+                  setNodeDescription("");
+                  setNodeDeps([]);
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] whitespace-nowrap"
+              >
+                Cancel
               </button>
             </div>
           </form>
         ) : (
           <button
             onClick={() => setShowAddNode(true)}
-            className="w-full py-3 rounded-xl border border-dashed border-border-primary text-text-muted text-sm hover:border-border-hover hover:text-text-secondary hover:bg-bg-secondary transition-all active:scale-[0.99]"
+            className="w-full py-2.5 rounded-xl border border-dashed border-border-primary text-text-muted text-xs font-medium hover:border-border-hover hover:text-text-secondary hover:bg-bg-secondary transition-all active:scale-[0.99] inline-flex items-center justify-center gap-1.5"
           >
-            + Add Node
+            <svg className="w-3.5 h-3.5 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+            Add Node
           </button>
         )}
       </div>

@@ -34,6 +34,7 @@ Detailed implementation gotchas for ClawUI. Referenced from [CLAUDE.md](../CLAUD
 ## Testing
 
 - **New exports need mock updates**: When adding new exports to a module, all `vi.mock()` blocks for that module in test files must include the new export — Vitest throws "[vitest] No 'exportName' export is defined on the mock" otherwise.
+- **`plan-db.test.ts` uses shared DB**: Tests run against the real `.clawui/index.db`, not an isolated per-run database. Data accumulates across test runs, so `listBlueprints()` calls get slower over time. Any `it()` test calling `listBlueprints()` needs `{ timeout: 30_000 }` as the second argument.
 
 ## Auth & Security
 
@@ -46,6 +47,14 @@ Detailed implementation gotchas for ClawUI. Referenced from [CLAUDE.md](../CLAUD
 - **Evaluation uses interactive mode**: `evaluateNodeCompletion()` runs Claude in interactive mode with a callback URL. Claude calls the `evaluation-callback` endpoint directly — no output parsing needed.
 - **INSERT_BETWEEN artifact continuity**: After rewiring dependents from completedNode to refinementNode, the completedNode's artifacts become orphaned. This is correct — refinementNode inherits them via `getArtifactsForNode(depId, "output")`.
 - **`generateArtifact()` try/catch**: All calls in `plan-executor.ts` are wrapped in try/catch to prevent artifact generation failures from overwriting a node's "done" status.
+
+## OpenClaw Agent
+
+- **Session discovery scans all agent dirs**: OpenClaw stores sessions in `~/.openclaw/agents/<agent-name>/sessions/`, not project-scoped dirs. `detectNewSession()`, `findSessionFile()`, and `syncOpenClawSessions()` must iterate all agent subdirectories. A session's project association comes from the `cwd` field in the first line (session header), not from the directory structure.
+- **`skill_call` is an alias for `tool_call`**: The JSONL format uses both `tool_call` and `skill_call` event types. Both are handled identically in parsing — the tool name comes from `toolName` or `skillName` respectively.
+- **`extractOutput()` handles both JSON and plain text**: When `--json` is used, output is `{ message: { content } }`. When it's not valid JSON (e.g., error output or plain text mode), the raw string is returned. Always try JSON parse first, fall back to raw.
+- **No `--dangerously-skip-permissions` flag**: `supportsDangerousMode` is `false`. Plan execution prompts should not reference permission-skipping when the active runtime is OpenClaw.
+- **`cleanEnv()` strips `OPENCLAW_SESSION`**: In addition to `CLAUDECODE`, the OpenClaw runtime removes `OPENCLAW_SESSION` from subprocess environments to prevent session nesting.
 
 ## Data Formats
 

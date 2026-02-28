@@ -11,6 +11,8 @@ import {
   deleteBlueprint,
   archiveBlueprint,
   unarchiveBlueprint,
+  starBlueprint,
+  unstarBlueprint,
   createMacroNode,
   updateMacroNode,
   deleteMacroNode,
@@ -221,6 +223,34 @@ planRouter.post("/api/blueprints/:id/archive", (req, res) => {
 planRouter.post("/api/blueprints/:id/unarchive", (req, res) => {
   try {
     const result = unarchiveBlueprint(req.params.id);
+    if (!result) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/star — star a blueprint
+planRouter.post("/api/blueprints/:id/star", (req, res) => {
+  try {
+    const result = starBlueprint(req.params.id);
+    if (!result) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/unstar — unstar a blueprint
+planRouter.post("/api/blueprints/:id/unstar", (req, res) => {
+  try {
+    const result = unstarBlueprint(req.params.id);
     if (!result) {
       res.status(404).json({ error: "Blueprint not found" });
       return;

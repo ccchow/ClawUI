@@ -183,6 +183,14 @@ vi.mock("../plan-db.js", () => ({
     { id: "rs-1", nodeId: "node-1", blueprintId: "bp-1", sessionId: "session-1", type: "enrich", startedAt: "2024-01-01" },
   ]),
   createRelatedSession: vi.fn(),
+  starBlueprint: vi.fn((id: string) => {
+    if (id === "missing") return null;
+    return { id, title: "Starred BP", status: "draft", starred: true, nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
+  }),
+  unstarBlueprint: vi.fn((id: string) => {
+    if (id === "missing") return null;
+    return { id, title: "Unstarred BP", status: "draft", starred: false, nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
+  }),
 }));
 
 vi.mock("../plan-executor.js", () => ({
@@ -229,6 +237,7 @@ vi.mock("../db.js", () => ({
 import planRouter from "../plan-routes.js";
 import {
   createBlueprint,
+  getBlueprint,
   listBlueprints,
   updateBlueprint,
   deleteBlueprint,
@@ -246,12 +255,19 @@ import {
   setExecutionReportedStatus,
   archiveBlueprint,
   unarchiveBlueprint,
+  starBlueprint,
+  unstarBlueprint,
   getRelatedSessionsForNode,
 } from "../plan-db.js";
 import {
   applyGraphMutations,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   getGlobalQueueInfo,
+  removeQueuedTask,
+  removePendingTask,
+  executeNode,
+  executeAllNodes,
+  enqueueBlueprintTask,
 } from "../plan-executor.js";
 // getQueueInfo is auto-mocked by vi.mock("../plan-executor.js")
 
@@ -718,6 +734,68 @@ describe("plan-routes", () => {
     });
   });
 
+  // ─── Star / Unstar endpoints ──────────────────────────────
+
+  describe("POST /api/blueprints/:id/star", () => {
+    it("stars a blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/star");
+      expect(res.status).toBe(200);
+      expect(starBlueprint).toHaveBeenCalledWith("bp-1");
+      expect(res.body.starred).toBe(true);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/star");
+      expect(res.status).toBe(404);
+    });
+
+    it("does not trigger node execution", async () => {
+      vi.mocked(executeNode).mockClear();
+      vi.mocked(executeAllNodes).mockClear();
+      vi.mocked(enqueueBlueprintTask).mockClear();
+      await request(app).post("/api/blueprints/bp-1/star");
+      expect(executeNode).not.toHaveBeenCalled();
+      expect(executeAllNodes).not.toHaveBeenCalled();
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("does not change blueprint status", async () => {
+      vi.mocked(updateBlueprint).mockClear();
+      await request(app).post("/api/blueprints/bp-1/star");
+      expect(updateBlueprint).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /api/blueprints/:id/unstar", () => {
+    it("unstars a blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/unstar");
+      expect(res.status).toBe(200);
+      expect(unstarBlueprint).toHaveBeenCalledWith("bp-1");
+      expect(res.body.starred).toBe(false);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/unstar");
+      expect(res.status).toBe(404);
+    });
+
+    it("does not trigger node execution", async () => {
+      vi.mocked(executeNode).mockClear();
+      vi.mocked(executeAllNodes).mockClear();
+      vi.mocked(enqueueBlueprintTask).mockClear();
+      await request(app).post("/api/blueprints/bp-1/unstar");
+      expect(executeNode).not.toHaveBeenCalled();
+      expect(executeAllNodes).not.toHaveBeenCalled();
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("does not change blueprint status", async () => {
+      vi.mocked(updateBlueprint).mockClear();
+      await request(app).post("/api/blueprints/bp-1/unstar");
+      expect(updateBlueprint).not.toHaveBeenCalled();
+    });
+  });
+
   // ─── report-status callback endpoint ──────────────────────
 
   describe("POST /api/blueprints/:id/executions/:execId/report-status", () => {
@@ -943,6 +1021,101 @@ describe("plan-routes", () => {
       const res = await request(app)
         .post("/api/blueprints/missing/nodes/node-1/run");
       expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Unqueue node endpoint ────────────────────────────────
+
+  describe("POST /api/blueprints/:id/nodes/:nodeId/unqueue", () => {
+    it("unqueues a queued node and reverts to pending", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test Blueprint",
+        description: "desc",
+        status: "running",
+        projectCwd: "/test",
+        nodes: [
+          {
+            id: "node-1",
+            blueprintId: "bp-1",
+            order: 0,
+            title: "Step 1",
+            description: "First step",
+            status: "queued",
+            dependencies: [],
+            inputArtifacts: [],
+            outputArtifacts: [],
+            executions: [],
+            createdAt: "2024-01-01",
+            updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      });
+
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/unqueue");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("pending");
+      expect(removeQueuedTask).toHaveBeenCalledWith("bp-1", "node-1");
+      expect(removePendingTask).toHaveBeenCalledWith("bp-1", "node-1", "run");
+      expect(updateMacroNode).toHaveBeenCalledWith("bp-1", "node-1", { status: "pending" });
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/unqueue");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Blueprint not found");
+    });
+
+    it("returns 404 for missing node", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/nonexistent/unqueue");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Node not found");
+    });
+
+    it("returns 409 when trying to unqueue a running node", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test Blueprint",
+        description: "desc",
+        status: "running",
+        projectCwd: "/test",
+        nodes: [
+          {
+            id: "node-1",
+            blueprintId: "bp-1",
+            order: 0,
+            title: "Step 1",
+            description: "First step",
+            status: "running",
+            dependencies: [],
+            inputArtifacts: [],
+            outputArtifacts: [],
+            executions: [],
+            createdAt: "2024-01-01",
+            updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      });
+
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/unqueue");
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("Cannot unqueue a running node");
+    });
+
+    it("returns 400 when node is not queued", async () => {
+      // Default mock returns node with status "pending"
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/unqueue");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("must be \"queued\" to unqueue");
     });
   });
 

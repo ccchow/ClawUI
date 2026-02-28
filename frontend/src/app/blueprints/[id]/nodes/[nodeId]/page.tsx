@@ -167,6 +167,9 @@ export default function NodeDetailPage() {
   const reevaluateQueued = pendingTasks.some(
     (t) => t.nodeId === nodeId && t.type === "reevaluate"
   );
+  const enrichQueued = pendingTasks.some(
+    (t) => t.nodeId === nodeId && t.type === "enrich"
+  );
   const hasPendingTasks = pendingTasks.some((t) => t.nodeId === nodeId);
   const smartDepsQueued = pendingTasks.some(
     (t) => t.nodeId === nodeId && t.type === "smart_deps"
@@ -188,6 +191,19 @@ export default function NodeDetailPage() {
       setEditing(false);
     }
   }, [reevaluateQueued, editing, node]);
+
+  // Track enrichQueued transitions: clear optimistic state and sync fields on completion
+  const prevEnrichQueuedRef = useRef(false);
+  useEffect(() => {
+    if (enrichQueued) setEnriching(false); // polling picked up pending task — clear optimistic flag
+    const wasQueued = prevEnrichQueuedRef.current;
+    prevEnrichQueuedRef.current = enrichQueued;
+    if (wasQueued && !enrichQueued && editing && node) {
+      // Enrich completed: update edit fields with fresh node data
+      setEditTitle(node.title);
+      setEditDesc(node.description || "");
+    }
+  }, [enrichQueued, editing, node]);
 
   // Detect status transition from running/queued → done/failed/blocked and start post-completion polling
   useEffect(() => {
@@ -325,20 +341,22 @@ export default function NodeDetailPage() {
         description: editDesc.trim() || undefined,
         nodeId: node?.id,
       });
-      // Existing node enrichment is now fire-and-forget (returns {status: "queued"}).
-      // Trigger data reload so polling picks up the result when Claude finishes.
+      // Fire-and-forget: keep enriching=true as optimistic flag until polling
+      // picks up the pending "enrich" task (enrichQueued), then enrichQueued
+      // takes over the loading state. enriching is cleared in the useEffect above.
       if ("status" in result) {
         loadData();
+        // Don't setEnriching(false) — enrichQueued will take over
       } else {
         setEditTitle(result.title);
         setEditDesc(result.description);
+        setEnriching(false);
         if (node) {
           setNode((prev) => prev ? { ...prev, title: result.title, description: result.description } : prev);
         }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setEnriching(false);
     }
   };
@@ -560,8 +578,8 @@ export default function NodeDetailPage() {
             <input
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
-              readOnly={enriching || reevaluating || reevaluateQueued}
-              className={`text-xl font-semibold flex-1 min-w-0 bg-bg-tertiary border border-accent-blue rounded-lg px-2 py-1 text-text-primary focus:outline-none${enriching || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
+              readOnly={enriching || enrichQueued || reevaluating || reevaluateQueued}
+              className={`text-xl font-semibold flex-1 min-w-0 bg-bg-tertiary border border-accent-blue rounded-lg px-2 py-1 text-text-primary focus:outline-none${enriching || enrichQueued || reevaluating || reevaluateQueued ? " opacity-60 cursor-not-allowed" : ""}`}
               placeholder="Node title"
             />
           ) : (
@@ -608,7 +626,7 @@ export default function NodeDetailPage() {
               onChange={setEditDesc}
               placeholder="Description (supports Markdown and image paste)"
               minHeight="120px"
-              disabled={enriching || reevaluating || reevaluateQueued}
+              disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
               actions={
                 <>
                   <button
@@ -628,24 +646,24 @@ export default function NodeDetailPage() {
                       } catch { /* ignore */ }
                       setSaving(false);
                     }}
-                    disabled={!editTitle.trim() || saving || enriching || reevaluating || reevaluateQueued}
-                    title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
+                    disabled={!editTitle.trim() || saving || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {saving ? "Saving..." : "Save"}
                   </button>
                   <button
                     onClick={handleEnrich}
-                    disabled={!editTitle.trim() || enriching || reevaluating || reevaluateQueued}
-                    title={enriching ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
+                    disabled={!editTitle.trim() || enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={enriching || enrichQueued ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
                     className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {enriching ? (<><AISparkle size="xs" /> Enrich</>) : "✨ Smart Enrich"}
+                    {enriching || enrichQueued ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
                   </button>
                   <button
                     onClick={() => setEditing(false)}
-                    disabled={enriching || reevaluating || reevaluateQueued}
-                    title={enriching || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
+                    disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
+                    title={enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
                     className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Cancel
@@ -719,10 +737,10 @@ export default function NodeDetailPage() {
         )}
 
         {/* Action buttons */}
-        <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+        <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-1.5">
           {isQueued && !showUnqueueConfirm && (
-            <span className="col-span-2 px-4 py-2.5 rounded-xl bg-accent-amber/15 border border-accent-amber/20 text-accent-amber text-sm font-medium flex items-center justify-center gap-2">
-              <svg className="w-4 h-4 animate-pulse" viewBox="0 0 16 16" fill="currentColor">
+            <span className="col-span-2 px-2.5 py-1 rounded-lg bg-accent-amber/15 border border-accent-amber/20 text-accent-amber text-xs font-medium flex items-center justify-center gap-2">
+              <svg className="w-3 h-3 animate-pulse" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 1 0 .496-.868L8 7.71V3.5z"/>
                 <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
               </svg>
@@ -732,7 +750,7 @@ export default function NodeDetailPage() {
           {isQueued && (
             showUnqueueConfirm ? (
               <span className="col-span-2 flex items-center justify-center gap-2 animate-fade-in">
-                <span className="text-sm text-text-muted">Unqueue this node?</span>
+                <span className="text-xs text-text-muted">Unqueue this node?</span>
                 <button
                   onClick={async () => {
                     setUnqueuing(true);
@@ -748,13 +766,13 @@ export default function NodeDetailPage() {
                   }}
                   disabled={unqueuing}
                   title={unqueuing ? "Removing from queue..." : undefined}
-                  className="px-3 py-1.5 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
+                  className="px-2.5 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
                 >
                   {unqueuing ? "..." : "Yes"}
                 </button>
                 <button
                   onClick={() => setShowUnqueueConfirm(false)}
-                  className="px-3 py-1.5 rounded-lg bg-bg-tertiary text-text-muted text-xs font-medium hover:bg-bg-tertiary/80 transition-colors active:scale-[0.97]"
+                  className="px-2.5 py-1 rounded-lg bg-bg-tertiary text-text-muted text-xs font-medium hover:bg-bg-tertiary/80 transition-colors active:scale-[0.97]"
                 >
                   Cancel
                 </button>
@@ -762,25 +780,25 @@ export default function NodeDetailPage() {
             ) : (
               <button
                 onClick={() => setShowUnqueueConfirm(true)}
-                className="px-4 py-2.5 rounded-xl border border-accent-amber/30 text-accent-amber text-sm font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all flex items-center justify-center gap-2"
+                className="px-2.5 py-1 rounded-lg border border-accent-amber/30 text-accent-amber text-xs font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5"
               >
-                <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
                 </svg>
                 Unqueue
               </button>
             )
           )}
-          {canRun && (
+          {(canRun || isRunning || isQueued) && (
             <button
               onClick={handleRun}
-              disabled={isRunning}
-              title={isRunning ? "AI is executing this node in a Claude Code session..." : "Execute this node using Claude Code"}
-              className="px-4 py-2.5 rounded-xl bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={isRunning || isQueued}
+              title={isRunning ? "AI is executing this node in a Claude Code session..." : isQueued ? "Node is queued for execution" : "Execute this node using Claude Code"}
+              className="px-2.5 py-1 rounded-lg bg-accent-green text-white text-xs font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               {isRunning ? (
                 <>
-                  <AISparkle size="sm" />
+                  <AISparkle size="xs" />
                   Running...
                 </>
               ) : (
@@ -788,7 +806,7 @@ export default function NodeDetailPage() {
               )}
             </button>
           )}
-          {node.status === "pending" && (
+          {(node.status === "pending" || isRunning || isQueued) && (
             <button
               onClick={async () => {
                 try {
@@ -798,16 +816,17 @@ export default function NodeDetailPage() {
                   setWarning(err instanceof Error ? err.message : String(err));
                 }
               }}
-              title="Manually mark this node as completed without running it"
-              className="px-4 py-2.5 rounded-xl bg-accent-green text-white text-sm font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={isRunning || isQueued}
+              title={isRunning || isQueued ? "Cannot mark done while node is running" : "Manually mark this node as completed without running it"}
+              className="px-2.5 py-1 rounded-lg bg-accent-green text-white text-xs font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
-              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M13.485 1.929a.75.75 0 0 1 .086 1.056l-7.5 9a.75.75 0 0 1-1.107.048l-3.5-3.5a.75.75 0 1 1 1.061-1.061l2.905 2.905 6.999-8.399a.75.75 0 0 1 1.056-.086z" />
               </svg>
               Done
             </button>
           )}
-          {(node.status === "pending" || node.status === "skipped") && (
+          {(node.status === "pending" || node.status === "skipped" || isRunning || isQueued) && (
             <button
               onClick={async () => {
                 setSkipping(true);
@@ -821,31 +840,31 @@ export default function NodeDetailPage() {
                   setSkipping(false);
                 }
               }}
-              disabled={skipping}
-              title={skipping ? "Updating node status..." : node.status === "skipped" ? "Restore this node to pending status" : "Mark this node as skipped"}
-              className="px-4 py-2.5 rounded-xl border border-border-primary text-text-secondary text-sm font-medium hover:bg-bg-tertiary active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={skipping || isRunning || isQueued}
+              title={isRunning || isQueued ? "Cannot skip while node is running" : skipping ? "Updating node status..." : node.status === "skipped" ? "Restore this node to pending status" : "Mark this node as skipped"}
+              className="px-2.5 py-1 rounded-lg border border-border-primary text-text-secondary text-xs font-medium hover:bg-bg-tertiary active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
-              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M4.5 2a.5.5 0 0 1 .5.5v11a.5.5 0 0 1-1 0v-11a.5.5 0 0 1 .5-.5Zm7.5.5a.5.5 0 0 0-.83-.38l-5 4.5a.5.5 0 0 0 0 .74l5 4.5A.5.5 0 0 0 12 11.5v-9Z" transform="scale(-1,1) translate(-16,0)" />
               </svg>
               {skipping ? (node.status === "skipped" ? "Restoring..." : "Skipping...") : (node.status === "skipped" ? "Unskip" : "Skip")}
             </button>
           )}
-          {node.status === "pending" && !showSplitConfirm && (
+          {(node.status === "pending" || isRunning || isQueued) && !showSplitConfirm && (
             <button
               onClick={() => setShowSplitConfirm(true)}
-              disabled={splitting}
-              title={splitting ? "AI is decomposing this node into sub-tasks..." : "AI splits this node into 2–3 smaller sub-tasks with dependency wiring"}
-              className="px-4 py-2.5 rounded-xl border border-accent-purple/30 text-accent-purple text-sm font-medium hover:bg-accent-purple/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={splitting || isRunning || isQueued}
+              title={isRunning || isQueued ? "Cannot split while node is running" : splitting ? "AI is decomposing this node into sub-tasks..." : "AI splits this node into 2–3 smaller sub-tasks with dependency wiring"}
+              className="px-2.5 py-1 rounded-lg border border-accent-purple/30 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               {splitting ? (
                 <>
-                  <AISparkle size="sm" />
+                  <AISparkle size="xs" />
                   Splitting...
                 </>
               ) : (
                 <>
-                  <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 1a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 1z" />
                     <path d="M2 8a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 0 1h-11A.5.5 0 0 1 2 8z" />
                   </svg>
@@ -859,23 +878,23 @@ export default function NodeDetailPage() {
               onClick={handleRun}
               disabled={isRunning}
               title={isRunning ? "AI is retrying this node..." : "Start a fresh execution — for resuming the previous session, use the play button in Execution History below"}
-              className="px-4 py-2.5 rounded-xl border border-accent-amber/50 text-accent-amber text-sm font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="px-2.5 py-1 rounded-lg border border-accent-amber/50 text-accent-amber text-xs font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
-              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
                 <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
               </svg>
               Retry
             </button>
           )}
-          {(node.status === "pending" || node.status === "failed") && (
+          {(node.status === "pending" || node.status === "failed" || isRunning || isQueued) && (
             <button
               onClick={() => setShowDeleteConfirm(true)}
-              disabled={deleting}
-              title={deleting ? "Deleting node..." : "Delete this node permanently"}
-              className="px-4 py-2.5 rounded-xl border border-accent-red/30 text-accent-red text-sm font-medium hover:bg-accent-red/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              disabled={deleting || isRunning || isQueued}
+              title={isRunning || isQueued ? "Cannot delete while node is running" : deleting ? "Deleting node..." : "Delete this node permanently"}
+              className="px-2.5 py-1 rounded-lg border border-accent-red/30 text-accent-red text-xs font-medium hover:bg-accent-red/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
-              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
+              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75ZM11 3V1.75A1.75 1.75 0 0 0 9.25 0h-2.5A1.75 1.75 0 0 0 5 1.75V3H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 14h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11Zm-5.47 1.5.7 7h-1.46l-.7-7h1.46Zm2.97 7V4.5h-1v7h1Zm2.97 0-.7-7h1.46l.7 7h-1.46Z" />
               </svg>
               {deleting ? "Deleting..." : "Delete"}
@@ -958,9 +977,16 @@ export default function NodeDetailPage() {
       )}
 
       {node.error && (
-        <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-3 mb-4">
-          <span className="font-medium">Error:</span> {node.error}
-        </div>
+        node.error.includes("Execution interrupted by server restart") ? (
+          <div className="text-sm text-accent-amber bg-accent-amber/10 rounded-lg p-3 mb-4 flex items-start gap-2">
+            <span className="flex-shrink-0 mt-0.5">&#9888;</span>
+            <span><span className="font-medium">Warning:</span> Node execution was interrupted — the server restarted while this node was running. Auto-recovery will attempt to resume. You can also retry manually.</span>
+          </div>
+        ) : (
+          <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-3 mb-4">
+            <span className="font-medium">Error:</span> {node.error}
+          </div>
+        )
       )}
 
       {recovered && (
@@ -1302,6 +1328,24 @@ export default function NodeDetailPage() {
                           }
                         </div>
                       )}
+                    </div>
+                  )}
+                  {/* Blocker info (from report-blocker callback) */}
+                  {exec.blockerInfo && (
+                    <div className="mt-1.5 rounded bg-accent-amber/10 text-accent-amber px-2 py-1.5 text-xs">
+                      <div className="font-medium flex items-center gap-1">
+                        <span>&#x1F6A7;</span> Blocker Reported
+                      </div>
+                      <div className="mt-0.5 text-[11px] opacity-90 whitespace-pre-wrap">{exec.blockerInfo}</div>
+                    </div>
+                  )}
+                  {/* Task summary (from task-summary callback) */}
+                  {exec.taskSummary && (
+                    <div className="mt-1.5 rounded bg-accent-green/10 text-accent-green px-2 py-1.5 text-xs">
+                      <div className="font-medium flex items-center gap-1">
+                        <span>&#x1F4CB;</span> Task Summary
+                      </div>
+                      <div className="mt-0.5 text-[11px] opacity-90 whitespace-pre-wrap">{exec.taskSummary}</div>
                     </div>
                   )}
                   {/* Context pressure warning on successful executions */}

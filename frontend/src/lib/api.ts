@@ -208,6 +208,8 @@ export type FailureReason = "timeout" | "context_exhausted" | "output_token_limi
 
 export type ContextPressure = "none" | "moderate" | "high" | "critical";
 
+export type ReportedStatus = "done" | "failed" | "blocked" | null;
+
 export interface NodeExecution {
   id: string;
   nodeId: string;
@@ -219,7 +221,12 @@ export interface NodeExecution {
   outputSummary?: string;
   contextTokensUsed?: number;
   parentExecutionId?: string;
+  cliPid?: number;
+  blockerInfo?: string;
+  taskSummary?: string;
   failureReason?: FailureReason;
+  reportedStatus?: ReportedStatus;
+  reportedReason?: string;
   compactCount?: number;
   peakTokens?: number;
   contextPressure?: ContextPressure;
@@ -263,6 +270,7 @@ export interface Blueprint {
   description: string;
   projectCwd?: string;
   status: BlueprintStatus;
+  starred?: boolean;
   archivedAt?: string;
   agentType?: AgentType;
   nodes: MacroNode[];
@@ -323,6 +331,18 @@ export function archiveBlueprint(id: string): Promise<Blueprint> {
 
 export function unarchiveBlueprint(id: string): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/unarchive`, {
+    method: "POST",
+  });
+}
+
+export function starBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/star`, {
+    method: "POST",
+  });
+}
+
+export function unstarBlueprint(id: string): Promise<Blueprint> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}/unstar`, {
     method: "POST",
   });
 }

@@ -1461,36 +1461,23 @@ export async function executeAllNodes(
 // ─── Startup recovery ───────────────────────────────────────
 
 /**
- * Re-enqueue nodes that were left in "queued" status from a previous server process.
- * The in-memory queue is lost on restart, so we need to re-enqueue them.
+ * Reset nodes that were left in "queued" status from a previous server process.
+ * The in-memory queue is lost on restart. Rather than automatically re-executing
+ * (which can cause mass uncontrolled execution after a deploy/restart), we reset
+ * orphaned queued nodes back to "pending" so the user can manually re-trigger.
  * Called once from index.ts after server initialization.
  */
 export function requeueOrphanedNodes(): void {
   const orphaned = getOrphanedQueuedNodes();
   if (orphaned.length === 0) return;
 
-  log.info(`Re-enqueueing ${orphaned.length} orphaned queued node(s)...`);
+  log.info(`Resetting ${orphaned.length} orphaned queued node(s) to pending...`);
 
   for (const { id: nodeId, blueprintId } of orphaned) {
-    // The node is already "queued" in SQLite — just re-add to the in-memory queue
-    addPendingTask(blueprintId, { type: "run", nodeId, queuedAt: new Date().toISOString() });
-
-    enqueueBlueprintTask(blueprintId, async () => {
-      removePendingTask(blueprintId, nodeId, "run");
-      try {
-        return await executeNodeInternal(blueprintId, nodeId);
-      } catch (err) {
-        const current = getBlueprint(blueprintId)?.nodes.find((n) => n.id === nodeId);
-        if (current && current.status === "queued") {
-          updateMacroNode(blueprintId, nodeId, { status: "pending" });
-          log.warn(`Re-queued node ${nodeId.slice(0, 8)} reset to pending after failure: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        throw err;
-      }
-    }, nodeId).catch((err) => {
-      log.error(`Re-queued node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-    });
+    updateMacroNode(blueprintId, nodeId, { status: "pending" });
   }
+
+  log.info(`Reset complete. Use "Run All" to re-execute.`);
 }
 
 // ─── Smart execution recovery (resilient to server restarts) ─

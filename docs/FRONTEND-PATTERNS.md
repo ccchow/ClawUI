@@ -53,6 +53,8 @@ Detailed frontend UI conventions for ClawUI. Referenced from [CLAUDE.md](../CLAU
 - **Inline confirmation**: Never use `window.confirm()` — it breaks the dark theme. Use inline confirmation with state toggle: `confirmingX` state shows a `Yes`/`Cancel` button pair with `animate-fade-in` (see blueprints/[id]/page.tsx for reference).
 - **SVG over emoji icons**: Use inline SVGs instead of emoji for interactive icons (stars, bookmarks, archive, sort, refresh, chevrons). Chevrons use a rotating SVG (`transition-transform rotate-90`) instead of swapping characters.
 - **Hover popover gap**: For dropdown popovers positioned below a trigger with a visual gap, use `pt-*` (padding) on the outer positioned wrapper instead of `mt-*` (margin) — padding is part of the element's hit area. Combine with a 200ms delayed hide (`setTimeout` in `onMouseLeave`, cleared in `onMouseEnter`). See NavBar global activity popover.
+- **Disabled button tooltips**: Every disabled button must have a `title` attribute explaining WHY it's disabled. Use conditional `title` with priority: in-progress action (`"Saving..."`), then missing data (`"Enter a title first"`), then blocking operation (`"Cannot save while AI operation is in progress"`), then normal enabled tooltip. For buttons only disabled during a transient action, use `title={disabled ? "reason" : undefined}`.
+- **Line-clamp overflow toggle**: For truncated text previews (e.g., `line-clamp-2`), use `useRef` + `useEffect` comparing `scrollHeight > clientHeight` to detect overflow and conditionally show a "Show more"/"Show less" toggle. When expanded inline, render full content via `<MarkdownContent>` instead of `stripMarkdown()` plain text. Inline expand/collapse state should be independent of any parent card expand/collapse.
 
 ## Accessibility
 
@@ -61,6 +63,12 @@ Detailed frontend UI conventions for ClawUI. Referenced from [CLAUDE.md](../CLAU
 - **Focus trapping in overlays**: Modal overlays use `role="dialog"` + `aria-modal="true"` + `aria-label`. A `useEffect` traps Tab key within the dialog and closes on Escape, returning focus to the trigger button via a ref.
 - **`focus-visible` global styles**: `globals.css` provides `*:focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: 2px; }` for keyboard navigation. No `:focus` styles — only `:focus-visible`.
 - **StatusIndicator**: Uses `role="img"` and `aria-label={label}` with full status label mapping (Pending, Running, Completed, Failed, Blocked, Skipped, Waiting in queue, Draft, Approved, Paused).
+
+## Agent UI Patterns
+
+- **Agent color convention**: Claude=`accent-purple`, OpenClaw=`accent-green`, Pi Mono=`accent-blue`. `AGENT_COLORS` and `AGENT_LABELS` maps in `AgentSelector.tsx`. `AgentBadge` shows colored pill; `AgentSelector` auto-hides when only one agent has sessions. Non-Claude badges shown conditionally: `{agentType && agentType !== "claude" && <AgentBadge ... />}`. `MacroNodeCard` accepts `blueprintAgentType` prop to show override badges only when node agent differs from blueprint default.
+- **Multi-agent tool badge mapping**: `TimelineNode.tsx` `BADGE_COLOR` map includes OpenClaw tools (`skill_call`, `thinking`) and Pi Mono tools (`bash_execution`, `file_read`, `file_write`, `file_edit`). `toolInputSummary()` extracts summaries for these tool types.
+- **Node numbering**: Always use `node.order + 1` (DB `order` field) for display numbers — in `MacroNodeCard`, dependency picker chips, node switcher, and bottom nav. Never use array index for numbering.
 
 ## State Patterns
 

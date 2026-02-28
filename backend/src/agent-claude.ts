@@ -80,7 +80,7 @@ file delete "${tmpFile}"
 set of [open "${outputFile}" w]
 set output ""
 
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text -p $prompt
 expect {
   -re ".+" {
     append output $expect_out(0,string)
@@ -160,7 +160,7 @@ set fp [open "${tmpFile}" r]
 set prompt [read -nonewline $fp]
 close $fp
 file delete "${tmpFile}"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --max-turns 200 -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions -p $prompt
 expect eof
 catch {wait}
 `;
@@ -215,7 +215,7 @@ file delete "${tmpFile}"
 set of [open "${outputFile}" w]
 set output ""
 
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 --resume ${sessionId} -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --resume ${sessionId} -p $prompt
 expect {
   -re ".+" {
     append output $expect_out(0,string)
@@ -333,7 +333,7 @@ close $fp
 set of [open "${outputFile}" w]
 set output ""
 
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --max-turns 200 -p $prompt_text
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text -p $prompt_text
 expect {
   -re ".+" {
     append output $expect_out(0,string)
@@ -403,7 +403,7 @@ set fp [open "${tmpFile}" r]
 set prompt [read -nonewline $fp]
 close $fp
 file delete "${tmpFile}"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --max-turns 200 -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions -p $prompt
 expect eof
 catch {wait}
 `;

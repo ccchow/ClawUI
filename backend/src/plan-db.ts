@@ -22,6 +22,7 @@ export interface Blueprint {
   description: string;
   projectCwd?: string;
   status: BlueprintStatus;
+  starred?: boolean;
   archivedAt?: string;
   agentType?: string;
   nodes: MacroNode[];
@@ -277,6 +278,12 @@ export function initPlanTables(): void {
     db.exec("ALTER TABLE blueprints ADD COLUMN agent_type TEXT DEFAULT 'claude'");
   }
 
+  // Incremental migration: add starred column to blueprints
+  const bpCols3 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols3.some((c) => c.name === "starred")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN starred INTEGER DEFAULT 0");
+  }
+
   // Incremental migration: add agent_type column to macro_nodes (per-node agent override)
   const mnCols = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
   if (!mnCols.some((c) => c.name === "agent_type")) {
@@ -299,6 +306,7 @@ interface BlueprintRow {
   description: string | null;
   status: string;
   project_cwd: string | null;
+  starred: number;
   archived_at: string | null;
   agent_type: string | null;
   created_at: string;
@@ -439,6 +447,7 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
     title: row.title,
     description: row.description ?? "",
     status: row.status as BlueprintStatus,
+    ...(row.starred ? { starred: true } : {}),
     ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
     ...(row.agent_type ? { agentType: row.agent_type } : {}),
@@ -612,7 +621,7 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string;
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-  let sql = `SELECT * FROM blueprints ${where} ORDER BY updated_at DESC`;
+  let sql = `SELECT * FROM blueprints ${where} ORDER BY starred DESC, updated_at DESC`;
   if (filters?.limit) {
     sql += ` LIMIT ?`;
     params.push(filters.limit);
@@ -653,6 +662,24 @@ export function unarchiveBlueprint(id: string): Blueprint | null {
 
   const now = new Date().toISOString();
   db.prepare("UPDATE blueprints SET archived_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
+  return getBlueprint(id);
+}
+
+export function starBlueprint(id: string): Blueprint | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!existing) return null;
+
+  db.prepare("UPDATE blueprints SET starred = 1 WHERE id = ?").run(id);
+  return getBlueprint(id);
+}
+
+export function unstarBlueprint(id: string): Blueprint | null {
+  const db = getDb();
+  const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
+  if (!existing) return null;
+
+  db.prepare("UPDATE blueprints SET starred = 0 WHERE id = ?").run(id);
   return getBlueprint(id);
 }
 
