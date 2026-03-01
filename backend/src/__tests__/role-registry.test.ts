@@ -131,3 +131,105 @@ describe("role-registry", () => {
     expect(retrieved!.toolHints).toBeUndefined();
   });
 });
+
+describe("role-qa (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers QA role with correct fields after import", async () => {
+    await import("../roles/role-qa.js");
+
+    const qa = getRole("qa");
+    expect(qa).toBeDefined();
+    expect(qa!.id).toBe("qa");
+    expect(qa!.label).toBe("QA Engineer");
+    expect(qa!.builtin).toBe(true);
+    expect(qa!.artifactTypes).toEqual(["test_plan", "bug_report"]);
+    expect(qa!.blockerTypes).toEqual([
+      "missing_test_data",
+      "environment_issue",
+      "flaky_dependency",
+      "access_issue",
+    ]);
+    expect(qa!.prompts.workVerb).toBe("test and validate");
+
+    // Verify key prompt strings are non-empty and role-appropriate
+    expect(qa!.prompts.persona).toContain("QA engineer");
+    expect(qa!.prompts.executionGuidance).toContain("test cases");
+    expect(qa!.prompts.artifactFormat).toContain("Test cases");
+    expect(qa!.prompts.evaluationExamples).toContain("test coverage");
+    expect(qa!.prompts.decompositionHeuristic).toContain("test scope");
+    expect(qa!.prompts.specificityGuidance).toContain("test file paths");
+    expect(qa!.prompts.dependencyConsiderations).toContain("Test dependencies");
+    expect(qa!.prompts.verificationSteps).toContain("test suite");
+    expect(qa!.prompts.reevaluationVerification).toContain("test files");
+    expect(qa!.toolHints).toContain("Playwright");
+  });
+});
+
+describe("role-pm (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers PM role with correct fields after import", async () => {
+    await import("../roles/role-pm.js");
+
+    const pm = getRole("pm");
+    expect(pm).toBeDefined();
+    expect(pm!.id).toBe("pm");
+    expect(pm!.label).toBe("Product Manager");
+    expect(pm!.builtin).toBe(true);
+    expect(pm!.artifactTypes).toEqual(["requirement_doc", "acceptance_criteria"]);
+    expect(pm!.blockerTypes).toEqual([
+      "missing_stakeholder_input",
+      "unclear_business_rule",
+      "scope_ambiguity",
+    ]);
+    expect(pm!.prompts.workVerb).toBe("define and clarify requirements");
+
+    // Verify key prompt strings are non-empty and role-appropriate
+    expect(pm!.prompts.persona).toContain("product manager");
+    expect(pm!.prompts.executionGuidance).toContain("requirements");
+    expect(pm!.prompts.artifactFormat).toContain("Requirements defined");
+    expect(pm!.prompts.evaluationExamples).toContain("acceptance criteria");
+    expect(pm!.prompts.decompositionHeuristic).toContain("user journey");
+    expect(pm!.prompts.specificityGuidance).toContain("user personas");
+    expect(pm!.prompts.dependencyConsiderations).toContain("Requirement dependencies");
+    expect(pm!.prompts.verificationSteps).toContain("stakeholder");
+    expect(pm!.prompts.reevaluationVerification).toContain("requirement documents");
+    expect(pm!.toolHints).toContain("Linear");
+  });
+});
+
+describe("role-sde (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers SDE role with correct fields after import", async () => {
+    // Side-effect import triggers registration
+    await import("../roles/role-sde.js");
+
+    const sde = getRole("sde");
+    expect(sde).toBeDefined();
+    expect(sde!.id).toBe("sde");
+    expect(sde!.label).toBe("Software Engineer");
+    expect(sde!.builtin).toBe(true);
+    expect(sde!.artifactTypes).toEqual(["file_diff", "test_report"]);
+    expect(sde!.prompts.workVerb).toBe("implement");
+
+    // Verify key prompt strings are non-empty
+    expect(sde!.prompts.persona).toContain("software engineer");
+    expect(sde!.prompts.executionGuidance).toContain("Complete this step thoroughly");
+    expect(sde!.prompts.artifactFormat).toContain("What was done:");
+    expect(sde!.prompts.evaluationExamples).toContain("NEEDS_REFINEMENT");
+    expect(sde!.prompts.decompositionHeuristic).toContain("5-15 min");
+    expect(sde!.prompts.decompositionExample).toContain("Backend API");
+    expect(sde!.prompts.dependencyConsiderations).toContain("Code dependencies");
+    expect(sde!.prompts.verificationSteps).toContain("typecheck");
+    expect(sde!.prompts.reevaluationVerification).toContain("Read the relevant source files");
+    expect(sde!.toolHints).toContain("MCP tools");
+  });
+});
