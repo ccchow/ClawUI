@@ -16,22 +16,29 @@ import {
   getExecutionBySession,
   recoverStaleExecutions,
   createRelatedSession,
+  completeRelatedSession,
 } from "./plan-db.js";
 import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
 import { getApiBase, getAuthParam } from "./plan-generator.js";
-import { analyzeSessionHealth } from "./jsonl-parser.js";
 import { getActiveRuntime } from "./agent-runtime.js";
+import { acquireSessionLock, releaseSessionLock } from "./session-lock.js";
 import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
 import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
 import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
 import "./agent-codex.js"; // Side-effect: registers CodexAgentRuntime
+import "./roles/role-sde.js"; // Side-effect: registers SDE role
+import "./roles/role-qa.js"; // Side-effect: registers QA role
+import "./roles/role-pm.js"; // Side-effect: registers PM role
+import { getRole } from "./roles/role-registry.js";
+import type { RoleDefinition } from "./roles/role-registry.js";
 
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate";
   nodeId?: string;
+  blueprintId: string;
   queuedAt: string;
 }
 
@@ -41,29 +48,46 @@ export interface QueueInfo {
   pendingTasks: PendingTask[];
 }
 
-const blueprintPendingTasks = new Map<string, PendingTask[]>();
+// Keyed by workspace (projectCwd or blueprintId fallback)
+const workspacePendingTasks = new Map<string, PendingTask[]>();
 
-export function addPendingTask(blueprintId: string, task: PendingTask): void {
-  const tasks = blueprintPendingTasks.get(blueprintId) ?? [];
-  tasks.push(task);
-  blueprintPendingTasks.set(blueprintId, tasks);
+/**
+ * Resolve the workspace queue key for a blueprint.
+ * Uses projectCwd from the DB; falls back to blueprintId if projectCwd is NULL.
+ */
+export function resolveWorkspaceKey(blueprintId: string): string {
+  try {
+    const bp = getBlueprint(blueprintId);
+    return bp?.projectCwd || blueprintId;
+  } catch {
+    return blueprintId;
+  }
+}
+
+export function addPendingTask(blueprintId: string, task: Omit<PendingTask, "blueprintId">): void {
+  const wsKey = resolveWorkspaceKey(blueprintId);
+  const tasks = workspacePendingTasks.get(wsKey) ?? [];
+  tasks.push({ ...task, blueprintId });
+  workspacePendingTasks.set(wsKey, tasks);
 }
 
 export function removePendingTask(blueprintId: string, nodeId?: string, type?: string): void {
-  const tasks = blueprintPendingTasks.get(blueprintId) ?? [];
+  const wsKey = resolveWorkspaceKey(blueprintId);
+  const tasks = workspacePendingTasks.get(wsKey) ?? [];
   const idx = tasks.findIndex(
-    (t) => (!nodeId || t.nodeId === nodeId) && (!type || t.type === type),
+    (t) => t.blueprintId === blueprintId && (!nodeId || t.nodeId === nodeId) && (!type || t.type === type),
   );
   if (idx >= 0) tasks.splice(idx, 1);
-  if (tasks.length === 0) blueprintPendingTasks.delete(blueprintId);
-  else blueprintPendingTasks.set(blueprintId, tasks);
+  if (tasks.length === 0) workspacePendingTasks.delete(wsKey);
+  else workspacePendingTasks.set(wsKey, tasks);
 }
 
 export function getQueueInfo(blueprintId: string): QueueInfo {
+  const wsKey = resolveWorkspaceKey(blueprintId);
   return {
-    running: blueprintRunning.has(blueprintId),
-    queueLength: (blueprintQueues.get(blueprintId) ?? []).length,
-    pendingTasks: blueprintPendingTasks.get(blueprintId) ?? [],
+    running: workspaceRunning.has(wsKey),
+    queueLength: (workspaceQueues.get(wsKey) ?? []).length,
+    pendingTasks: (workspacePendingTasks.get(wsKey) ?? []).filter(t => t.blueprintId === blueprintId),
   };
 }
 
@@ -74,6 +98,7 @@ export interface GlobalQueueTask {
   nodeTitle?: string;
   blueprintTitle?: string;
   sessionId?: string;
+  queuePosition?: number;
 }
 
 export interface GlobalQueueInfo {
@@ -84,14 +109,19 @@ export interface GlobalQueueInfo {
 
 export function getGlobalQueueInfo(): GlobalQueueInfo {
   const tasks: GlobalQueueTask[] = [];
-  // Include currently running blueprints (pending task is removed when execution starts)
-  for (const blueprintId of blueprintRunning) {
-    tasks.push({ blueprintId, type: "running", nodeId: blueprintRunningNodeId.get(blueprintId) });
+  // Include currently running workspaces (pending task is removed when execution starts)
+  for (const wsKey of workspaceRunning) {
+    const runningItem = workspaceRunningItem.get(wsKey);
+    if (runningItem) {
+      tasks.push({ blueprintId: runningItem.blueprintId, type: "running", nodeId: runningItem.nodeId });
+    }
   }
-  // Include queued/pending tasks
-  for (const [blueprintId, pending] of blueprintPendingTasks) {
-    for (const t of pending) {
-      tasks.push({ blueprintId, type: t.type, nodeId: t.nodeId });
+  // Include queued/pending tasks with queue position (1-indexed, ordered by queuedAt)
+  for (const [, pending] of workspacePendingTasks) {
+    const sorted = [...pending].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+    for (let i = 0; i < sorted.length; i++) {
+      const t = sorted[i];
+      tasks.push({ blueprintId: t.blueprintId, type: t.type, nodeId: t.nodeId, queuePosition: i + 1 });
     }
   }
   const active = tasks.length > 0;
@@ -132,15 +162,12 @@ export function getGlobalQueueInfo(): GlobalQueueInfo {
 }
 
 /**
- * Remove a queued task from the in-memory blueprint queue by nodeId.
+ * Remove a queued task from the in-memory workspace queue by nodeId.
  * Returns false if the task is not found or is currently running.
  */
 export function removeQueuedTask(blueprintId: string, nodeId: string): { removed: boolean; running: boolean } {
-  // If the blueprint is currently running, check if this node's task is the active one
-  // (the active task has already been shifted from the queue, so if it's not in the queue
-  // and the blueprint is running, it might be the active one — but we can't be sure which
-  // node is active. We rely on the caller checking node.status !== "running" before calling.)
-  const queue = blueprintQueues.get(blueprintId);
+  const wsKey = resolveWorkspaceKey(blueprintId);
+  const queue = workspaceQueues.get(wsKey);
   if (!queue) return { removed: false, running: false };
   const idx = queue.findIndex(item => item.nodeId === nodeId);
   if (idx === -1) return { removed: false, running: false };
@@ -196,7 +223,7 @@ function classifyFailure(
 
   // 3. Analyze the JSONL session file for deeper diagnostics
   if (sessionId) {
-    const analysis = analyzeSessionHealth(sessionId);
+    const analysis = getActiveRuntime().analyzeSessionHealth(sessionId);
     if (analysis) {
       // API error in JSONL takes priority
       if (analysis.failureReason === "output_token_limit") {
@@ -256,7 +283,7 @@ function classifyHungFailure(
   sessionId: string | undefined,
 ): { reason: FailureReason; detail: string } {
   if (sessionId) {
-    const analysis = analyzeSessionHealth(sessionId);
+    const analysis = getActiveRuntime().analyzeSessionHealth(sessionId);
     if (analysis) {
       if (analysis.failureReason === "output_token_limit") {
         return {
@@ -291,7 +318,7 @@ function classifyHungFailure(
  */
 function storeContextHealth(executionId: string, sessionId: string): void {
   try {
-    const analysis = analyzeSessionHealth(sessionId);
+    const analysis = getActiveRuntime().analyzeSessionHealth(sessionId);
     if (analysis) {
       updateExecution(executionId, {
         compactCount: analysis.compactCount,
@@ -321,44 +348,48 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string)
   });
 }
 
-// ─── Blueprint-level serial queue (prevents concurrent Claude calls) ─
+// ─── Workspace-level serial queue (prevents concurrent agent calls per workspace) ─
 
 interface QueueItem<T = unknown> {
   task: () => Promise<T>;
   resolve: (val: T) => void;
   reject: (err: Error) => void;
   nodeId?: string;
+  blueprintId: string;
 }
 
-const blueprintQueues = new Map<string, QueueItem[]>();
-const blueprintRunning = new Set<string>();
-const blueprintRunningNodeId = new Map<string, string | undefined>();
+// Keyed by workspace (projectCwd or blueprintId fallback)
+const workspaceQueues = new Map<string, QueueItem[]>();
+const workspaceRunning = new Set<string>();
+const workspaceRunningItem = new Map<string, { blueprintId: string; nodeId?: string }>();
 
 /**
- * Enqueue any async task for serial execution within a blueprint.
- * All Claude-calling operations (run, reevaluate, enrich, generate) should use this.
+ * Enqueue any async task for serial execution within a workspace (projectCwd).
+ * Blueprints sharing the same projectCwd share a single serial queue.
+ * All agent-calling operations (run, reevaluate, enrich, generate) should use this.
  */
 export function enqueueBlueprintTask<T>(blueprintId: string, task: () => Promise<T>, nodeId?: string): Promise<T> {
+  const wsKey = resolveWorkspaceKey(blueprintId);
   return new Promise<T>((resolve, reject) => {
-    const queue = blueprintQueues.get(blueprintId) ?? [];
-    queue.push({ task, resolve: resolve as (val: unknown) => void, reject, nodeId });
-    blueprintQueues.set(blueprintId, queue);
-    log.debug(`Enqueued task for blueprint ${blueprintId.slice(0, 8)}, queue depth: ${queue.length}`);
-    drainQueue(blueprintId);
+    const queue = workspaceQueues.get(wsKey) ?? [];
+    queue.push({ task, resolve: resolve as (val: unknown) => void, reject, nodeId, blueprintId });
+    workspaceQueues.set(wsKey, queue);
+    log.debug(`Enqueued task for workspace ${wsKey.slice(0, 20)} (blueprint ${blueprintId.slice(0, 8)}), queue depth: ${queue.length}`);
+    drainQueue(wsKey);
   });
 }
 
-async function drainQueue(blueprintId: string): Promise<void> {
-  if (blueprintRunning.has(blueprintId)) return;
+async function drainQueue(wsKey: string): Promise<void> {
+  if (workspaceRunning.has(wsKey)) return;
 
-  const queue = blueprintQueues.get(blueprintId);
+  const queue = workspaceQueues.get(wsKey);
   if (!queue || queue.length === 0) return;
 
-  blueprintRunning.add(blueprintId);
+  workspaceRunning.add(wsKey);
 
   while (queue.length > 0) {
     const item = queue.shift()!;
-    blueprintRunningNodeId.set(blueprintId, item.nodeId);
+    workspaceRunningItem.set(wsKey, { blueprintId: item.blueprintId, nodeId: item.nodeId });
     try {
       const result = await item.task();
       item.resolve(result);
@@ -367,9 +398,9 @@ async function drainQueue(blueprintId: string): Promise<void> {
     }
   }
 
-  blueprintRunning.delete(blueprintId);
-  blueprintRunningNodeId.delete(blueprintId);
-  blueprintQueues.delete(blueprintId);
+  workspaceRunning.delete(wsKey);
+  workspaceRunningItem.delete(wsKey);
+  workspaceQueues.delete(wsKey);
 }
 
 // ─── Session detection ─────────────────────────────────────
@@ -402,7 +433,54 @@ function runClaude(prompt: string, cwd?: string, onPid?: (pid: number) => void):
 
 function runClaudeResume(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
   const runtime = getActiveRuntime();
+  if (!runtime.capabilities.supportsResume) {
+    throw new Error(`Agent runtime "${runtime.type}" does not support session resume`);
+  }
   return runtime.resumeSession(sessionId, prompt, cwd, onPid);
+}
+
+// ─── Role resolution helpers ─────────────────────────────────
+
+/**
+ * Resolve the effective roles for a node.
+ * Priority: node.roles (if non-empty) > blueprint.defaultRole > "sde" fallback.
+ */
+export function resolveNodeRoles(node: MacroNode, blueprint: Blueprint): string[] {
+  if (node.roles && node.roles.length > 0) {
+    return node.roles;
+  }
+  const defaultRole = blueprint.defaultRole;
+  if (defaultRole && defaultRole.length > 0) {
+    return [defaultRole];
+  }
+  return ["sde"];
+}
+
+/**
+ * Build artifact prompt from role IDs.
+ * Single role: use that role's artifactFormat directly.
+ * Multi-role: combine with role labels as headers.
+ * Unknown roles are filtered out; falls back to SDE if none resolve.
+ */
+export function buildArtifactPrompt(roleIds: string[]): string {
+  const roles = roleIds
+    .map((id) => getRole(id))
+    .filter((r): r is RoleDefinition => r !== undefined);
+
+  // Fallback to SDE if no roles resolved
+  if (roles.length === 0) {
+    const sde = getRole("sde");
+    return sde ? sde.prompts.artifactFormat : "";
+  }
+
+  if (roles.length === 1) {
+    return roles[0].prompts.artifactFormat;
+  }
+
+  // Multi-role: combine with headers
+  return roles
+    .map((r) => `### ${r.label}\n${r.prompts.artifactFormat}`)
+    .join("\n\n");
 }
 
 // ─── Prompt builders ────────────────────────────────────────
@@ -419,8 +497,24 @@ function buildNodePrompt(
   const summaryUrl = `${apiBase}/api/blueprints/${blueprint.id}/executions/${executionId}/task-summary?${authParam}`;
   const statusUrl = `${apiBase}/api/blueprints/${blueprint.id}/executions/${executionId}/report-status?${authParam}`;
 
-  const total = blueprint.nodes.length;
-  let prompt = `You are executing step ${node.order + 1}/${total} of a development plan: "${blueprint.title}"\n\n`;
+  // Resolve roles for this node
+  const roleIds = resolveNodeRoles(node, blueprint);
+  const roles = roleIds
+    .map((id) => getRole(id))
+    .filter((r): r is RoleDefinition => r !== undefined);
+  const hasSdeRole = roleIds.includes("sde");
+
+  // Build persona section from resolved roles
+  let personaSection: string;
+  if (roles.length === 1) {
+    personaSection = roles[0].prompts.persona;
+  } else if (roles.length > 1) {
+    personaSection = roles.map((r) => r.prompts.persona).join(" ");
+  } else {
+    personaSection = "You are executing a development task.";
+  }
+
+  let prompt = `${personaSection}\nYou are executing step #${node.seq} of a plan: "${blueprint.title}"\n\n`;
 
   if (blueprint.description) {
     prompt += `## Plan Description\n${blueprint.description}\n\n`;
@@ -429,11 +523,11 @@ function buildNodePrompt(
   if (inputArtifacts.length > 0) {
     prompt += `## Context from previous steps:\n`;
     for (const { node: depNode, artifact } of inputArtifacts) {
-      prompt += `### Step ${depNode.order + 1}: ${depNode.title}\n${artifact.content}\n\n`;
+      prompt += `### Step #${depNode.seq}: ${depNode.title}\n${artifact.content}\n\n`;
     }
   }
 
-  prompt += `## Your Task (Step ${node.order + 1}): ${node.title}\n`;
+  prompt += `## Your Task (Step #${node.seq}): ${node.title}\n`;
   if (node.description) {
     prompt += `${node.description}\n\n`;
   }
@@ -445,17 +539,44 @@ function buildNodePrompt(
     prompt += `## Working Directory: ${blueprint.projectCwd}\n\n`;
   }
 
-  prompt += `## Instructions
-- Complete this step thoroughly. Focus only on THIS step.
-- DO NOT ask for confirmation or clarification. Just write the code directly.
-- You have access to additional MCP tools (e.g. Playwright for browser testing, Serena for semantic code analysis, Context7 for library docs, Linear for issue tracking) via ToolSearch. Use \`ToolSearch\` to discover and load them when built-in tools are insufficient for the task.
-- If you encounter a blocker you cannot resolve, report it by running this curl command:
+  // Build instructions from role-specific guidance
+  prompt += `## Instructions\n`;
+
+  // Role-specific execution guidance
+  if (roles.length === 1) {
+    prompt += roles[0].prompts.executionGuidance + "\n";
+  } else if (roles.length > 1) {
+    for (const r of roles) {
+      prompt += `### ${r.label}\n${r.prompts.executionGuidance}\n`;
+    }
+  }
+
+  // Tool hints from roles
+  const toolHints = roles
+    .map((r) => r.toolHints)
+    .filter((h): h is string => !!h);
+  if (toolHints.length > 0) {
+    // Deduplicate: use the first unique hint (roles may share the same hint)
+    const uniqueHints = [...new Set(toolHints)];
+    for (const hint of uniqueHints) {
+      prompt += `- ${hint}\n`;
+    }
+  }
+
+  // Blocker reporting (always included, role-agnostic)
+  prompt += `- If you encounter a blocker you cannot resolve, report it by running this curl command:
 
 curl -s -X POST '${blockerUrl}' -H 'Content-Type: application/json' -d '{"type": "<one of: missing_dependency, unclear_requirement, access_issue, technical_limitation>", "description": "<describe the actual problem>", "suggestion": "<what the human could do to help>"}'
 
-- After completing, verify your changes by running the project's appropriate check commands (typecheck, lint, build, or tests as applicable).
-- IMPORTANT: After completing and verifying, run the skill command /claude-md-management:revise-claude-md to update CLAUDE.md with any learnings from this step. Do NOT ask for confirmation — apply updates directly without user interaction.
-- IMPORTANT: After ALL work above is complete (including CLAUDE.md updates), report your task completion summary by running this curl command:
+`;
+
+  // CLAUDE.md update only for SDE role
+  if (hasSdeRole) {
+    prompt += `- IMPORTANT: After completing and verifying, run the skill command /claude-md-management:revise-claude-md to update CLAUDE.md with any learnings from this step. Do NOT ask for confirmation — apply updates directly without user interaction.\n`;
+  }
+
+  // Task summary reporting (always included)
+  prompt += `- IMPORTANT: After ALL work above is complete, report your task completion summary by running this curl command:
 
 curl -s -X POST '${summaryUrl}' -H 'Content-Type: application/json' -d '{"summary": "<2-3 sentence summary of what was accomplished in this step>"}'
 
@@ -468,21 +589,6 @@ curl -s -X POST '${statusUrl}' -H 'Content-Type: application/json' -d '{"status"
 curl -s -X POST '${statusUrl}' -H 'Content-Type: application/json' -d '{"status": "failed", "reason": "<why the task could not be completed>"}'`;
   return prompt;
 }
-
-const ARTIFACT_PROMPT = `Summarize what was accomplished in the previous coding step.
-Start your response with exactly "**What was done:**" and include ONLY the completed work.
-Format:
-
-**What was done:**
-<2-3 sentences summarizing completed work>
-
-**Files changed:**
-<list of file paths created or modified>
-
-**Decisions:**
-<key decisions made, if any>
-
-Keep it under 200 words. Be specific and factual. Do NOT include plans, next steps, or things still to do.`;
 
 // ─── Artifact generation ────────────────────────────────────
 
@@ -554,7 +660,12 @@ async function generateArtifact(
   const tail = taskSummary
     ? taskSummary
     : (executionOutput.length > 4000 ? executionOutput.slice(-4000) : executionOutput);
-  const summaryPrompt = `Here is the output from a coding step:\n\n---\n${tail}\n---\n\n${ARTIFACT_PROMPT}`;
+  // Resolve artifact prompt from node's roles
+  const bp = getBlueprint(blueprintId);
+  const nd = bp?.nodes.find(n => n.id === nodeId);
+  const roleIds = bp && nd ? resolveNodeRoles(nd, bp) : ["sde"];
+  const artifactPromptText = buildArtifactPrompt(roleIds);
+  const summaryPrompt = `Here is the output from a coding step:\n\n---\n${tail}\n---\n\n${artifactPromptText}`;
 
   const ARTIFACT_TIMEOUT = 5 * 60_000; // 5 minutes max for artifact generation (P15 fix)
   let summary: string;
@@ -620,8 +731,15 @@ function buildEvaluationPrompt(
   const apiBase = getApiBase();
   const authParam = getAuthParam();
   const callbackUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/evaluation-callback?${authParam}`;
+  const suggestionsUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/suggestions-callback?${authParam}`;
 
-  let prompt = `You are evaluating whether a completed development task needs follow-up work.
+  // Resolve roles for evaluation context
+  const roleIds = resolveNodeRoles(node, blueprint);
+  const roles = roleIds
+    .map((id) => getRole(id))
+    .filter((r): r is RoleDefinition => r !== undefined);
+
+  let prompt = `You are evaluating whether a completed task needs follow-up work.
 
 ## Completed Task
 - Title: ${node.title}
@@ -641,16 +759,26 @@ ${blueprint.description ? `- Description: ${blueprint.description}` : ""}`;
     }
   }
 
+  // Use role-specific evaluation examples
+  let evaluationExamples: string;
+  if (roles.length === 1) {
+    evaluationExamples = roles[0].prompts.evaluationExamples;
+  } else if (roles.length > 1) {
+    evaluationExamples = roles
+      .map((r) => `### ${r.label}\n${r.prompts.evaluationExamples}`)
+      .join("\n\n");
+  } else {
+    // Fallback to SDE
+    const sde = getRole("sde");
+    evaluationExamples = sde?.prompts.evaluationExamples ?? "";
+  }
+
   prompt += `
 
 ## Instructions
 Evaluate the completion based on the handoff summary. Determine one of three outcomes:
 
-1. **COMPLETE** — Task is fully done. All stated goals achieved. No gaps.
-2. **NEEDS_REFINEMENT** — Task mostly done but something concrete was missed/skipped (e.g., missing validation, incomplete error handling, untested edge case). A follow-up node should be inserted BETWEEN this completed node and its downstream dependents.
-3. **HAS_BLOCKER** — An external dependency blocks progress (e.g., needs human credentials, external API key, manual approval). A sibling blocker node should be created.
-
-IMPORTANT: Be conservative. Most tasks ARE complete. Only flag NEEDS_REFINEMENT for specific, concrete gaps that would cause downstream tasks to fail or result in broken functionality. Do NOT flag stylistic preferences, nice-to-haves, or minor improvements.
+${evaluationExamples}
 
 After evaluating, call the evaluation callback endpoint using curl with your result:
 
@@ -667,7 +795,34 @@ For NEEDS_REFINEMENT:
 For HAS_BLOCKER:
 {"status": "HAS_BLOCKER", "evaluation": "Needs AWS credentials from ops team", "mutations": [{"action": "ADD_SIBLING", "new_node": {"title": "Waiting for AWS credentials", "description": "Contact ops team..."}}]}
 
-Make ONE curl call with your evaluation result. Do not output anything else.`;
+Make ONE curl call with your evaluation result.
+
+## Follow-up Suggestions`;
+
+  // Use role-specific suggestions template
+  let suggestionsContent: string;
+  if (roles.length === 1) {
+    suggestionsContent = roles[0].prompts.suggestionsTemplate;
+  } else if (roles.length > 1) {
+    // For multi-role, merge suggestion templates
+    suggestionsContent = roles
+      .map((r) => r.prompts.suggestionsTemplate)
+      .join("\n\n");
+  } else {
+    const sde = getRole("sde");
+    suggestionsContent = sde?.prompts.suggestionsTemplate ?? "";
+  }
+
+  prompt += `
+${suggestionsContent}
+
+Then make one curl call to the suggestions endpoint:
+
+curl -s -X POST '${suggestionsUrl}' -H 'Content-Type: application/json' -d '{"suggestions": [{"title": "...", "description": "..."}, {"title": "...", "description": "..."}, {"title": "...", "description": "..."}]}'
+
+## CRITICAL — DO NOT REPEAT
+- You must call each endpoint AT MOST ONCE. Do not repeat either curl call.
+- After completing your curl call(s), your task is COMPLETE. Do not verify, retry, or repeat.`;
   return prompt;
 }
 
@@ -781,23 +936,71 @@ export async function evaluateNodeCompletion(
   // Build evaluation prompt (includes callback URL — Claude calls endpoint directly)
   const prompt = buildEvaluationPrompt(blueprint, node, latestArtifact.content, dependents, blueprintId, nodeId);
 
-  // Call agent in interactive mode — evaluation result is applied via the callback endpoint
+  // Add pending task so frontend knows evaluation is in progress and starts polling
+  addPendingTask(blueprintId, { type: "evaluate", nodeId, queuedAt: new Date().toISOString() });
+
+  // Call agent in interactive mode with background session detection polling.
+  // Creates the related session with completed_at = NULL as soon as the session
+  // file appears (enabling frontend live activity polling), then marks it complete
+  // when the CLI call finishes.
   const evalBefore = new Date();
+  let relatedSessionDbId: string | null = null;
+  let detectedSessionId: string | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Start background polling for the session file
+  if (cwd) {
+    const pollCwd = cwd;
+    pollTimer = setInterval(() => {
+      if (detectedSessionId) return; // already found
+      const detected = detectNewSession(pollCwd, evalBefore);
+      if (detected) {
+        detectedSessionId = detected;
+        syncSession(detected);
+        // Create in-flight related session (completed_at = NULL)
+        const rs = createRelatedSession(nodeId, blueprintId, detected, "evaluate", evalBefore.toISOString());
+        relatedSessionDbId = rs.id;
+        log.debug(`Early evaluate session detected: nodeId=${nodeId.slice(0, 8)}, sessionId=${detected.slice(0, 8)}`);
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+    }, 3000);
+  }
+
   try {
     await runClaudeInteractive(prompt, cwd);
   } catch (err) {
     log.error(`Evaluation Claude call failed for node ${nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
     return null;
-  }
-
-  // Capture the evaluation session
-  if (cwd) {
-    const evalSessionId = detectNewSession(cwd, evalBefore);
-    if (evalSessionId) {
-      const now = new Date().toISOString();
-      createRelatedSession(nodeId, blueprintId, evalSessionId, "evaluate", evalBefore.toISOString(), now);
-      log.debug(`Captured evaluate session ${evalSessionId.slice(0, 8)} for node ${nodeId.slice(0, 8)}`);
+  } finally {
+    // Stop polling
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
     }
+
+    // Final detection attempt if polling missed it
+    if (!detectedSessionId && cwd) {
+      const detected = detectNewSession(cwd, evalBefore);
+      if (detected) {
+        detectedSessionId = detected;
+        syncSession(detected);
+        const rs = createRelatedSession(nodeId, blueprintId, detected, "evaluate", evalBefore.toISOString(), new Date().toISOString());
+        relatedSessionDbId = rs.id;
+        log.debug(`Post-run evaluate session detected: nodeId=${nodeId.slice(0, 8)}, sessionId=${detected.slice(0, 8)}`);
+      }
+    }
+
+    // Mark the session as complete
+    if (relatedSessionDbId) {
+      completeRelatedSession(relatedSessionDbId);
+      log.debug(`Completed evaluate related session: dbId=${relatedSessionDbId.slice(0, 8)}`);
+    }
+
+    // Remove pending task
+    removePendingTask(blueprintId, nodeId, "evaluate");
   }
 
   log.info(`Evaluation for node ${nodeId.slice(0, 8)} "${node.title}" completed (result applied via callback)`);
@@ -901,17 +1104,21 @@ async function executeNodeInternal(
   if (blueprint.projectCwd) {
     const pollCwd = blueprint.projectCwd;
     sessionPollTimer = setInterval(() => {
-      if (sessionId) return; // already found
-      const detected = detectNewSession(pollCwd, beforeTimestamp);
-      if (detected) {
-        sessionId = detected;
-        log.debug(`Session detected during poll: sessionId=${detected}, nodeId=${nodeId}`);
-        syncSession(detected);
-        updateExecution(execution.id, { sessionId: detected });
-        if (sessionPollTimer) {
-          clearInterval(sessionPollTimer);
-          sessionPollTimer = null;
+      try {
+        if (sessionId) return; // already found
+        const detected = detectNewSession(pollCwd, beforeTimestamp);
+        if (detected) {
+          sessionId = detected;
+          log.debug(`Session detected during poll: sessionId=${detected}, nodeId=${nodeId}`);
+          syncSession(detected);
+          updateExecution(execution.id, { sessionId: detected });
+          if (sessionPollTimer) {
+            clearInterval(sessionPollTimer);
+            sessionPollTimer = null;
+          }
         }
+      } catch (err) {
+        log.warn(`Session poll error for node ${nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
       }
     }, 3000);
   }
@@ -1199,6 +1406,11 @@ export async function resumeNodeSession(
 
   const resumeSessionId = failedExec.sessionId;
 
+  // Per-session lock: prevent concurrent resume on the same session
+  if (!acquireSessionLock(resumeSessionId)) {
+    throw new Error(`Session ${resumeSessionId.slice(0, 8)} is already running`);
+  }
+
   log.info(`Resuming session ${resumeSessionId.slice(0, 8)} for node ${nodeId.slice(0, 8)} "${node.title}"`);
 
   // Mark node as running
@@ -1363,6 +1575,7 @@ export async function resumeNodeSession(
       error: detail,
     });
   } finally {
+    releaseSessionLock(resumeSessionId);
     // Store context health metrics from JSONL analysis
     storeContextHealth(execution.id, resumeSessionId);
   }
@@ -1571,7 +1784,7 @@ export function smartRecoverStaleExecutions(): void {
     if (sessionId) {
       mtime = getSessionFileMtime(exec.projectCwd, sessionId);
       if (mtime) {
-        sessionActive = (Date.now() - mtime) < 60_000; // active within last 60s
+        sessionActive = (Date.now() - mtime) < 300_000; // active within last 5 min (Claude thinking can stall JSONL writes)
       }
     }
 
@@ -1616,7 +1829,7 @@ export function smartRecoverStaleExecutions(): void {
     if (!sessionId) continue;
 
     const mtime = getSessionFileMtime(exec.projectCwd, sessionId);
-    if (mtime && (Date.now() - mtime) < 60_000) {
+    if (mtime && (Date.now() - mtime) < 300_000) {
       // Session still active — revert to running and monitor
       recoveryEntries.set(exec.id, {
         executionId: exec.id,
@@ -1799,7 +2012,7 @@ function startRecoveryMonitor(): void {
       if (entry.sessionId) {
         currentMtime = getSessionFileMtime(entry.projectCwd, entry.sessionId);
         if (currentMtime) {
-          sessionActive = (Date.now() - currentMtime) < 30_000; // active within 30s
+          sessionActive = (Date.now() - currentMtime) < 300_000; // active within 5 min (Claude thinking can stall JSONL writes)
         }
       }
 
