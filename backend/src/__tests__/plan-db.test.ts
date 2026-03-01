@@ -504,6 +504,39 @@ describe("plan-db", () => {
     expect(idx1).toBeLessThan(idx2);
   });
 
+  it("listBlueprints filters by search query", { timeout: 30_000 }, async () => {
+    const { createBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const cwd = `/tmp/search-test-${randomUUID()}`;
+    createBlueprint(`Alpha Feature ${randomUUID()}`, undefined, cwd);
+    createBlueprint(`Beta Widget ${randomUUID()}`, undefined, cwd);
+    createBlueprint(`Gamma Feature ${randomUUID()}`, undefined, cwd);
+
+    const featureResults = listBlueprints({ search: "Feature", projectCwd: cwd });
+    expect(featureResults.length).toBe(2);
+    expect(featureResults.every((b) => b.title.includes("Feature"))).toBe(true);
+
+    const widgetResults = listBlueprints({ search: "widget", projectCwd: cwd });
+    expect(widgetResults.length).toBe(1);
+    expect(widgetResults[0].title).toContain("Beta Widget");
+
+    const noResults = listBlueprints({ search: "nonexistent", projectCwd: cwd });
+    expect(noResults.length).toBe(0);
+  });
+
+  it("listBlueprints search works with other filters", { timeout: 30_000 }, async () => {
+    const { createBlueprint, updateBlueprint, listBlueprints } = await import("../plan-db.js");
+
+    const cwd = `/tmp/search-filter-test-${randomUUID()}`;
+    const bp1 = createBlueprint(`Search Approved ${randomUUID()}`, undefined, cwd);
+    createBlueprint(`Search Draft ${randomUUID()}`, undefined, cwd);
+    updateBlueprint(bp1.id, { status: "approved" });
+
+    const results = listBlueprints({ search: "Search", status: "approved", projectCwd: cwd });
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe(bp1.id);
+  });
+
   // ─── Execution callback columns ───────────────────────────
 
   it("setExecutionBlocker stores blocker info", async () => {
@@ -1183,5 +1216,70 @@ describe("plan-db", () => {
     assertNoSnakeCaseKeys(fetchedExec as unknown as Record<string, unknown>);
     expect(fetchedExec.nodeId).toBe(n.id);
     expect(fetchedExec.blueprintId).toBe(bp.id);
+  });
+
+  // ─── Role fields tests ─────────────────────────────────────
+
+  it("createBlueprint defaults enabledRoles to ['sde'] and defaultRole to 'sde'", async () => {
+    const { createBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Role Default Test", "desc", `/tmp/role-default-${randomUUID()}`);
+    expect(bp.enabledRoles).toEqual(["sde"]);
+    expect(bp.defaultRole).toBe("sde");
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched.enabledRoles).toEqual(["sde"]);
+    expect(fetched.defaultRole).toBe("sde");
+  });
+
+  it("createBlueprint with custom enabledRoles and defaultRole", async () => {
+    const { createBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Role Custom Test", "desc", `/tmp/role-custom-${randomUUID()}`, "claude", ["sde", "qa", "pm"], "qa");
+    expect(bp.enabledRoles).toEqual(["sde", "qa", "pm"]);
+    expect(bp.defaultRole).toBe("qa");
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched.enabledRoles).toEqual(["sde", "qa", "pm"]);
+    expect(fetched.defaultRole).toBe("qa");
+  });
+
+  it("updateBlueprint patches enabledRoles and defaultRole", async () => {
+    const { createBlueprint, updateBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Role Update Test", "desc", `/tmp/role-update-${randomUUID()}`);
+    expect(bp.enabledRoles).toEqual(["sde"]);
+
+    const updated = updateBlueprint(bp.id, { enabledRoles: ["sde", "pm"], defaultRole: "pm" })!;
+    expect(updated.enabledRoles).toEqual(["sde", "pm"]);
+    expect(updated.defaultRole).toBe("pm");
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched.enabledRoles).toEqual(["sde", "pm"]);
+    expect(fetched.defaultRole).toBe("pm");
+  });
+
+  it("updateMacroNode patches roles", async () => {
+    const { createBlueprint, createMacroNode, updateMacroNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Node Role Test", "desc", `/tmp/node-role-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Node Roles", order: 0 });
+
+    // Nodes default to no roles (undefined)
+    expect(n.roles).toBeUndefined();
+
+    const updated = updateMacroNode(bp.id, n.id, { roles: ["sde", "qa"] })!;
+    expect(updated.roles).toEqual(["sde", "qa"]);
+  });
+
+  it("node roles default to undefined when not set", async () => {
+    const { createBlueprint, createMacroNode, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Node Role Default Test", "desc", `/tmp/node-role-default-${randomUUID()}`);
+    createMacroNode(bp.id, { title: "No Roles Node", order: 0 });
+
+    const fetched = getBlueprint(bp.id)!;
+    expect(fetched.nodes).toHaveLength(1);
+    expect(fetched.nodes[0].roles).toBeUndefined();
   });
 });

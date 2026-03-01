@@ -25,6 +25,8 @@ export interface Blueprint {
   starred?: boolean;
   archivedAt?: string;
   agentType?: string;
+  enabledRoles?: string[];
+  defaultRole?: string;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -35,6 +37,7 @@ export interface MacroNode {
   id: string;
   blueprintId: string;
   order: number;
+  seq: number;
   title: string;
   description: string;
   status: MacroNodeStatus;
@@ -48,6 +51,8 @@ export interface MacroNode {
   executions: NodeExecution[];
   error?: string;
   agentType?: string;
+  roles?: string[];
+  suggestionCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -97,6 +102,16 @@ export interface RelatedSession {
   type: RelatedSessionType;
   startedAt: string;
   completedAt?: string;
+}
+
+export interface NodeSuggestion {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  title: string;
+  description: string;
+  used: boolean;
+  createdAt: string;
 }
 
 // Info returned by getStaleRunningExecutions for smart recovery
@@ -201,6 +216,16 @@ export function initPlanTables(): void {
         completed_at  TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS node_suggestions (
+        id            TEXT PRIMARY KEY,
+        node_id       TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT NOT NULL,
+        used          INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_macro_nodes_blueprint ON macro_nodes(blueprint_id, "order");
       CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source_node_id);
       CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_node_id);
@@ -211,6 +236,8 @@ export function initPlanTables(): void {
       CREATE INDEX IF NOT EXISTS idx_executions_completed ON node_executions(completed_at);
       CREATE INDEX IF NOT EXISTS idx_related_sessions_node ON node_related_sessions(node_id);
       CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
+      CREATE INDEX IF NOT EXISTS idx_suggestions_node ON node_suggestions(node_id);
+      CREATE INDEX IF NOT EXISTS idx_suggestions_blueprint ON node_suggestions(blueprint_id);
     `);
   }
 
@@ -266,6 +293,30 @@ export function initPlanTables(): void {
     `);
   }
 
+  // Incremental migration: create node_suggestions table if not exists
+  const sugTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='node_suggestions'").all();
+  if (sugTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS node_suggestions (
+        id            TEXT PRIMARY KEY,
+        node_id       TEXT NOT NULL REFERENCES macro_nodes(id) ON DELETE CASCADE,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT NOT NULL,
+        used          INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_suggestions_node ON node_suggestions(node_id);
+      CREATE INDEX IF NOT EXISTS idx_suggestions_blueprint ON node_suggestions(blueprint_id);
+    `);
+  }
+
+  // Incremental migration: add used column to node_suggestions
+  const sugCols = db.prepare("PRAGMA table_info(node_suggestions)").all() as { name: string }[];
+  if (!sugCols.some((c) => c.name === "used")) {
+    db.exec("ALTER TABLE node_suggestions ADD COLUMN used INTEGER NOT NULL DEFAULT 0");
+  }
+
   // Incremental migration: add archived_at column to blueprints
   const bpCols = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
   if (!bpCols.some((c) => c.name === "archived_at")) {
@@ -284,10 +335,51 @@ export function initPlanTables(): void {
     db.exec("ALTER TABLE blueprints ADD COLUMN starred INTEGER DEFAULT 0");
   }
 
+  // Incremental migration: add role fields to blueprints
+  const bpCols5 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols5.some((c) => c.name === "enabled_roles")) {
+    db.exec(`ALTER TABLE blueprints ADD COLUMN enabled_roles TEXT DEFAULT '["sde"]'`);
+  }
+  if (!bpCols5.some((c) => c.name === "default_role")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN default_role TEXT DEFAULT 'sde'");
+  }
+
   // Incremental migration: add agent_type column to macro_nodes (per-node agent override)
   const mnCols = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
   if (!mnCols.some((c) => c.name === "agent_type")) {
     db.exec("ALTER TABLE macro_nodes ADD COLUMN agent_type TEXT DEFAULT 'claude'");
+  }
+
+  // Incremental migration: add roles column to macro_nodes
+  const mnCols3 = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
+  if (!mnCols3.some((c) => c.name === "roles")) {
+    db.exec("ALTER TABLE macro_nodes ADD COLUMN roles TEXT DEFAULT NULL");
+  }
+
+  // Incremental migration: add seq column to macro_nodes (monotonic display number)
+  const mnCols2 = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
+  if (!mnCols2.some((c) => c.name === "seq")) {
+    db.exec("ALTER TABLE macro_nodes ADD COLUMN seq INTEGER");
+    // Backfill: assign seq = 1, 2, 3... per blueprint in order ASC
+    const bpIdsForSeq = db.prepare("SELECT DISTINCT blueprint_id FROM macro_nodes").all() as { blueprint_id: string }[];
+    for (const { blueprint_id } of bpIdsForSeq) {
+      const rows = db.prepare('SELECT id FROM macro_nodes WHERE blueprint_id = ? ORDER BY "order" ASC').all(blueprint_id) as { id: string }[];
+      for (let i = 0; i < rows.length; i++) {
+        db.prepare("UPDATE macro_nodes SET seq = ? WHERE id = ?").run(i + 1, rows[i].id);
+      }
+    }
+  }
+
+  // Incremental migration: add next_node_seq counter to blueprints
+  const bpCols4 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols4.some((c) => c.name === "next_node_seq")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN next_node_seq INTEGER DEFAULT 1");
+    // Backfill: set next_node_seq = MAX(seq) + 1 per blueprint
+    const bpIdsForNextSeq = db.prepare("SELECT id FROM blueprints").all() as { id: string }[];
+    for (const { id } of bpIdsForNextSeq) {
+      const maxSeq = db.prepare("SELECT MAX(seq) as max_seq FROM macro_nodes WHERE blueprint_id = ?").get(id) as { max_seq: number | null };
+      db.prepare("UPDATE blueprints SET next_node_seq = ? WHERE id = ?").run((maxSeq?.max_seq ?? 0) + 1, id);
+    }
   }
 
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
@@ -309,6 +401,9 @@ interface BlueprintRow {
   starred: number;
   archived_at: string | null;
   agent_type: string | null;
+  enabled_roles: string | null;
+  default_role: string | null;
+  next_node_seq: number;
   created_at: string;
   updated_at: string;
 }
@@ -317,6 +412,7 @@ interface MacroNodeRow {
   id: string;
   blueprint_id: string;
   order: number;
+  seq: number | null;
   title: string;
   description: string | null;
   status: string;
@@ -327,6 +423,7 @@ interface MacroNodeRow {
   actual_minutes: number | null;
   error: string | null;
   agent_type: string | null;
+  roles: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -410,6 +507,7 @@ function rowToMacroNode(
   inputArtifacts: Artifact[] = [],
   outputArtifacts: Artifact[] = [],
   executions: NodeExecution[] = [],
+  suggestionCount?: number,
 ): MacroNode {
   let dependencies: string[] = [];
   if (row.dependencies) {
@@ -423,6 +521,7 @@ function rowToMacroNode(
     id: row.id,
     blueprintId: row.blueprint_id,
     order: row.order,
+    seq: row.seq ?? (row.order + 1),
     title: row.title,
     description: row.description ?? "",
     status: row.status as MacroNodeStatus,
@@ -436,12 +535,22 @@ function rowToMacroNode(
     executions,
     ...(row.error ? { error: row.error } : {}),
     ...(row.agent_type ? { agentType: row.agent_type } : {}),
+    ...(row.roles ? { roles: JSON.parse(row.roles) } : {}),
+    ...(suggestionCount != null && suggestionCount > 0 ? { suggestionCount } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
+  let enabledRoles: string[] | undefined;
+  if (row.enabled_roles) {
+    try {
+      enabledRoles = JSON.parse(row.enabled_roles);
+    } catch {
+      enabledRoles = ["sde"];
+    }
+  }
   return {
     id: row.id,
     title: row.title,
@@ -451,6 +560,8 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
     ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
     ...(row.agent_type ? { agentType: row.agent_type } : {}),
+    ...(enabledRoles ? { enabledRoles } : {}),
+    ...(row.default_role ? { defaultRole: row.default_role } : {}),
     nodes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -549,6 +660,15 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
     execsByNode.set(exec.node_id, list);
   }
 
+  // Batch-load suggestion counts for these nodes
+  const sugCounts = db
+    .prepare(`SELECT node_id, COUNT(*) as cnt FROM node_suggestions WHERE node_id IN (${placeholders}) GROUP BY node_id`)
+    .all(...nodeIds) as { node_id: string; cnt: number }[];
+  const sugCountByNode = new Map<string, number>();
+  for (const { node_id, cnt } of sugCounts) {
+    sugCountByNode.set(node_id, cnt);
+  }
+
   return rows.map((row) => {
     // Compute input artifacts: targeted at this node + untargeted from deps
     const targeted = artifactsByTarget.get(row.id) ?? [];
@@ -561,7 +681,7 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
     const outputArts = (artifactsBySource.get(row.id) ?? []).map(rowToArtifact);
     const execs = (execsByNode.get(row.id) ?? []).map(rowToExecution);
 
-    return rowToMacroNode(row, inputArts, outputArts, execs);
+    return rowToMacroNode(row, inputArts, outputArts, execs, sugCountByNode.get(row.id));
   });
 }
 
@@ -572,15 +692,19 @@ export function createBlueprint(
   description?: string,
   projectCwd?: string,
   agentType?: string,
+  enabledRoles?: string[],
+  defaultRole?: string,
 ): Blueprint {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
+  const rolesJson = JSON.stringify(enabledRoles ?? ["sde"]);
+  const role = defaultRole ?? "sde";
 
   db.prepare(`
-    INSERT INTO blueprints (id, title, description, status, project_cwd, agent_type, created_at, updated_at)
-    VALUES (?, ?, ?, 'draft', ?, ?, ?, ?)
-  `).run(id, title, description ?? null, projectCwd ?? null, agentType ?? "claude", now, now);
+    INSERT INTO blueprints (id, title, description, status, project_cwd, agent_type, enabled_roles, default_role, next_node_seq, created_at, updated_at)
+    VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 1, ?, ?)
+  `).run(id, title, description ?? null, projectCwd ?? null, agentType ?? "claude", rolesJson, role, now, now);
 
   return {
     id,
@@ -589,6 +713,8 @@ export function createBlueprint(
     status: "draft",
     ...(projectCwd ? { projectCwd } : {}),
     ...(agentType ? { agentType } : {}),
+    enabledRoles: enabledRoles ?? ["sde"],
+    defaultRole: role,
     nodes: [],
     createdAt: now,
     updatedAt: now,
@@ -602,7 +728,7 @@ export function getBlueprint(id: string): Blueprint | null {
   return rowToBlueprint(row, getNodesForBlueprint(id));
 }
 
-export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean; limit?: number; offset?: number }): Blueprint[] {
+export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean; search?: string; limit?: number; offset?: number }): Blueprint[] {
   const db = getDb();
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -614,6 +740,10 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string;
   if (filters?.projectCwd) {
     conditions.push("project_cwd = ?");
     params.push(filters.projectCwd);
+  }
+  if (filters?.search) {
+    conditions.push("title LIKE ?");
+    params.push(`%${filters.search}%`);
   }
   // By default, exclude archived blueprints unless explicitly requested
   if (!filters?.includeArchived) {
@@ -685,7 +815,7 @@ export function unstarBlueprint(id: string): Blueprint | null {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType">>,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "enabledRoles" | "defaultRole">>,
 ): Blueprint | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
@@ -714,6 +844,14 @@ export function updateBlueprint(
   if (patch.agentType !== undefined) {
     sets.push("agent_type = ?");
     params.push(patch.agentType);
+  }
+  if (patch.enabledRoles !== undefined) {
+    sets.push("enabled_roles = ?");
+    params.push(JSON.stringify(patch.enabledRoles));
+  }
+  if (patch.defaultRole !== undefined) {
+    sets.push("default_role = ?");
+    params.push(patch.defaultRole);
   }
 
   params.push(id);
@@ -747,20 +885,27 @@ export function createMacroNode(
   const now = new Date().toISOString();
   const depsJson = data.dependencies?.length ? JSON.stringify(data.dependencies) : null;
 
-  // Atomic: shift + insert + touch parent (P6 fix)
+  // Atomic: shift + insert + allocate seq + touch parent (P6 fix)
+  let seq: number;
   const insertTransaction = db.transaction(() => {
     // Shift existing nodes at or above this order to make room
     db.prepare(
       'UPDATE macro_nodes SET "order" = "order" + 1, updated_at = ? WHERE blueprint_id = ? AND "order" >= ?'
     ).run(now, blueprintId, data.order);
 
+    // Allocate monotonic seq from blueprint counter
+    const bpRow = db.prepare("SELECT next_node_seq FROM blueprints WHERE id = ?").get(blueprintId) as { next_node_seq: number } | undefined;
+    seq = bpRow?.next_node_seq ?? 1;
+    db.prepare("UPDATE blueprints SET next_node_seq = ? WHERE id = ?").run(seq + 1, blueprintId);
+
     db.prepare(`
-      INSERT INTO macro_nodes (id, blueprint_id, "order", title, description, status, dependencies, parallel_group, prompt, estimated_minutes, agent_type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO macro_nodes (id, blueprint_id, "order", seq, title, description, status, dependencies, parallel_group, prompt, estimated_minutes, agent_type, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       blueprintId,
       data.order,
+      seq,
       data.title,
       data.description ?? null,
       depsJson,
@@ -781,6 +926,7 @@ export function createMacroNode(
     id,
     blueprintId,
     order: data.order,
+    seq: seq!,
     title: data.title,
     description: data.description ?? "",
     status: "pending",
@@ -814,6 +960,7 @@ export function updateMacroNode(
       | "error"
       | "order"
       | "agentType"
+      | "roles"
     >
   >,
 ): MacroNode | null {
@@ -838,6 +985,7 @@ export function updateMacroNode(
   if (patch.error !== undefined) { sets.push("error = ?"); params.push(patch.error); }
   if (patch.order !== undefined) { sets.push('"order" = ?'); params.push(patch.order); }
   if (patch.agentType !== undefined) { sets.push("agent_type = ?"); params.push(patch.agentType); }
+  if (patch.roles !== undefined) { sets.push("roles = ?"); params.push(JSON.stringify(patch.roles)); }
 
   params.push(nodeId, blueprintId);
   db.prepare(`UPDATE macro_nodes SET ${sets.join(", ")} WHERE id = ? AND blueprint_id = ?`).run(...params);
@@ -1332,10 +1480,83 @@ export function getRelatedSessionsForNode(nodeId: string): RelatedSession[] {
   return rows.map(rowToRelatedSession);
 }
 
+export function getActiveRelatedSession(nodeId: string): RelatedSession | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM node_related_sessions WHERE node_id = ? AND completed_at IS NULL ORDER BY started_at DESC LIMIT 1")
+    .get(nodeId) as RelatedSessionRow | undefined;
+  return row ? rowToRelatedSession(row) : null;
+}
+
 export function getRelatedSessionBySession(sessionId: string): RelatedSession | null {
   const db = getDb();
   const row = db
     .prepare("SELECT * FROM node_related_sessions WHERE session_id = ?")
     .get(sessionId) as RelatedSessionRow | undefined;
   return row ? rowToRelatedSession(row) : null;
+}
+
+// ─── NodeSuggestion CRUD ─────────────────────────────────────
+
+interface SuggestionRow {
+  id: string;
+  node_id: string;
+  blueprint_id: string;
+  title: string;
+  description: string;
+  used: number;
+  created_at: string;
+}
+
+function rowToSuggestion(row: SuggestionRow): NodeSuggestion {
+  return {
+    id: row.id,
+    nodeId: row.node_id,
+    blueprintId: row.blueprint_id,
+    title: row.title,
+    description: row.description,
+    used: row.used === 1,
+    createdAt: row.created_at,
+  };
+}
+
+export function createSuggestion(
+  blueprintId: string,
+  nodeId: string,
+  title: string,
+  description: string,
+): NodeSuggestion {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO node_suggestions (id, node_id, blueprint_id, title, description, used, created_at)
+    VALUES (?, ?, ?, ?, ?, 0, ?)
+  `).run(id, nodeId, blueprintId, title, description, now);
+  return { id, nodeId, blueprintId, title, description, used: false, createdAt: now };
+}
+
+export function getSuggestionsForNode(nodeId: string): NodeSuggestion[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM node_suggestions WHERE node_id = ? ORDER BY created_at ASC")
+    .all(nodeId) as SuggestionRow[];
+  return rows.map(rowToSuggestion);
+}
+
+export function deleteSuggestionsForNode(nodeId: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM node_suggestions WHERE node_id = ?").run(nodeId);
+}
+
+export function markSuggestionUsed(id: string): NodeSuggestion | null {
+  const db = getDb();
+  db.prepare("UPDATE node_suggestions SET used = 1 WHERE id = ?").run(id);
+  const row = db.prepare("SELECT * FROM node_suggestions WHERE id = ?").get(id) as SuggestionRow | undefined;
+  return row ? rowToSuggestion(row) : null;
+}
+
+export function deleteSuggestion(id: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM node_suggestions WHERE id = ?").run(id);
 }
