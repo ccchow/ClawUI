@@ -2,12 +2,19 @@ import { getBlueprint, getArtifactsForNode } from "./plan-db.js";
 import { PORT } from "./config.js";
 import { LOCAL_AUTH_TOKEN } from "./auth.js";
 import { getActiveRuntime } from "./agent-runtime.js";
+import { getRole } from "./roles/role-registry.js";
+import type { RoleDefinition } from "./roles/role-registry.js";
 
 // Side-effect imports: ensure all runtimes are registered before getActiveRuntime()
 import "./agent-claude.js";
 import "./agent-pimono.js";
 import "./agent-openclaw.js";
 import "./agent-codex.js";
+
+// Side-effect imports: ensure all roles are registered before getRole()
+import "./roles/role-sde.js";
+import "./roles/role-qa.js";
+import "./roles/role-pm.js";
 
 /**
  * Run the active agent in text output mode (no tool use). Used for simple tasks
@@ -83,7 +90,48 @@ export async function generatePlan(blueprintId: string, userInstruction?: string
   const apiBase = getApiBase();
   const authParam = getAuthParam();
 
-  const prompt = `You are a senior software architect reviewing and planning a development task.
+  // Resolve enabled roles for role-aware generation
+  const enabledRoleIds = blueprint.enabledRoles ?? ["sde"];
+  const enabledRoles: RoleDefinition[] = enabledRoleIds
+    .map((id) => getRole(id))
+    .filter((r): r is RoleDefinition => r !== undefined);
+
+  // Fallback to SDE if none resolved
+  if (enabledRoles.length === 0) {
+    const sde = getRole("sde");
+    if (sde) enabledRoles.push(sde);
+  }
+
+  // Build role-aware persona
+  const roleLabels = enabledRoles.map((r) => r.label).join(", ");
+  const persona = enabledRoles.length > 1
+    ? `You are an expert planner coordinating work across: ${roleLabels}.`
+    : `You are a senior software architect reviewing and planning a development task.`;
+
+  // Merge decomposition heuristics from all enabled roles
+  const decompositionHeuristics = enabledRoles.length === 1
+    ? enabledRoles[0].prompts.decompositionHeuristic
+    : enabledRoles.map((r) => `### ${r.label}\n${r.prompts.decompositionHeuristic}`).join("\n\n");
+
+  // Merge specificity guidance from all enabled roles
+  const specificityGuidance = enabledRoles.length === 1
+    ? enabledRoles[0].prompts.specificityGuidance
+    : enabledRoles.map((r) => r.prompts.specificityGuidance).join(" ");
+
+  // Collect decomposition examples from each role
+  const decompositionExamples = enabledRoles
+    .map((r) => r.prompts.decompositionExample
+      .replace(/<apiBase>/g, apiBase)
+      .replace(/<blueprintId>/g, blueprintId)
+      .replace(/<authParam>/g, authParam))
+    .join("\n\n");
+
+  // When multiple roles are enabled, instruct agent to tag nodes with roles
+  const rolesInstruction = enabledRoles.length > 1
+    ? `\n- Tag each node with the appropriate role(s) using "roles": ["roleId"] in the JSON. Available roles: ${enabledRoles.map((r) => `"${r.id}" (${r.label})`).join(", ")}. If a node involves multiple roles, include all relevant IDs.`
+    : "";
+
+  const prompt = `${persona}
 
 Task: ${desc || "(see user instruction below)"}
 Blueprint ID: ${blueprintId}
@@ -100,22 +148,24 @@ Content-Type: application/json
 
 The body is a JSON ARRAY of node objects. Each element has:
 - "title": (REQUIRED) node title string
-- "description": detailed description string (be specific about files, functions, endpoints)
+- "description": detailed description string (${specificityGuidance})
 - "dependencies": array supporting two formats:
   - String node ID (e.g. "abc-123") to depend on an existing completed/pending node
-  - Integer index (e.g. 0, 1) to depend on another new node in this same batch (0-based)
+  - Integer index (e.g. 0, 1) to depend on another new node in this same batch (0-based)${enabledRoles.length > 1 ? `\n- "roles": (optional) array of role IDs for this node. Available: ${enabledRoles.map((r) => `"${r.id}"`).join(", ")}` : ""}
 
-Example (creates 2 nodes where the second depends on the first):
-curl -s -X POST '${apiBase}/api/blueprints/${blueprintId}/nodes/batch-create?${authParam}' -H 'Content-Type: application/json' -d '[{"title":"Backend API","description":"Create REST endpoints...","dependencies":[]},{"title":"Frontend UI","description":"Build React components...","dependencies":[0]}]'
+${decompositionExamples}
 
 Rules:
-- Create 0-6 NEW steps. Each completable in one Claude Code session (5-15 min).
-- When establishing dependencies, prefer depending on existing done nodes whose work is directly relevant (leaf nodes with no existing successors are ideal candidates). Within new nodes, create sequential dependencies for modular work: e.g., backend → frontend → integration test.
-- Each generated node should be self-contained and reusable. Split by architectural layer when appropriate — e.g., a feature module becomes: (1) backend API node, (2) frontend UI node, (3) E2E integration node — with sequential dependencies. Optimize for: single-session completability, clear handoff boundaries, and maximum reuse as dependency targets.
+${decompositionHeuristics}
 - Never touch any existing nodes (completed, running, or pending). Only add new nodes.
-- Be specific: mention file paths, function names, API endpoints.
+- ${specificityGuidance}
 - If no new work is needed, do not call the API.
-- Make ONE batch-create call with ALL new nodes.`;
+- Make ONE batch-create call with ALL new nodes.${rolesInstruction}
+
+## CRITICAL — DO NOT REPEAT
+- Make exactly ONE batch-create curl call containing ALL new nodes. Do NOT make a second call.
+- After the curl call succeeds, your task is COMPLETE. Do not verify, retry, or repeat the call.
+- Do not output the nodes as JSON or text — only use the curl call.`;
 
   await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
 }

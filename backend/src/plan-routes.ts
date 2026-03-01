@@ -30,14 +30,29 @@ import {
   setExecutionTaskSummary,
   setExecutionReportedStatus,
   createRelatedSession,
+  completeRelatedSession,
   getRelatedSessionsForNode,
+  getActiveRelatedSession,
+  createSuggestion,
+  getSuggestionsForNode,
+  deleteSuggestionsForNode,
+  deleteSuggestion,
+  markSuggestionUsed,
 } from "./plan-db.js";
 import type { ArtifactType, ExecutionType, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
-import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession } from "./plan-executor.js";
+import { syncSession } from "./db.js";
+import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession, resolveNodeRoles } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runAgentInteractive, getApiBase, getAuthParam } from "./plan-generator.js";
+import { getRole } from "./roles/role-registry.js";
+import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR } from "./config.js";
+
+// Side-effect imports: ensure all roles are registered before getRole()
+import "./roles/role-sde.js";
+import "./roles/role-qa.js";
+import "./roles/role-pm.js";
 
 
 const log = createLogger("plan-routes");
@@ -54,22 +69,71 @@ function safeError(err: unknown): string {
 }
 
 /**
- * Helper to detect and record a related session after an interactive CLI call.
- * Uses the same detectNewSession pattern as executeNodeInternal.
+ * Run an agent interactive call with background session detection polling.
+ * Creates the related session record with completed_at = NULL as soon as
+ * the session file appears (enabling frontend live polling), then marks it
+ * complete when the CLI call finishes. Returns the CLI output.
  */
-function captureRelatedSession(
+async function runWithRelatedSessionDetection(
+  prompt: string,
   projectCwd: string | undefined,
-  beforeTimestamp: Date,
   nodeId: string,
   blueprintId: string,
   type: RelatedSessionType,
-): void {
-  if (!projectCwd) return;
-  const sessionId = detectNewSession(projectCwd, beforeTimestamp);
-  if (sessionId) {
-    const now = new Date().toISOString();
-    createRelatedSession(nodeId, blueprintId, sessionId, type, beforeTimestamp.toISOString(), now);
-    log.debug(`Captured related session: type=${type}, nodeId=${nodeId.slice(0, 8)}, sessionId=${sessionId.slice(0, 8)}`);
+): Promise<string> {
+  const beforeTimestamp = new Date();
+  let relatedSessionDbId: string | null = null;
+  let detectedSessionId: string | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Start background polling for the session file
+  if (projectCwd) {
+    const pollCwd = projectCwd;
+    pollTimer = setInterval(() => {
+      if (detectedSessionId) return; // already found
+      const detected = detectNewSession(pollCwd, beforeTimestamp);
+      if (detected) {
+        detectedSessionId = detected;
+        syncSession(detected);
+        // Create in-flight related session (completed_at = NULL)
+        const rs = createRelatedSession(nodeId, blueprintId, detected, type, beforeTimestamp.toISOString());
+        relatedSessionDbId = rs.id;
+        log.debug(`Early related session detected: type=${type}, nodeId=${nodeId.slice(0, 8)}, sessionId=${detected.slice(0, 8)}`);
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      }
+    }, 3000);
+  }
+
+  try {
+    const output = await runAgentInteractive(prompt, projectCwd || undefined);
+    return output;
+  } finally {
+    // Stop polling
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+
+    // Final detection attempt if polling missed it
+    if (!detectedSessionId && projectCwd) {
+      const detected = detectNewSession(projectCwd, beforeTimestamp);
+      if (detected) {
+        detectedSessionId = detected;
+        syncSession(detected);
+        const rs = createRelatedSession(nodeId, blueprintId, detected, type, beforeTimestamp.toISOString(), new Date().toISOString());
+        relatedSessionDbId = rs.id;
+        log.debug(`Post-run related session detected: type=${type}, nodeId=${nodeId.slice(0, 8)}, sessionId=${detected.slice(0, 8)}`);
+      }
+    }
+
+    // Mark the session as complete
+    if (relatedSessionDbId) {
+      completeRelatedSession(relatedSessionDbId);
+      log.debug(`Completed related session: type=${type}, dbId=${relatedSessionDbId.slice(0, 8)}`);
+    }
   }
 }
 
@@ -153,8 +217,9 @@ planRouter.get("/api/blueprints", (req, res) => {
   try {
     const status = req.query.status as string | undefined;
     const projectCwd = req.query.projectCwd as string | undefined;
+    const search = req.query.search as string | undefined;
     const includeArchived = req.query.includeArchived === "true";
-    const blueprints = listBlueprints({ status, projectCwd, includeArchived });
+    const blueprints = listBlueprints({ status, projectCwd, search, includeArchived });
     res.json(blueprints);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -168,6 +233,11 @@ planRouter.get("/api/blueprints/:id", (req, res) => {
     if (!blueprint) {
       res.status(404).json({ error: "Blueprint not found" });
       return;
+    }
+    const search = req.query.search as string | undefined;
+    if (search) {
+      const lowerSearch = search.toLowerCase();
+      blueprint.nodes = blueprint.nodes.filter(n => n.title.toLowerCase().includes(lowerSearch));
     }
     res.json(blueprint);
   } catch (err) {
@@ -287,42 +357,56 @@ planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => 
       }
     }
 
-    // Build context: if the node has dependencies, only show those deps (saves tokens).
-    // Otherwise fall back to showing all nodes for broader context.
+    // Build context: dependencies (titles + handoffs) take priority.
+    // Workspace (projectCwd) provides broader context — never list all other nodes.
     const currentNode = nodeId ? blueprint.nodes.find((n) => n.id === nodeId) : null;
     const depIds = currentNode?.dependencies ?? [];
-    const contextNodes = depIds.length > 0
-      ? blueprint.nodes.filter((n) => depIds.includes(n.id))
-      : blueprint.nodes;
-    const contextLabel = depIds.length > 0 ? "Dependency nodes" : "Existing nodes";
+    const depNodes = depIds.length > 0 ? blueprint.nodes.filter((n) => depIds.includes(n.id)) : [];
 
-    // Titles + handoff summaries only, no descriptions
-    const existingNodes = contextNodes
-      .map((n, i) => {
-        let line = `  ${i + 1}. [${n.status}] ${n.title}`;
-        if (n.status === "done" && n.outputArtifacts.length > 0) {
-          line += ` — Handoff: ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 300)}`;
-        }
-        return line;
-      })
-      .join("\n");
+    // Dependency nodes: titles + handoff artifacts (regardless of status)
+    const depContext = depNodes.length > 0
+      ? depNodes
+          .map((n, i) => {
+            let line = `  ${i + 1}. [${n.status}] ${n.title}`;
+            const handoffs = n.outputArtifacts.filter((a) => a.type === "handoff_summary");
+            if (handoffs.length > 0) {
+              line += `\n     Handoff: ${handoffs[handoffs.length - 1].content.slice(0, 500)}`;
+            }
+            return line;
+          })
+          .join("\n")
+      : null;
+
+    // Resolve roles for specificity guidance
+    const nodeRoles: RoleDefinition[] = (() => {
+      if (currentNode) {
+        const roleIds = resolveNodeRoles(currentNode, blueprint);
+        return roleIds.map((id) => getRole(id)).filter((r): r is RoleDefinition => r !== undefined);
+      }
+      // New node: use blueprint default role
+      const defaultRoleId = blueprint.defaultRole ?? "sde";
+      const r = getRole(defaultRoleId);
+      return r ? [r] : [];
+    })();
+    const specificityGuidance = nodeRoles.length > 0
+      ? nodeRoles.map((r) => r.prompts.specificityGuidance).join(" ")
+      : "Be specific: mention file paths, function names, API endpoints.";
 
     const enrichPromptBase = `You are helping a developer write a clear, actionable task node for a coding blueprint.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
 ${blueprint.projectCwd ? `Project directory: ${blueprint.projectCwd}` : ""}
-${existingNodes ? `\n${contextLabel}:\n${existingNodes}` : "\nNo existing nodes yet."}
+${depContext ? `\nDependency nodes (this node depends on these — consider their titles and handoff artifacts when enriching):\n${depContext}` : ""}
 
-The user wants to add a new node with:
+The user wants to ${nodeId ? "enrich an existing" : "add a new"} node with:
 - Title: "${title.trim()}"
 ${description ? `- Description: "${description.trim()}"` : "- Description: (none provided)"}
 
-Your task: Enrich and improve the title and description to make them clear and actionable for an AI coding agent. The enriched description should:
-1. Be specific about what needs to be done
-2. Reference relevant files/components if the project context suggests them
-3. Include acceptance criteria or expected behavior when helpful
-4. Stay concise — no fluff`;
+Your task: Enrich and improve the title and description to make them clear and actionable for an AI agent. The enriched description should:
+1. Be specific about what needs to be done — ${specificityGuidance}
+${depContext ? "2. Build on context from dependency nodes — reference what they produce (handoff artifacts) and how this node continues the work\n3." : "2."} Include acceptance criteria or expected behavior when helpful
+${depContext ? "4." : "3."} Stay concise — no fluff`;
 
     if (nodeId) {
       // Existing node: fire-and-forget — Claude writes directly to DB via curl.
@@ -338,17 +422,14 @@ curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authP
 
 Replace the placeholder values with your actual enriched title and description. Make sure the JSON is valid — escape any special characters in string values.`;
 
-      const enrichBefore = new Date();
       const enrichNodeId = nodeId;
       addPendingTask(blueprintId, { type: "enrich", nodeId: enrichNodeId, queuedAt: new Date().toISOString() });
       enqueueBlueprintTask(blueprintId, async () => {
         try {
-          await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+          await runWithRelatedSessionDetection(prompt, blueprint.projectCwd || undefined, enrichNodeId, blueprintId, "enrich");
         } finally {
           removePendingTask(blueprintId, enrichNodeId, "enrich");
         }
-      }).then(() => {
-        captureRelatedSession(blueprint.projectCwd, enrichBefore, enrichNodeId, blueprintId, "enrich");
       }).catch((err) => {
         log.error(`Enrich node ${enrichNodeId} failed: ${err instanceof Error ? err.message : err}`);
       });
@@ -431,7 +512,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
       : "";
     const statusField = (capturedStatus === "failed" || capturedStatus === "blocked") ? ', "status": "pending"' : "";
 
-    const prompt = `You are a project manager reviewing a development task node in the context of its parent blueprint/plan.
+    // Resolve roles for role-aware reevaluation
+    const reevRoleIds = resolveNodeRoles(node, blueprint);
+    const reevRoles = reevRoleIds.map((id) => getRole(id)).filter((r): r is RoleDefinition => r !== undefined);
+    const reevVerification = reevRoles.length > 0
+      ? reevRoles.map((r) => r.prompts.reevaluationVerification).join("\n")
+      : "Read the relevant source files to verify implementation status.";
+
+    const prompt = `You are a project manager reviewing a task node in the context of its parent blueprint/plan.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
@@ -448,7 +536,9 @@ The node to re-evaluate:
 - Current status: ${node.status}
 ${node.error ? `- Error: ${node.error}` : ""}
 
-Your task: Re-evaluate this node considering the current state of the project. Based on what has already been completed, what is still pending, and whether this node's task is still relevant and accurately described:
+Your task: Re-evaluate this node considering the current state of the project. ${reevVerification}
+
+Based on what has already been completed, what is still pending, and whether this node's task is still relevant and accurately described:
 
 1. Update the title to be clear and accurate given the current project state.
 2. Update the description to reflect what actually needs to be done (or has been done).
@@ -462,12 +552,10 @@ curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authP
 Replace the placeholder values with your actual updated title and description. Make sure the JSON is valid — escape any special characters in string values.${statusResetNote}`;
 
     // Fire and forget — enqueue and apply results when done
-    const reevBefore = new Date();
     const reevCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runAgentInteractive(prompt, reevCwd || undefined);
-        captureRelatedSession(reevCwd, reevBefore, nodeId, blueprintId, "reevaluate");
+        await runWithRelatedSessionDetection(prompt, reevCwd || undefined, nodeId, blueprintId, "reevaluate");
       } finally {
         removePendingTask(blueprintId, nodeId, "reevaluate");
       }
@@ -533,7 +621,17 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/split", (req, res) =
 
     const depsJson = JSON.stringify(node.dependencies);
 
-    const prompt = `You are a project manager splitting a large development task into smaller, more actionable sub-tasks.
+    // Resolve roles for role-aware split decomposition
+    const splitRoleIds = resolveNodeRoles(node, blueprint);
+    const splitRoles = splitRoleIds.map((id) => getRole(id)).filter((r): r is RoleDefinition => r !== undefined);
+    const splitHeuristic = splitRoles.length > 0
+      ? splitRoles.map((r) => r.prompts.decompositionHeuristic).join("\n")
+      : "Each sub-node should be completable in one agent session (5-15 min).";
+    const splitSpecificity = splitRoles.length > 0
+      ? splitRoles.map((r) => r.prompts.specificityGuidance).join(" ")
+      : "Be specific: mention file paths, function names, API endpoints.";
+
+    const prompt = `You are a project manager splitting a large task into smaller, more actionable sub-tasks.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
@@ -549,7 +647,7 @@ The node to split:
 - Dependencies: ${depsJson}
 ${downstreamInfo}
 
-Your task: Decompose this node into 2-3 smaller, self-contained sub-nodes. Each sub-node should be completable in a single Claude Code session. Think carefully about logical boundaries.
+Your task: Decompose this node into 2-3 smaller, self-contained sub-nodes. Each sub-node should be completable in a single agent session. Think carefully about logical boundaries.
 
 Execute these steps IN ORDER using curl:
 
@@ -577,18 +675,16 @@ IMPORTANT: When updating dependencies, keep ALL existing dependencies — only r
 curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authParam}' -H 'Content-Type: application/json' -d '{"status": "skipped"}'
 
 Guidelines for decomposition:
-- Each sub-node should be independently testable and completable
-- Descriptions should be specific and actionable for an AI coding agent
+${splitHeuristic}
+- Descriptions should be specific and actionable for an AI agent — ${splitSpecificity}
 - Preserve the intent and scope of the original node — don't add or remove work
 - If the task naturally has only 2 parts, use 2 sub-nodes (don't force 3)`;
 
     // Fire and forget — enqueue and apply results when done
-    const splitBefore = new Date();
     const splitCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runAgentInteractive(prompt, splitCwd || undefined);
-        captureRelatedSession(splitCwd, splitBefore, nodeId, blueprintId, "split");
+        await runWithRelatedSessionDetection(prompt, splitCwd || undefined, nodeId, blueprintId, "split");
       } finally {
         removePendingTask(blueprintId, nodeId, "split");
       }
@@ -637,7 +733,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies",
     // Build node list for context (titles + statuses + IDs, no descriptions)
     const nodesContext = siblingNodes
       .map((n) => {
-        let line = `  - ID: ${n.id} | #${n.order + 1} [${n.status}] "${n.title}"`;
+        let line = `  - ID: ${n.id} | #${n.seq} [${n.status}] "${n.title}"`;
         if (n.status === "done" && n.outputArtifacts.length > 0) {
           line += ` — Handoff: ${n.outputArtifacts[n.outputArtifacts.length - 1].content.slice(0, 200)}`;
         }
@@ -648,7 +744,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies",
     const apiBase = getApiBase();
     const authParam = getAuthParam();
 
-    const prompt = `You are analyzing a development blueprint to determine the correct dependencies for a specific task node.
+    // Resolve roles for role-aware dependency considerations
+    const sdRoleIds = resolveNodeRoles(node, blueprint);
+    const sdRoles = sdRoleIds.map((id) => getRole(id)).filter((r): r is RoleDefinition => r !== undefined);
+    const depConsiderations = sdRoles.length > 0
+      ? sdRoles.map((r) => r.prompts.dependencyConsiderations).join("\n")
+      : "1. Data flow: Does this node need output/artifacts from another node?\n2. Code dependencies: Does this node modify code that another node creates?\n3. Logical ordering: Must another task complete first for this one to make sense?";
+
+    const prompt = `You are analyzing a blueprint to determine the correct dependencies for a specific task node.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
@@ -666,9 +769,7 @@ Available nodes that could be dependencies:
 ${nodesContext}
 
 Your task: Pick the most relevant dependencies for the target node — nodes whose output or completion is logically required before this node can start. Consider:
-1. Data flow: Does this node need output/artifacts from another node?
-2. Code dependencies: Does this node modify code that another node creates?
-3. Logical ordering: Must another task complete first for this one to make sense?
+${depConsiderations}
 
 Rules:
 - Pick 0-3 dependencies (only pick ones that are truly needed)
@@ -682,12 +783,10 @@ curl -s -X PUT '${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}?${authP
 
 Replace the nodeId values with actual IDs from the available nodes list above. Use an empty array if no dependencies are needed.`;
 
-    const smartDepsBefore = new Date();
     const smartDepsCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runAgentInteractive(prompt, smartDepsCwd || undefined);
-        captureRelatedSession(smartDepsCwd, smartDepsBefore, nodeId, blueprintId, "smart_deps");
+        await runWithRelatedSessionDetection(prompt, smartDepsCwd || undefined, nodeId, blueprintId, "smart_deps");
       } finally {
         removePendingTask(blueprintId, nodeId, "smart_deps");
       }
@@ -764,6 +863,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/batch-create", (req, res) =>
       description?: string;
       order?: number;
       dependencies?: (string | number)[];
+      roles?: string[];
     }>;
     if (!Array.isArray(nodes)) {
       res.status(400).json({ error: "Body must be a JSON array of nodes" });
@@ -799,6 +899,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/batch-create", (req, res) =>
         order: step.order ?? maxOrder + i + 1,
         dependencies: depIds.length > 0 ? depIds : undefined,
       });
+      // Set roles if provided (createMacroNode doesn't accept roles directly)
+      if (step.roles && Array.isArray(step.roles) && step.roles.length > 0) {
+        const updated = updateMacroNode(req.params.blueprintId, node.id, { roles: step.roles });
+        if (updated) {
+          createdNodes.push(updated);
+          continue;
+        }
+      }
       createdNodes.push(node);
     }
 
@@ -927,7 +1035,8 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
-    const nodeOrder = order ?? blueprint.nodes.length;
+    const maxOrder = blueprint.nodes.reduce((m, n) => Math.max(m, n.order), -1);
+    const nodeOrder = order ?? maxOrder + 1;
     const node = createMacroNode(req.params.blueprintId, {
       title: title.trim(),
       description,
@@ -1053,6 +1162,16 @@ planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/related-sessions", (r
   try {
     const sessions = getRelatedSessionsForNode(req.params.nodeId);
     res.json(sessions);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:blueprintId/nodes/:nodeId/active-related-session — get in-flight related session
+planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/active-related-session", (req, res) => {
+  try {
+    const session = getActiveRelatedSession(req.params.nodeId);
+    res.json(session ?? null);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
@@ -1333,6 +1452,97 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/evaluation-callback", (req, r
   }
 });
 
+// POST /api/blueprints/:id/nodes/:nodeId/suggestions-callback — callback for follow-up suggestions
+// Called by Claude during evaluation to persist follow-up task suggestions for completed nodes
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/suggestions-callback", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const node = blueprint.nodes.find((n) => n.id === nodeId);
+    if (!node) { res.status(404).json({ error: "Node not found" }); return; }
+
+    const { suggestions } = req.body as {
+      suggestions?: Array<{ title?: string; description?: string }>;
+    };
+
+    if (!Array.isArray(suggestions) || suggestions.length === 0) {
+      res.status(400).json({ error: "Missing or empty 'suggestions' array" });
+      return;
+    }
+
+    // Filter to valid suggestions before deleting old ones to prevent data loss
+    const valid = suggestions
+      .slice(0, 3)
+      .filter((s) => s.title && typeof s.title === "string");
+
+    if (valid.length === 0) {
+      res.status(400).json({ error: "No valid suggestions (each must have a non-empty 'title' string)" });
+      return;
+    }
+
+    // Diff-based update: keep existing suggestions that match, remove stale, add new
+    const existing = getSuggestionsForNode(nodeId);
+    const existingByTitle = new Map(existing.map((s) => [s.title, s]));
+    const incomingTitles = new Set(valid.map((s) => s.title!));
+
+    // Remove suggestions no longer in the incoming set
+    for (const s of existing) {
+      if (!incomingTitles.has(s.title)) {
+        deleteSuggestion(s.id);
+      }
+    }
+
+    // Create only truly new suggestions (skip duplicates by title)
+    const created: ReturnType<typeof createSuggestion>[] = [];
+    for (const s of valid) {
+      if (!existingByTitle.has(s.title!)) {
+        created.push(createSuggestion(blueprintId, nodeId, s.title!, s.description || ""));
+      }
+    }
+
+    const totalCount = (existing.length - existing.filter((s) => !incomingTitles.has(s.title)).length) + created.length;
+    log.info(`Suggestions callback for node ${nodeId.slice(0, 8)} "${node.title}": ${totalCount} suggestions (${created.length} new, ${totalCount - created.length} kept)`);
+    res.json({ success: true, count: totalCount });
+  } catch (err) {
+    log.error(`Suggestions callback failed: ${err instanceof Error ? err.message : err}`);
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:blueprintId/nodes/:nodeId/suggestions — get follow-up suggestions for a node
+planRouter.get("/api/blueprints/:blueprintId/nodes/:nodeId/suggestions", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const node = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!node) { res.status(404).json({ error: "Node not found in blueprint" }); return; }
+
+    const suggestions = getSuggestionsForNode(req.params.nodeId);
+    res.json(suggestions);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/nodes/:nodeId/suggestions/:suggestionId/mark-used — mark a suggestion as used
+planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/suggestions/:suggestionId/mark-used", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const node = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!node) { res.status(404).json({ error: "Node not found in blueprint" }); return; }
+
+    const updated = markSuggestionUsed(req.params.suggestionId);
+    if (!updated) { res.status(404).json({ error: "Suggestion not found" }); return; }
+
+    res.json(updated);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
 // POST /api/blueprints/:id/executions/:execId/report-blocker — callback for execution blocker reporting
 // Called by Claude during node execution to report blockers via API instead of output markers
 planRouter.post("/api/blueprints/:id/executions/:execId/report-blocker", (req, res) => {
@@ -1428,6 +1638,45 @@ planRouter.post("/api/blueprints/:id/executions/:execId/report-status", (req, re
     setExecutionReportedStatus(execId, status as ReportedStatus, reason);
 
     log.info(`Status reported for execution ${execId.slice(0, 8)}: ${status}${reason ? ` (reason: ${reason.slice(0, 100)})` : ""}`);
+
+    // If the execution/node was already marked failed (e.g., by recovery logic during a server restart
+    // while Claude was still thinking), the report-status callback is authoritative — fix the status.
+    const node = blueprint.nodes.find((n) => n.id === execution.nodeId);
+    if (node && execution.status === "failed" && status !== "failed") {
+      log.info(`Late report-status override: node ${execution.nodeId.slice(0, 8)} was "failed" but Claude reported "${status}" — correcting`);
+
+      const now = new Date().toISOString();
+
+      if (status === "done") {
+        updateExecution(execId, {
+          status: "done",
+          completedAt: now,
+          outputSummary: execution.taskSummary || "Recovered via late report-status callback",
+        });
+        updateMacroNode(blueprintId, execution.nodeId, {
+          status: "done",
+          error: "",
+        });
+        // Fire-and-forget: evaluate completion in background
+        enqueueBlueprintTask(blueprintId, async () => {
+          await evaluateNodeCompletion(blueprintId, execution.nodeId, blueprint.projectCwd);
+        }).catch(err => {
+          log.error(`Post-recovery evaluation failed for node ${execution.nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+        });
+      } else if (status === "blocked") {
+        const blockerReason = reason || "Task reported as blocked by Claude";
+        updateExecution(execId, {
+          status: "done",
+          completedAt: now,
+          outputSummary: `BLOCKER: ${blockerReason}`,
+        });
+        updateMacroNode(blueprintId, execution.nodeId, {
+          status: "blocked",
+          error: `Blocker: ${blockerReason}`,
+        });
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     log.error(`Report status failed: ${err instanceof Error ? err.message : err}`);
@@ -1532,7 +1781,14 @@ planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
     // Valid node IDs for dependency reference
     const validNodeIds = blueprint.nodes.map((n) => `"${n.id}" (${n.title})`).join(", ");
 
-    const prompt = `You are a project manager reviewing a development blueprint/plan and reevaluating all incomplete nodes.
+    // Resolve blueprint-level enabled roles for reevaluate-all verification
+    const reevAllRoleIds = blueprint.enabledRoles ?? ["sde"];
+    const reevAllRoles = reevAllRoleIds.map((id) => getRole(id)).filter((r): r is RoleDefinition => r !== undefined);
+    const reevAllVerification = reevAllRoles.length > 0
+      ? reevAllRoles.map((r) => r.prompts.reevaluationVerification).join("\n\n")
+      : "For EACH node listed above, reevaluate it by examining the actual codebase:\n\n1. Read the relevant source files to verify implementation status.\n2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.";
+
+    const prompt = `You are a project manager reviewing a blueprint/plan and reevaluating all incomplete nodes.
 
 Blueprint: "${blueprint.title}"
 ${blueprint.description ? `Blueprint description: ${blueprint.description}` : ""}
@@ -1547,10 +1803,7 @@ ${targetNodesList}
 
 Valid node IDs for dependencies: ${validNodeIds}
 
-For EACH node listed above, reevaluate it by examining the actual codebase:
-
-1. Read the relevant source files to verify implementation status.
-2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.
+${reevAllVerification}
 
 Batch API endpoint: PUT ${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuthParam()}
 Content-Type: application/json
@@ -1564,7 +1817,7 @@ The body is a JSON ARRAY of node updates. Each element has:
 - "error": error message string (set to "" to clear)
 
 Guidelines:
-1. Read actual source code — do NOT guess implementation status.
+1. Verify actual project state — do NOT guess implementation status.
 2. If fully implemented → set status to "done".
 3. If partially implemented → keep "pending", describe what remains.
 4. If redundant/obsolete → set to "skipped", explain why in description.
@@ -1850,7 +2103,8 @@ planRouter.post("/api/plans/:planId/nodes", (req, res) => {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
-    const nodeOrder = order ?? seq ?? blueprint.nodes.length;
+    const maxOrder = blueprint.nodes.reduce((m, n) => Math.max(m, n.order), -1);
+    const nodeOrder = order ?? seq ?? maxOrder + 1;
     const node = createMacroNode(req.params.planId, {
       title: title.trim(),
       description,
