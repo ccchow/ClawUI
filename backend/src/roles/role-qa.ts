@@ -72,6 +72,12 @@ If the status is NOT COMPLETE, skip the suggestions call.`,
 
 1. Read test files and coverage reports to verify testing status.
 2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.`,
+
+    insightsTemplate: `After evaluating this node, consider cross-cutting quality observations:
+- Test coverage gaps: Are there related features or modules that lack adequate test coverage based on changes in this node?
+- Regression risks: Could the changes tested here introduce regressions in other parts of the system?
+- Quality patterns: Are there recurring issues (flaky tests, missing error handling, inconsistent validation) observed across multiple nodes?
+Surface these as blueprint-level insights with appropriate severity (info for coverage notes, warning for regression risks, critical for systemic quality issues).`,
   },
 };
 

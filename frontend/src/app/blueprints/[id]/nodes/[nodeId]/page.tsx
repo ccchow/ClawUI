@@ -10,11 +10,15 @@ import {
   type PendingTask,
   type TimelineNode,
   type RelatedSession,
+  type NodeSuggestion,
   getBlueprint,
   getNodeExecutions,
   getQueueStatus,
   getLastSessionMessage,
   getRelatedSessions,
+  getActiveRelatedSession,
+  getSuggestionsForNode,
+  createMacroNode,
   runNode,
   updateMacroNode,
   deleteMacroNode,
@@ -25,6 +29,7 @@ import {
   unqueueNode,
   splitNode,
   smartPickDependencies,
+  markSuggestionUsed,
 } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -32,6 +37,8 @@ import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { AgentBadge } from "@/components/AgentSelector";
+import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
+import { useToast } from "@/components/Toast";
 
 function formatDuration(startedAt: string, completedAt?: string): string {
   const start = new Date(startedAt).getTime();
@@ -86,12 +93,45 @@ export default function NodeDetailPage() {
   const [inputArtifactsCollapsed, setInputArtifactsCollapsed] = useState(false);
   const [outputArtifactsCollapsed, setOutputArtifactsCollapsed] = useState(false);
   const [lastMessage, setLastMessage] = useState<TimelineNode | null>(null);
+  const [activeRelatedSession, setActiveRelatedSession] = useState<RelatedSession | null>(null);
+  const [relatedLastMessage, setRelatedLastMessage] = useState<TimelineNode | null>(null);
   const [relatedSessions, setRelatedSessions] = useState<RelatedSession[]>([]);
   const [relatedExpanded, setRelatedExpanded] = useState(false);
+  const [suggestions, setSuggestions] = useState<NodeSuggestion[]>([]);
+  const [creatingSuggestionId, setCreatingSuggestionId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recoveryAttempted = useRef(false);
   const prevStatusRef = useRef<string | null>(null);
   const [postCompletionPolls, setPostCompletionPolls] = useState(0);
+  const { showToast } = useToast();
+
+  // Cross-tab sync: when another tab fires an operation on this blueprint,
+  // immediately fetch fresh data so polling activates.
+  const broadcastOperation = useBlueprintBroadcast(blueprintId, () => {
+    loadData();
+  });
+
+  // A suggestion is "used" if marked in DB (s.used) or if a matching node already exists
+  const usedSuggestionIds = useMemo(() => {
+    if (suggestions.length === 0) return new Set<string>();
+    const ids = new Set<string>();
+    // Primary: DB used flag
+    for (const s of suggestions) {
+      if (s.used) ids.add(s.id);
+    }
+    // Fallback: title-match against existing dependent nodes
+    if (blueprint) {
+      const siblingTitles = new Set(
+        blueprint.nodes
+          .filter((n) => n.id !== nodeId && n.dependencies.includes(nodeId))
+          .map((n) => n.title),
+      );
+      for (const s of suggestions) {
+        if (siblingTitles.has(s.title)) ids.add(s.id);
+      }
+    }
+    return ids;
+  }, [blueprint, suggestions, nodeId]);
 
   // Build back link preserving blueprint detail filter state
   const blueprintBackHref = useMemo(() => {
@@ -104,11 +144,12 @@ export default function NodeDetailPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [bp, execs, queueInfo, related] = await Promise.all([
+      const [bp, execs, queueInfo, related, sugs] = await Promise.all([
         getBlueprint(blueprintId),
         getNodeExecutions(blueprintId, nodeId),
         getQueueStatus(blueprintId),
         getRelatedSessions(blueprintId, nodeId),
+        getSuggestionsForNode(blueprintId, nodeId),
       ]);
       setBlueprint(bp);
       const found = bp.nodes.find((n) => n.id === nodeId) ?? null;
@@ -116,6 +157,7 @@ export default function NodeDetailPage() {
       setExecutions(execs);
       setPendingTasks(queueInfo.pendingTasks);
       setRelatedSessions(related);
+      setSuggestions(sugs);
 
       // Fetch last session message for running executions
       const runningExec = execs.find(
@@ -127,6 +169,28 @@ export default function NodeDetailPage() {
           .catch(() => { /* silent — session may not have messages yet */ });
       } else {
         setLastMessage(null);
+      }
+
+      // Fetch active related session for in-flight operations (enrich, reevaluate, split, smart_deps, evaluate)
+      const hasRelatedOps = queueInfo.pendingTasks.some(
+        (t) => t.nodeId === nodeId && (t.type === "enrich" || t.type === "reevaluate" || t.type === "split" || t.type === "smart_deps" || t.type === "evaluate")
+      );
+      if (hasRelatedOps) {
+        getActiveRelatedSession(blueprintId, nodeId)
+          .then((rs) => {
+            setActiveRelatedSession(rs);
+            if (rs?.sessionId) {
+              getLastSessionMessage(rs.sessionId)
+                .then(setRelatedLastMessage)
+                .catch(() => { /* silent */ });
+            } else {
+              setRelatedLastMessage(null);
+            }
+          })
+          .catch(() => { /* silent */ });
+      } else {
+        setActiveRelatedSession(null);
+        setRelatedLastMessage(null);
       }
 
       return found;
@@ -177,20 +241,29 @@ export default function NodeDetailPage() {
   const smartDepsLoading = smartDepsOptimistic || smartDepsQueued;
 
   // Reset optimistic flag once polling confirms the task (or it completes)
+  const prevSmartDepsQueuedRef = useRef(false);
   useEffect(() => {
     if (smartDepsQueued) setSmartDepsOptimistic(false);
-  }, [smartDepsQueued]);
+    const wasQueued = prevSmartDepsQueuedRef.current;
+    prevSmartDepsQueuedRef.current = smartDepsQueued;
+    if (wasQueued && !smartDepsQueued) {
+      showToast(`Smart dependencies complete for #${node?.seq ?? ""}`);
+    }
+  }, [smartDepsQueued, node, showToast]);
 
   // Sync edit fields when reevaluate completes (node data updated via polling)
   const prevReevalQueuedRef = useRef(false);
   useEffect(() => {
     const wasQueued = prevReevalQueuedRef.current;
     prevReevalQueuedRef.current = reevaluateQueued;
-    // Reevaluate just completed: force-close edit mode so fresh content is visible
-    if (wasQueued && !reevaluateQueued && editing && node) {
-      setEditing(false);
+    if (wasQueued && !reevaluateQueued) {
+      showToast(`Re-evaluation complete for #${node?.seq ?? ""}`);
+      // Force-close edit mode so fresh content is visible
+      if (editing && node) {
+        setEditing(false);
+      }
     }
-  }, [reevaluateQueued, editing, node]);
+  }, [reevaluateQueued, editing, node, showToast]);
 
   // Track enrichQueued transitions: clear optimistic state and sync fields on completion
   const prevEnrichQueuedRef = useRef(false);
@@ -198,12 +271,15 @@ export default function NodeDetailPage() {
     if (enrichQueued) setEnriching(false); // polling picked up pending task — clear optimistic flag
     const wasQueued = prevEnrichQueuedRef.current;
     prevEnrichQueuedRef.current = enrichQueued;
-    if (wasQueued && !enrichQueued && editing && node) {
-      // Enrich completed: update edit fields with fresh node data
-      setEditTitle(node.title);
-      setEditDesc(node.description || "");
+    if (wasQueued && !enrichQueued) {
+      showToast(`Enrichment complete for #${node?.seq ?? ""}`);
+      if (editing && node) {
+        // Enrich completed: update edit fields with fresh node data
+        setEditTitle(node.title);
+        setEditDesc(node.description || "");
+      }
     }
-  }, [enrichQueued, editing, node]);
+  }, [enrichQueued, editing, node, showToast]);
 
   // Clear optimistic running flag once node status transitions to queued/running/done/blocked
   useEffect(() => {
@@ -338,6 +414,7 @@ export default function NodeDetailPage() {
     setWarning(null);
     try {
       await runNode(blueprintId, nodeId);
+      broadcastOperation("run", nodeId);
       // Fire-and-forget resolved — keep running=true as optimistic state.
       // loadData triggers poll; useEffect clears running once status transitions.
       loadData();
@@ -360,6 +437,7 @@ export default function NodeDetailPage() {
       // picks up the pending "enrich" task (enrichQueued), then enrichQueued
       // takes over the loading state. enriching is cleared in the useEffect above.
       if ("status" in result) {
+        broadcastOperation("enrich", node?.id);
         loadData();
         // Don't setEnriching(false) — enrichQueued will take over
       } else {
@@ -381,6 +459,7 @@ export default function NodeDetailPage() {
     setReevaluating(true);
     try {
       await reevaluateNode(blueprintId, nodeId);
+      broadcastOperation("reevaluate", nodeId);
       // Fire-and-forget: result applied in background, polling will detect changes
       loadData();
     } catch (err) {
@@ -441,7 +520,7 @@ export default function NodeDetailPage() {
             className="flex items-center gap-2 px-3 py-2.5 sm:py-1.5 rounded-lg bg-bg-secondary border border-border-primary hover:border-border-hover transition-colors max-w-[260px] sm:max-w-[520px] min-w-0"
           >
             <StatusIndicator status={node.status} size="sm" />
-            <span className="text-xs text-text-muted font-mono flex-shrink-0">#{(node.order ?? 0) + 1}</span>
+            <span className="text-xs text-text-muted font-mono flex-shrink-0">#{node.seq}</span>
             <span className="text-sm text-text-primary truncate min-w-0">{node.title}</span>
             <svg className="w-3 h-3 text-text-muted flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
               <path d="M4.427 7.427l3.396 3.396a.25.25 0 00.354 0l3.396-3.396A.25.25 0 0011.396 7H4.604a.25.25 0 00-.177.427z" />
@@ -453,7 +532,7 @@ export default function NodeDetailPage() {
             onClick={() => prevNode && router.push(`/blueprints/${blueprintId}/nodes/${prevNode.id}`)}
             disabled={!prevNode}
             aria-label="Previous node"
-            title={!prevNode ? "No previous node" : `Go to #${prevNode.order + 1} ${prevNode.title}`}
+            title={!prevNode ? "No previous node" : `Go to #${prevNode.seq} ${prevNode.title}`}
             className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-tertiary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
           >
             <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
@@ -464,7 +543,7 @@ export default function NodeDetailPage() {
             onClick={() => nextNode && router.push(`/blueprints/${blueprintId}/nodes/${nextNode.id}`)}
             disabled={!nextNode}
             aria-label="Next node"
-            title={!nextNode ? "No next node" : `Go to #${nextNode.order + 1} ${nextNode.title}`}
+            title={!nextNode ? "No next node" : `Go to #${nextNode.seq} ${nextNode.title}`}
             className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-tertiary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
           >
             <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
@@ -522,7 +601,7 @@ export default function NodeDetailPage() {
                   >
                     <StatusIndicator status={n.status} />
                     <span className="text-xs text-text-muted font-mono w-6 text-right flex-shrink-0">
-                      #{n.order + 1}
+                      #{n.seq}
                     </span>
                     <span className={`text-sm truncate min-w-0 flex-1 ${isCurrent ? "text-accent-blue font-medium" : "text-text-primary"}`}>
                       {n.title}
@@ -552,13 +631,13 @@ export default function NodeDetailPage() {
             onClick={() => prevNode && router.push(`/blueprints/${blueprintId}/nodes/${prevNode.id}`)}
             disabled={!prevNode}
             aria-label="Previous node"
-            title={!prevNode ? "No previous node" : `Go to #${prevNode.order + 1} ${prevNode.title}`}
+            title={!prevNode ? "No previous node" : `Go to #${prevNode.seq} ${prevNode.title}`}
             className="flex items-center gap-1.5 px-3 py-3 rounded-xl bg-bg-tertiary text-text-secondary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed flex-1 justify-center"
           >
             <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
               <path fillRule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0z"/>
             </svg>
-            <span className="text-xs truncate max-w-[80px]">{prevNode ? `#${prevNode.order + 1}` : "Prev"}</span>
+            <span className="text-xs truncate max-w-[80px]">{prevNode ? `#${prevNode.seq}` : "Prev"}</span>
           </button>
           <button
             onClick={() => setShowNodeSwitcher(true)}
@@ -574,10 +653,10 @@ export default function NodeDetailPage() {
             onClick={() => nextNode && router.push(`/blueprints/${blueprintId}/nodes/${nextNode.id}`)}
             disabled={!nextNode}
             aria-label="Next node"
-            title={!nextNode ? "No next node" : `Go to #${nextNode.order + 1} ${nextNode.title}`}
+            title={!nextNode ? "No next node" : `Go to #${nextNode.seq} ${nextNode.title}`}
             className="flex items-center gap-1.5 px-3 py-3 rounded-xl bg-bg-tertiary text-text-secondary active:bg-bg-hover transition-colors disabled:opacity-20 disabled:cursor-not-allowed flex-1 justify-center"
           >
-            <span className="text-xs truncate max-w-[80px]">{nextNode ? `#${nextNode.order + 1}` : "Next"}</span>
+            <span className="text-xs truncate max-w-[80px]">{nextNode ? `#${nextNode.seq}` : "Next"}</span>
             <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor">
               <path fillRule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/>
             </svg>
@@ -807,8 +886,8 @@ export default function NodeDetailPage() {
           {(canRun || isRunning || isQueued) && (
             <button
               onClick={handleRun}
-              disabled={isRunning || isQueued}
-              title={isRunning ? "AI is executing this node in a Claude Code session..." : isQueued ? "Node is queued for execution" : "Execute this node using Claude Code"}
+              disabled={isRunning || isQueued || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning ? "AI is executing this node in an agent session..." : isQueued ? "Node is queued for execution" : enriching || enrichQueued ? "Cannot run while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot run while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot run while AI is analyzing dependencies" : "Execute this node using the selected agent"}
               className="px-2.5 py-1 rounded-lg bg-accent-green text-white text-xs font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               {isRunning ? (
@@ -831,8 +910,8 @@ export default function NodeDetailPage() {
                   setWarning(err instanceof Error ? err.message : String(err));
                 }
               }}
-              disabled={isRunning || isQueued}
-              title={isRunning || isQueued ? "Cannot mark done while node is running" : "Manually mark this node as completed without running it"}
+              disabled={isRunning || isQueued || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning || isQueued ? "Cannot mark done while node is running" : enriching || enrichQueued ? "Cannot mark done while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot mark done while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot mark done while AI is analyzing dependencies" : "Manually mark this node as completed without running it"}
               className="px-2.5 py-1 rounded-lg bg-accent-green text-white text-xs font-medium hover:bg-accent-green/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
@@ -855,8 +934,8 @@ export default function NodeDetailPage() {
                   setSkipping(false);
                 }
               }}
-              disabled={skipping || isRunning || isQueued}
-              title={isRunning || isQueued ? "Cannot skip while node is running" : skipping ? "Updating node status..." : node.status === "skipped" ? "Restore this node to pending status" : "Mark this node as skipped"}
+              disabled={skipping || isRunning || isQueued || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning || isQueued ? "Cannot skip while node is running" : enriching || enrichQueued ? "Cannot skip while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot skip while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot skip while AI is analyzing dependencies" : skipping ? "Updating node status..." : node.status === "skipped" ? "Restore this node to pending status" : "Mark this node as skipped"}
               className="px-2.5 py-1 rounded-lg border border-border-primary text-text-secondary text-xs font-medium hover:bg-bg-tertiary active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
@@ -868,8 +947,8 @@ export default function NodeDetailPage() {
           {(node.status === "pending" || isRunning || isQueued) && !showSplitConfirm && (
             <button
               onClick={() => setShowSplitConfirm(true)}
-              disabled={splitting || isRunning || isQueued}
-              title={isRunning || isQueued ? "Cannot split while node is running" : splitting ? "AI is decomposing this node into sub-tasks..." : "AI splits this node into 2–3 smaller sub-tasks with dependency wiring"}
+              disabled={splitting || isRunning || isQueued || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning || isQueued ? "Cannot split while node is running" : enriching || enrichQueued ? "Cannot split while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot split while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot split while AI is analyzing dependencies" : splitting ? "AI is decomposing this node into sub-tasks..." : "AI splits this node into 2–3 smaller sub-tasks with dependency wiring"}
               className="px-2.5 py-1 rounded-lg border border-accent-purple/30 text-accent-purple text-xs font-medium hover:bg-accent-purple/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               {splitting ? (
@@ -891,8 +970,8 @@ export default function NodeDetailPage() {
           {node.status === "failed" && (
             <button
               onClick={handleRun}
-              disabled={isRunning}
-              title={isRunning ? "AI is retrying this node..." : "Start a fresh execution — for resuming the previous session, use the play button in Execution History below"}
+              disabled={isRunning || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning ? "AI is retrying this node..." : enriching || enrichQueued ? "Cannot retry while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot retry while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot retry while AI is analyzing dependencies" : "Start a fresh execution — for resuming the previous session, use the play button in Execution History below"}
               className="px-2.5 py-1 rounded-lg border border-accent-amber/50 text-accent-amber text-xs font-medium hover:bg-accent-amber/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
@@ -905,8 +984,8 @@ export default function NodeDetailPage() {
           {(node.status === "pending" || node.status === "failed" || isRunning || isQueued) && (
             <button
               onClick={() => setShowDeleteConfirm(true)}
-              disabled={deleting || isRunning || isQueued}
-              title={isRunning || isQueued ? "Cannot delete while node is running" : deleting ? "Deleting node..." : "Delete this node permanently"}
+              disabled={deleting || isRunning || isQueued || enriching || enrichQueued || reevaluating || reevaluateQueued || smartDepsLoading}
+              title={isRunning || isQueued ? "Cannot delete while node is running" : enriching || enrichQueued ? "Cannot delete while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot delete while AI re-evaluation is in progress" : smartDepsLoading ? "Cannot delete while AI is analyzing dependencies" : deleting ? "Deleting node..." : "Delete this node permanently"}
               className="px-2.5 py-1 rounded-lg border border-accent-red/30 text-accent-red text-xs font-medium hover:bg-accent-red/10 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
             >
               <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
@@ -931,6 +1010,7 @@ export default function NodeDetailPage() {
                   setShowSplitConfirm(false);
                   try {
                     await splitNode(blueprintId, nodeId);
+                    broadcastOperation("split", nodeId);
                     loadData(); // Refresh pending tasks to activate polling
                   } catch (err) {
                     setWarning(err instanceof Error ? err.message : String(err));
@@ -1006,7 +1086,7 @@ export default function NodeDetailPage() {
 
       {recovered && (
         <div className="text-sm text-accent-green bg-accent-green/10 rounded-lg p-3 mb-4">
-          Session recovered — a Claude Code session was found and linked to this node&apos;s execution.
+          Session recovered — an agent session was found and linked to this node&apos;s execution.
         </div>
       )}
 
@@ -1031,6 +1111,7 @@ export default function NodeDetailPage() {
                       setSmartDepsOptimistic(true);
                       try {
                         await smartPickDependencies(blueprintId, node.id);
+                        broadcastOperation("smart_deps", node.id);
                         loadData(); // Refresh pending tasks to activate polling
                       } catch {
                         setSmartDepsOptimistic(false);
@@ -1095,12 +1176,12 @@ export default function NodeDetailPage() {
                         title={smartDepsLoading ? "AI is analyzing dependencies..." : isSkipped ? "This node was split — consider removing this dependency" : undefined}
                       >
                         <StatusIndicator status={n.status} size="sm" />
-                        #{n.order + 1} {n.title.length > 30 ? n.title.slice(0, 30) + "…" : n.title}
+                        #{n.seq} {n.title.length > 30 ? n.title.slice(0, 30) + "…" : n.title}
                         {isSkipped && <span className="text-[10px] text-accent-amber">(split)</span>}
                         <span
                           onClick={(e) => { e.stopPropagation(); router.push(`/blueprints/${blueprintId}/nodes/${n.id}`); }}
                           className="opacity-40 hover:opacity-100 ml-0.5 cursor-pointer"
-                          title={`Open #${n.order + 1} ${n.title}`}
+                          title={`Open #${n.seq} ${n.title}`}
                         >
                           ↗
                         </span>
@@ -1168,43 +1249,74 @@ export default function NodeDetailPage() {
           </section>
         )}
 
-        {/* Live Activity — last session message during execution */}
-        {lastMessage && isRunning && (
-          <section className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3">
-            <h2 className="text-xs font-medium text-accent-blue mb-2 flex items-center gap-1.5">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent-blue opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-accent-blue" />
-              </span>
-              Live Activity
-            </h2>
-            <div className="flex items-start gap-2">
-              <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 mt-0.5 ${
-                lastMessage.type === "assistant"
-                  ? "bg-accent-purple/15 text-accent-purple"
-                  : lastMessage.type === "user"
-                  ? "bg-accent-blue/15 text-accent-blue"
-                  : lastMessage.type === "tool_use" || lastMessage.type === "tool_result"
-                  ? "bg-amber-500/15 text-amber-400"
-                  : "bg-bg-tertiary text-text-muted"
-              }`}>
-                {lastMessage.type === "tool_use" ? `tool: ${lastMessage.toolName ?? "unknown"}` :
-                 lastMessage.type === "tool_result" ? "tool result" :
-                 lastMessage.type}
-              </span>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-text-secondary line-clamp-3 whitespace-pre-wrap break-words">
-                  {lastMessage.content.length > 500
-                    ? lastMessage.content.slice(0, 500) + "..."
-                    : lastMessage.content}
-                </p>
-                <span className="text-[10px] text-text-muted mt-1 block">
-                  {formatTime(lastMessage.timestamp)}
+        {/* Live Activity — last session message during execution or related operations */}
+        {(() => {
+          // Determine which live activity to show: execution or related operation
+          const execLive = lastMessage && isRunning;
+          const relatedOp = activeRelatedSession?.type;
+          const relatedLive = relatedLastMessage && relatedOp;
+          const liveMsg = execLive ? lastMessage : relatedLive ? relatedLastMessage : null;
+          if (!liveMsg) return null;
+
+          // Operation label for the badge
+          const opLabel = execLive ? "Executing" : relatedOp === "enrich" ? "Enriching"
+            : relatedOp === "reevaluate" || relatedOp === "reevaluate_all" ? "Re-evaluating"
+            : relatedOp === "split" ? "Splitting"
+            : relatedOp === "smart_deps" ? "Smart Deps"
+            : relatedOp === "evaluate" ? "Evaluating"
+            : "Processing";
+
+          // Color styles — must be full static Tailwind classes (no template interpolation)
+          const isEnrich = !execLive && relatedOp === "enrich";
+          const isAmber = !execLive && (relatedOp === "reevaluate" || relatedOp === "reevaluate_all");
+          const isGreen = !execLive && (relatedOp === "smart_deps" || relatedOp === "evaluate");
+          // Default (execution, split, fallback) = accent-blue
+          const borderClass = isEnrich ? "border-accent-purple/30" : isAmber ? "border-accent-amber/30" : isGreen ? "border-accent-green/30" : "border-accent-blue/30";
+          const bgClass = isEnrich ? "bg-accent-purple/5" : isAmber ? "bg-accent-amber/5" : isGreen ? "bg-accent-green/5" : "bg-accent-blue/5";
+          const textClass = isEnrich ? "text-accent-purple" : isAmber ? "text-accent-amber" : isGreen ? "text-accent-green" : "text-accent-blue";
+          const dotBgClass = isEnrich ? "bg-accent-purple" : isAmber ? "bg-accent-amber" : isGreen ? "bg-accent-green" : "bg-accent-blue";
+          const badgeBgClass = isEnrich ? "bg-accent-purple/15" : isAmber ? "bg-accent-amber/15" : isGreen ? "bg-accent-green/15" : "bg-accent-blue/15";
+
+          return (
+            <section className={`rounded-lg border ${borderClass} ${bgClass} p-3`}>
+              <h2 className={`text-xs font-medium ${textClass} mb-2 flex items-center gap-1.5`}>
+                <span className="relative flex h-2 w-2">
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${dotBgClass} opacity-75`} />
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${dotBgClass}`} />
                 </span>
+                Live Activity
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${badgeBgClass} ${textClass}`}>
+                  {opLabel}
+                </span>
+              </h2>
+              <div className="flex items-start gap-2">
+                <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 mt-0.5 ${
+                  liveMsg.type === "assistant"
+                    ? "bg-accent-purple/15 text-accent-purple"
+                    : liveMsg.type === "user"
+                    ? "bg-accent-blue/15 text-accent-blue"
+                    : liveMsg.type === "tool_use" || liveMsg.type === "tool_result"
+                    ? "bg-amber-500/15 text-amber-400"
+                    : "bg-bg-tertiary text-text-muted"
+                }`}>
+                  {liveMsg.type === "tool_use" ? `tool: ${liveMsg.toolName ?? "unknown"}` :
+                   liveMsg.type === "tool_result" ? "tool result" :
+                   liveMsg.type}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-text-secondary line-clamp-3 whitespace-pre-wrap break-words">
+                    {liveMsg.content.length > 500
+                      ? liveMsg.content.slice(0, 500) + "..."
+                      : liveMsg.content}
+                  </p>
+                  <span className="text-[10px] text-text-muted mt-1 block">
+                    {formatTime(liveMsg.timestamp)}
+                  </span>
+                </div>
               </div>
-            </div>
-          </section>
-        )}
+            </section>
+          );
+        })()}
 
         {/* Execution History */}
         <section>
@@ -1276,7 +1388,7 @@ export default function NodeDetailPage() {
                             onClick={() => {
                               setResumingExecId(exec.id);
                               resumeNodeSession(blueprintId, nodeId, exec.id)
-                                .then(() => loadData())
+                                .then(() => { broadcastOperation("resume", nodeId); loadData(); })
                                 .catch((err) => {
                                   setWarning(err instanceof Error ? err.message : String(err));
                                   setResumingExecId(null);
@@ -1301,13 +1413,13 @@ export default function NodeDetailPage() {
                   {exec.failureReason && exec.status === "failed" && (
                     <div className={`mt-1.5 rounded text-xs font-medium ${
                       exec.failureReason === "context_exhausted"
-                        ? "bg-orange-500/10 text-orange-400"
+                        ? "bg-accent-amber/10 text-accent-amber"
                         : exec.failureReason === "output_token_limit"
-                        ? "bg-amber-500/10 text-amber-400"
+                        ? "bg-accent-amber/10 text-accent-amber"
                         : exec.failureReason === "timeout"
-                        ? "bg-yellow-500/10 text-yellow-400"
+                        ? "bg-accent-amber/10 text-accent-amber"
                         : exec.failureReason === "hung"
-                        ? "bg-purple-500/10 text-purple-400"
+                        ? "bg-accent-purple/10 text-accent-purple"
                         : "bg-accent-red/10 text-accent-red"
                     }`}>
                       <div className="flex items-center gap-1.5 px-2 py-1">
@@ -1367,10 +1479,10 @@ export default function NodeDetailPage() {
                   {exec.status === "done" && exec.contextPressure && exec.contextPressure !== "none" && (
                     <div className={`flex items-center gap-1.5 mt-1.5 px-2 py-1 rounded text-[11px] ${
                       exec.contextPressure === "critical"
-                        ? "bg-orange-500/10 text-orange-400"
+                        ? "bg-accent-red/10 text-accent-red"
                         : exec.contextPressure === "high"
-                        ? "bg-yellow-500/10 text-yellow-400"
-                        : "bg-blue-500/10 text-blue-400"
+                        ? "bg-accent-amber/10 text-accent-amber"
+                        : "bg-accent-blue/10 text-accent-blue"
                     }`}>
                       {exec.contextPressure === "critical" && "Context nearly full"}
                       {exec.contextPressure === "high" && "High context usage"}
@@ -1562,6 +1674,57 @@ export default function NodeDetailPage() {
             </section>
           );
         })()}
+
+        {/* Follow-up Suggestions */}
+        {node.status === "done" && suggestions.length > 0 && (
+          <section>
+            <h3 className="text-sm font-medium text-text-primary mb-2">Follow-up Suggestions</h3>
+            <div className="space-y-2">
+              {suggestions.map((s) => {
+                const isUsed = usedSuggestionIds.has(s.id);
+                const isCreating = creatingSuggestionId === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    disabled={isUsed || isCreating}
+                    onClick={async () => {
+                      if (!blueprintId || isUsed || isCreating) return;
+                      setCreatingSuggestionId(s.id);
+                      try {
+                        await createMacroNode(blueprintId, {
+                          title: s.title,
+                          description: s.description,
+                          dependencies: [nodeId],
+                        });
+                        await markSuggestionUsed(blueprintId, nodeId, s.id);
+                        loadData();
+                      } catch {
+                        /* silent */
+                      } finally {
+                        setCreatingSuggestionId(null);
+                      }
+                    }}
+                    className={`w-full text-left rounded-lg border p-3 transition-colors ${
+                      isUsed
+                        ? "border-border-primary bg-bg-tertiary opacity-50 cursor-default"
+                        : "border-border-primary bg-bg-secondary hover:border-accent-amber hover:bg-bg-tertiary cursor-pointer"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-accent-amber text-xs">+</span>
+                      <span className="text-sm font-medium text-text-primary">{s.title}</span>
+                      {isUsed && <span className="text-xs text-accent-green ml-auto">Created</span>}
+                      {isCreating && <span className="text-xs text-text-muted ml-auto animate-pulse">Creating...</span>}
+                    </div>
+                    {s.description && (
+                      <p className="text-xs text-text-secondary mt-1 ml-5">{s.description}</p>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

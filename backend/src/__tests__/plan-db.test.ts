@@ -1282,4 +1282,173 @@ describe("plan-db", () => {
     expect(fetched.nodes).toHaveLength(1);
     expect(fetched.nodes[0].roles).toBeUndefined();
   });
+
+  // ─── Blueprint Insights tests ────────────────────────────────
+
+  it("createInsight and getInsightsForBlueprint", async () => {
+    const { createBlueprint, createMacroNode, createInsight, getInsightsForBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Test", "desc", `/tmp/insight-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Insight Node", order: 0 });
+
+    const insight = createInsight(bp.id, n.id, "sde", "warning", "Shared module changed");
+    expect(insight.id).toBeDefined();
+    expect(insight.blueprintId).toBe(bp.id);
+    expect(insight.sourceNodeId).toBe(n.id);
+    expect(insight.role).toBe("sde");
+    expect(insight.severity).toBe("warning");
+    expect(insight.message).toBe("Shared module changed");
+    expect(insight.read).toBe(false);
+    expect(insight.dismissed).toBe(false);
+    expect(insight.createdAt).toBeDefined();
+
+    const insights = getInsightsForBlueprint(bp.id);
+    expect(insights).toHaveLength(1);
+    expect(insights[0].id).toBe(insight.id);
+  });
+
+  it("createInsight with null sourceNodeId", async () => {
+    const { createBlueprint, createInsight, getInsightsForBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Null Source", "desc", `/tmp/insight-null-${randomUUID()}`);
+
+    const insight = createInsight(bp.id, null, "pm", "info", "General observation");
+    expect(insight.sourceNodeId).toBeUndefined();
+
+    const insights = getInsightsForBlueprint(bp.id);
+    expect(insights).toHaveLength(1);
+    expect(insights[0].sourceNodeId).toBeUndefined();
+  });
+
+  it("getInsightsForBlueprint filters unread only", async () => {
+    const { createBlueprint, createInsight, getInsightsForBlueprint, markInsightRead } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Unread Filter", "desc", `/tmp/insight-unread-${randomUUID()}`);
+
+    const i1 = createInsight(bp.id, null, "sde", "info", "Info 1");
+    createInsight(bp.id, null, "qa", "warning", "Warning 1");
+
+    // Mark first as read
+    markInsightRead(i1.id);
+
+    const all = getInsightsForBlueprint(bp.id);
+    expect(all).toHaveLength(2);
+
+    const unread = getInsightsForBlueprint(bp.id, { unreadOnly: true });
+    expect(unread).toHaveLength(1);
+    expect(unread[0].role).toBe("qa");
+  });
+
+  it("getUnreadInsightCount returns correct count", async () => {
+    const { createBlueprint, createInsight, getUnreadInsightCount, markInsightRead } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Count", "desc", `/tmp/insight-count-${randomUUID()}`);
+
+    expect(getUnreadInsightCount(bp.id)).toBe(0);
+
+    const i1 = createInsight(bp.id, null, "sde", "info", "Msg 1");
+    createInsight(bp.id, null, "qa", "warning", "Msg 2");
+    createInsight(bp.id, null, "pm", "critical", "Msg 3");
+
+    expect(getUnreadInsightCount(bp.id)).toBe(3);
+
+    markInsightRead(i1.id);
+    expect(getUnreadInsightCount(bp.id)).toBe(2);
+  });
+
+  it("markInsightRead returns updated insight", async () => {
+    const { createBlueprint, createInsight, markInsightRead } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Mark Read", "desc", `/tmp/insight-read-${randomUUID()}`);
+    const insight = createInsight(bp.id, null, "sde", "info", "Read me");
+
+    expect(insight.read).toBe(false);
+
+    const updated = markInsightRead(insight.id);
+    expect(updated).not.toBeNull();
+    expect(updated!.read).toBe(true);
+    expect(updated!.id).toBe(insight.id);
+  });
+
+  it("markInsightRead returns null for nonexistent id", async () => {
+    const { markInsightRead } = await import("../plan-db.js");
+
+    const result = markInsightRead("nonexistent-id");
+    expect(result).toBeNull();
+  });
+
+  it("markAllInsightsRead marks all unread insights as read", async () => {
+    const { createBlueprint, createInsight, markAllInsightsRead, getInsightsForBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Mark All", "desc", `/tmp/insight-markall-${randomUUID()}`);
+
+    createInsight(bp.id, null, "sde", "info", "Msg A");
+    createInsight(bp.id, null, "qa", "warning", "Msg B");
+    createInsight(bp.id, null, "pm", "critical", "Msg C");
+
+    const before = getInsightsForBlueprint(bp.id, { unreadOnly: true });
+    expect(before).toHaveLength(3);
+
+    markAllInsightsRead(bp.id);
+
+    const after = getInsightsForBlueprint(bp.id, { unreadOnly: true });
+    expect(after).toHaveLength(0);
+
+    // All insights still present (just marked read)
+    const all = getInsightsForBlueprint(bp.id);
+    expect(all).toHaveLength(3);
+    expect(all.every((i) => i.read)).toBe(true);
+  });
+
+  it("dismissInsight excludes insight from listings", async () => {
+    const { createBlueprint, createInsight, dismissInsight, getInsightsForBlueprint, getUnreadInsightCount } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Dismiss", "desc", `/tmp/insight-dismiss-${randomUUID()}`);
+
+    const i1 = createInsight(bp.id, null, "sde", "info", "Keep me");
+    const i2 = createInsight(bp.id, null, "qa", "warning", "Dismiss me");
+
+    expect(getInsightsForBlueprint(bp.id)).toHaveLength(2);
+    expect(getUnreadInsightCount(bp.id)).toBe(2);
+
+    dismissInsight(i2.id);
+
+    expect(getInsightsForBlueprint(bp.id)).toHaveLength(1);
+    expect(getInsightsForBlueprint(bp.id)[0].id).toBe(i1.id);
+    expect(getUnreadInsightCount(bp.id)).toBe(1);
+  });
+
+  it("insights cascade-delete when blueprint is deleted", async () => {
+    const { createBlueprint, createMacroNode, createInsight, getInsightsForBlueprint, deleteBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight Cascade", "desc", `/tmp/insight-cascade-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Cascade Node", order: 0 });
+
+    createInsight(bp.id, n.id, "sde", "info", "Will be deleted");
+    createInsight(bp.id, null, "qa", "warning", "Also deleted");
+
+    expect(getInsightsForBlueprint(bp.id)).toHaveLength(2);
+
+    deleteBlueprint(bp.id);
+
+    expect(getInsightsForBlueprint(bp.id)).toHaveLength(0);
+  });
+
+  it("BlueprintInsight field mapping: all camelCase, no snake_case leakage", async () => {
+    const { createBlueprint, createMacroNode, createInsight, getInsightsForBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Insight FM Test", "desc", `/tmp/insight-fm-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "FM Node", order: 0 });
+
+    createInsight(bp.id, n.id, "sde", "critical", "Check field mapping");
+
+    const insights = getInsightsForBlueprint(bp.id);
+    expect(insights).toHaveLength(1);
+
+    const insight = insights[0];
+    assertNoSnakeCaseKeys(insight as unknown as Record<string, unknown>);
+    expect(insight.blueprintId).toBe(bp.id);
+    expect(insight.sourceNodeId).toBe(n.id);
+    expect(insight.createdAt).toBeDefined();
+  });
 });

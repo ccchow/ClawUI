@@ -8,6 +8,7 @@ function makeMockNode(overrides: Partial<MacroNode>): MacroNode {
     id: "node-1",
     blueprintId: "bp-1",
     order: 0,
+    seq: 1,
     title: "Test Node",
     description: "",
     status: "pending",

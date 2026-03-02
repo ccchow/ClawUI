@@ -20,6 +20,8 @@ vi.mock("@/lib/api", () => ({
   redeployStable: vi.fn(async () => {}),
   getDevStatus: vi.fn(async () => ({ devMode: false })),
   getGlobalStatus: vi.fn(async () => ({ active: false, totalPending: 0, tasks: [] })),
+  getUnreadInsightCount: vi.fn(async () => ({ count: 0 })),
+  coordinateBlueprint: vi.fn(),
 }));
 
 // Mock AISparkle

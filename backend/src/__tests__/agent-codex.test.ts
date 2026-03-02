@@ -485,7 +485,7 @@ describe("CodexAgentRuntime", () => {
       supportsResume: true,
       supportsInteractive: true,
       supportsTextOutput: true,
-      supportsDangerousMode: false,
+      supportsDangerousMode: true,
     });
   });
 
@@ -667,7 +667,7 @@ describe("CodexAgentRuntime", () => {
       expect(callArgs[1]).toContain("sess-abc");
       expect(callArgs[1]).toContain("Continue work");
       expect(callArgs[1]).toContain("--json");
-      expect(callArgs[1]).toContain("--full-auto");
+      expect(callArgs[1]).toContain("--dangerously-bypass-approvals-and-sandbox");
 
       expect(result).toBe("Resumed.");
     });

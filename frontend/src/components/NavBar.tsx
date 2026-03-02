@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useTheme } from "next-themes";
-import { redeployStable, getDevStatus, getGlobalStatus } from "@/lib/api";
+import { redeployStable, getDevStatus, getGlobalStatus, getUnreadInsightCount } from "@/lib/api";
 import type { GlobalQueueInfo, GlobalQueueTask } from "@/lib/api";
 import { AISparkle } from "./AISparkle";
 
@@ -15,6 +15,7 @@ const navItems = [
 
 const typeColors: Record<string, string> = {
   running: "bg-accent-blue/20 text-accent-blue",
+  queued: "bg-text-muted/20 text-text-muted",
   run: "bg-accent-blue/20 text-accent-blue",
   reevaluate: "bg-accent-amber/20 text-accent-amber",
   enrich: "bg-accent-green/20 text-accent-green",
@@ -23,7 +24,16 @@ const typeColors: Record<string, string> = {
 };
 
 function TaskRow({ task }: { task: GlobalQueueTask }) {
-  const color = typeColors[task.type] ?? "bg-bg-hover text-text-muted";
+  const isRunning = task.type === "running";
+  const isQueued = !isRunning && task.queuePosition != null;
+  const color = isQueued
+    ? typeColors.queued
+    : (typeColors[task.type] ?? "bg-bg-hover text-text-muted");
+  const badgeLabel = isRunning
+    ? "In Progress"
+    : isQueued
+      ? `Queued #${task.queuePosition}`
+      : task.type.charAt(0).toUpperCase() + task.type.slice(1);
   const nodeTitle = task.nodeTitle || "Blueprint task";
   const blueprintTitle = task.blueprintTitle || task.blueprintId.slice(0, 8);
 
@@ -58,7 +68,7 @@ function TaskRow({ task }: { task: GlobalQueueTask }) {
         </div>
       </div>
       <span className={`flex-shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${color}`}>
-        {task.type}
+        {badgeLabel}
       </span>
     </div>
   );
@@ -91,11 +101,18 @@ export function NavBar() {
   const [showTooltip, setShowTooltip] = useState(false);
   const isActiveRef = useRef(false);
 
+  // Unread insight count — polled alongside global status
+  const [unreadInsightCount, setUnreadInsightCount] = useState(0);
+
   const pollGlobalStatus = useCallback(async () => {
     try {
-      const status = await getGlobalStatus();
+      const [status, insightResult] = await Promise.all([
+        getGlobalStatus(),
+        getUnreadInsightCount().catch(() => ({ count: 0 })),
+      ]);
       setGlobalStatus(status);
       isActiveRef.current = status?.active ?? false;
+      setUnreadInsightCount(insightResult.count);
     } catch {
       // Ignore errors — endpoint may not exist on older backends
     }
@@ -188,17 +205,24 @@ export function NavBar() {
               item.href === "/sessions"
                 ? pathname.startsWith("/session")
                 : pathname.startsWith(item.href);
+            const showInsightBadge = item.href === "/blueprints" && unreadInsightCount > 0;
             return (
               <Link
                 key={item.href}
                 href={item.href}
-                className={`px-3 py-2.5 sm:py-1.5 rounded-lg text-sm transition-all active:scale-[0.97] ${
+                className={`relative px-3 py-2.5 sm:py-1.5 rounded-lg text-sm transition-all active:scale-[0.97] ${
                   isNavActive
                     ? "bg-bg-tertiary text-text-primary font-medium"
                     : "text-text-muted hover:text-text-secondary hover:bg-bg-secondary"
                 }`}
               >
                 {item.label}
+                {showInsightBadge && (
+                  <span
+                    className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-accent-red"
+                    title={`${unreadInsightCount} unread insight${unreadInsightCount !== 1 ? "s" : ""}`}
+                  />
+                )}
               </Link>
             );
           })}
@@ -251,7 +275,7 @@ export function NavBar() {
                 <span className="text-xs font-medium">{taskCount}</span>
               </button>
               {showTooltip && globalStatus?.tasks && globalStatus.tasks.length > 0 && (
-                <div className="absolute top-full right-0 pt-1.5 min-w-[280px] max-w-[400px] z-50 animate-fade-in">
+                <div className="absolute top-full right-0 pt-1.5 min-w-[260px] max-w-[calc(100vw-2rem)] sm:max-w-[400px] z-50 animate-fade-in">
                 <div className="rounded-lg bg-bg-secondary border border-border-primary shadow-xl overflow-hidden">
                   <div className="px-3 py-2 border-b border-border-primary text-xs font-medium text-text-muted">
                     {taskCount} AI task{taskCount !== 1 ? "s" : ""}

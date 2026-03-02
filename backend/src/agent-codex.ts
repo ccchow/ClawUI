@@ -23,6 +23,7 @@ import { registerRuntime } from "./agent-runtime.js";
 import type { TimelineNode } from "./jsonl-parser.js";
 import type { FailureReason } from "./plan-db.js";
 import type { ContextPressure, SessionAnalysis } from "./jsonl-parser.js";
+import { readSessionHeader } from "./session-header.js";
 
 const log = createLogger("agent-codex");
 
@@ -306,100 +307,6 @@ function summarize(text: string, maxLen = 120): string {
   return firstLine.slice(0, maxLen - 1) + "\u2026";
 }
 
-// ─── Session health analysis ────────────────────────────────
-
-/**
- * Analyze a Codex session JSONL file for health indicators.
- * Checks for error events and token usage.
- */
-export function analyzeCodexSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
-  let filePath: string | null = knownFilePath ?? null;
-
-  if (!filePath) {
-    filePath = findCodexSessionFile(sessionId);
-  }
-
-  if (!filePath) return null;
-
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-
-  const lines = raw.trim().split("\n");
-  let messageCount = 0;
-  let lastApiError: string | null = null;
-  let peakTokens = 0;
-  let turnAborted = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
-
-    messageCount++;
-
-    // Track errors from event_msg
-    if (obj.type === "event_msg") {
-      const payload = obj.payload as Record<string, unknown> | undefined;
-      if (payload?.type === "error" || payload?.type === "api_error") {
-        lastApiError = (payload.message as string) ?? "Unknown error";
-      }
-
-      // Track token counts
-      if (payload?.type === "token_count") {
-        const tokens = (payload.total_tokens as number) ?? 0;
-        if (tokens > peakTokens) peakTokens = tokens;
-      }
-
-      // Track aborted turns
-      if (payload?.type === "turn_aborted") {
-        turnAborted = true;
-      }
-    }
-  }
-
-  // Determine failure reason
-  let failureReason: FailureReason = null;
-  let detail = "";
-
-  if (lastApiError) {
-    if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
-      failureReason = "context_exhausted";
-      detail = `Session ended with context error: ${lastApiError}`;
-    } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
-      failureReason = "output_token_limit";
-      detail = `Session ended with output token limit error: ${lastApiError}`;
-    } else {
-      failureReason = "error";
-      detail = `API error: ${lastApiError}`;
-    }
-  } else if (turnAborted) {
-    failureReason = "error";
-    detail = "Session turn was aborted";
-  }
-
-  // Codex doesn't have compaction like Claude/OpenClaw
-  const contextPressure: ContextPressure = "none";
-
-  return {
-    failureReason,
-    detail,
-    compactCount: 0,
-    peakTokens,
-    lastApiError,
-    messageCount,
-    contextPressure,
-    endedAfterCompaction: false,
-    responsesAfterLastCompact: 0,
-  };
-}
-
 // ─── File helpers ────────────────────────────────────────────
 
 /**
@@ -444,42 +351,6 @@ function walkForSession(dir: string, sessionId: string): string | null {
   return null;
 }
 
-/**
- * Read the session ID from the session_meta line of a JSONL file.
- */
-function readSessionIdFromFile(filePath: string): string | null {
-  try {
-    const raw = readFileSync(filePath, "utf-8");
-    const firstNewline = raw.indexOf("\n");
-    const firstLine = firstNewline >= 0 ? raw.slice(0, firstNewline) : raw;
-    const header = JSON.parse(firstLine) as CodexSessionMeta;
-    if (header.type === "session_meta" && header.payload?.id) {
-      return header.payload.id;
-    }
-  } catch {
-    // Can't read or parse
-  }
-  return null;
-}
-
-/**
- * Read the cwd from the session_meta line of a JSONL file.
- */
-function readSessionCwd(filePath: string): string | null {
-  try {
-    const raw = readFileSync(filePath, "utf-8");
-    const firstNewline = raw.indexOf("\n");
-    const firstLine = firstNewline >= 0 ? raw.slice(0, firstNewline) : raw;
-    const header = JSON.parse(firstLine) as CodexSessionMeta;
-    if (header.type === "session_meta" && header.payload?.cwd) {
-      return header.payload.cwd;
-    }
-  } catch {
-    // Can't read or parse
-  }
-  return null;
-}
-
 // ─── Runtime class ──────────────────────────────────────────
 
 export class CodexAgentRuntime implements AgentRuntime {
@@ -489,7 +360,7 @@ export class CodexAgentRuntime implements AgentRuntime {
     supportsResume: true,
     supportsInteractive: true,   // Codex supports tool use natively
     supportsTextOutput: true,    // --json flag for structured output
-    supportsDangerousMode: false, // Not using dangerous mode
+    supportsDangerousMode: true,  // Uses --dangerously-bypass-approvals-and-sandbox
   };
 
   getSessionsDir(): string {
@@ -615,7 +486,12 @@ export class CodexAgentRuntime implements AgentRuntime {
 
   /**
    * Resume an existing Codex session by session ID.
-   * Uses `codex exec resume <sessionId> "<prompt>" --json --full-auto`.
+   * Uses `codex exec resume <sessionId> "<prompt>" --json --dangerously-bypass-approvals-and-sandbox`.
+   *
+   * Uses --dangerously-bypass-approvals-and-sandbox instead of --full-auto
+   * because execution prompts include API callback URLs (report-status,
+   * task-summary, report-blocker) that require localhost network access.
+   * The --full-auto flag forces workspace-write sandbox which blocks these calls.
    */
   resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -625,7 +501,7 @@ export class CodexAgentRuntime implements AgentRuntime {
         sessionId,
         prompt,
         "--json",
-        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
       ];
 
       log.debug(`Resuming Codex session: ${sessionId.slice(0, 8)}...`);
@@ -685,11 +561,11 @@ export class CodexAgentRuntime implements AgentRuntime {
       if (stat.mtime.getTime() <= beforeTimestamp.getTime()) return;
 
       // Check if this session's cwd matches the project
-      const sessionCwd = readSessionCwd(filePath);
-      if (sessionCwd === projectCwd) {
+      const header = readSessionHeader(filePath);
+      if (header?.cwd === projectCwd) {
         if (stat.mtime.getTime() > newestMtime) {
           newestMtime = stat.mtime.getTime();
-          newestId = readSessionIdFromFile(filePath);
+          newestId = header.id ?? null;
         }
       }
     });
@@ -771,6 +647,106 @@ export class CodexAgentRuntime implements AgentRuntime {
   findSessionFile(sessionId: string): string | null {
     return findCodexSessionFile(sessionId);
   }
+
+  /**
+   * Analyze a Codex session JSONL file for health indicators.
+   * Checks for error events and token usage.
+   */
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+    let filePath: string | null = knownFilePath ?? null;
+
+    if (!filePath) {
+      filePath = findCodexSessionFile(sessionId);
+    }
+
+    if (!filePath) return null;
+
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const lines = raw.trim().split("\n");
+    let messageCount = 0;
+    let lastApiError: string | null = null;
+    let peakTokens = 0;
+    let turnAborted = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+
+      messageCount++;
+
+      // Track errors from event_msg
+      if (obj.type === "event_msg") {
+        const payload = obj.payload as Record<string, unknown> | undefined;
+        if (payload?.type === "error" || payload?.type === "api_error") {
+          lastApiError = (payload.message as string) ?? "Unknown error";
+        }
+
+        // Track token counts
+        if (payload?.type === "token_count") {
+          const tokens = (payload.total_tokens as number) ?? 0;
+          if (tokens > peakTokens) peakTokens = tokens;
+        }
+
+        // Track aborted turns
+        if (payload?.type === "turn_aborted") {
+          turnAborted = true;
+        }
+      }
+    }
+
+    // Determine failure reason
+    let failureReason: FailureReason = null;
+    let detail = "";
+
+    if (lastApiError) {
+      if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
+        failureReason = "context_exhausted";
+        detail = `Session ended with context error: ${lastApiError}`;
+      } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
+        failureReason = "output_token_limit";
+        detail = `Session ended with output token limit error: ${lastApiError}`;
+      } else {
+        failureReason = "error";
+        detail = `API error: ${lastApiError}`;
+      }
+    } else if (turnAborted) {
+      failureReason = "error";
+      detail = "Session turn was aborted";
+    }
+
+    // Codex doesn't have compaction like Claude/OpenClaw
+    const contextPressure: ContextPressure = "none";
+
+    return {
+      failureReason,
+      detail,
+      compactCount: 0,
+      peakTokens,
+      lastApiError,
+      messageCount,
+      contextPressure,
+      endedAfterCompaction: false,
+      responsesAfterLastCompact: 0,
+    };
+  }
+}
+
+/**
+ * Standalone wrapper for backward compatibility.
+ * Delegates to CodexAgentRuntime.analyzeSessionHealth().
+ */
+export function analyzeCodexSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+  return new CodexAgentRuntime().analyzeSessionHealth(sessionId, knownFilePath);
 }
 
 // ─── Self-registration ───────────────────────────────────────

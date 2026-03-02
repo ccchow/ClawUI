@@ -50,7 +50,9 @@
 .animate-ai-sparkle,
 .animate-fade-in,
 .animate-slide-up,
-.animate-node-appear {
+.animate-node-appear,
+.animate-toast-enter,
+.animate-toast-exit {
   transition: none;
 }
 
@@ -154,6 +156,22 @@ code {
   animation: node-appear 2s ease-out forwards;
   border-radius: 0.75rem;
   border: 1px solid transparent;
+}
+
+/* Toast enter/exit animations */
+@keyframes toast-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes toast-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(0.96); }
+}
+.animate-toast-enter {
+  animation: toast-enter 0.2s ease-out;
+}
+.animate-toast-exit {
+  animation: toast-exit 0.2s ease-in forwards;
 }
 
 /* Focus-visible styles for keyboard navigation */

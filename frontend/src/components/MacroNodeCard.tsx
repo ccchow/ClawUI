@@ -3,11 +3,13 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
+import { type BroadcastOpType } from "@/lib/useBlueprintBroadcast";
 import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { AISparkle } from "./AISparkle";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
+import { useToast } from "./Toast";
 
 /** Strip markdown syntax for plain-text preview */
 function stripMarkdown(text: string): string {
@@ -37,6 +39,9 @@ export function MacroNodeCard({
   defaultExpanded = false,
   isLastDisplayed,
   depLanes,
+  broadcastOperation,
+  hasSuggestions,
+  blueprintBusy,
 }: {
   node: MacroNode;
   pendingTasks?: PendingTask[];
@@ -49,10 +54,16 @@ export function MacroNodeCard({
   defaultExpanded?: boolean;
   isLastDisplayed?: boolean;
   depLanes?: DepRowLayout;
+  broadcastOperation?: (type: BroadcastOpType, nodeId?: string) => void;
+  hasSuggestions?: boolean;
+  /** Name of the active blueprint-wide operation (e.g. "Run All", "Generate"), or undefined if none */
+  blueprintBusy?: string;
 }) {
+  const { showToast } = useToast();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [running, setRunning] = useState(false);
   const isLast = isLastDisplayed ?? (index === total - 1);
+  const busyTip = blueprintBusy ? `Waiting for ${blueprintBusy} to complete` : "";
   const canRun = blueprintId && (node.status === "pending" || node.status === "failed");
   const canManage = blueprintId && (node.status === "pending" || node.status === "failed" || node.status === "skipped");
   const isQueued = node.status === "queued";
@@ -106,6 +117,16 @@ export function MacroNodeCard({
   const [descOverflows, setDescOverflows] = useState(false);
   const descRef = useRef<HTMLParagraphElement>(null);
 
+  // Artifact fold/unfold state
+  const [expandedArtifacts, setExpandedArtifacts] = useState<Set<string>>(new Set());
+  const toggleArtifact = (id: string) => {
+    setExpandedArtifacts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
   // Mobile overflow menu state
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
@@ -115,13 +136,16 @@ export function MacroNodeCard({
   useEffect(() => {
     const wasQueued = prevReevalQueuedRef.current;
     prevReevalQueuedRef.current = reevaluateQueued;
-    // Reevaluate just completed: force-close edit mode so fresh content is visible
-    if (wasQueued && !reevaluateQueued && isEditing) {
-      setIsEditing(false);
-      setEditTitle(node.title);
-      setEditDescription(node.description || "");
+    if (wasQueued && !reevaluateQueued) {
+      showToast(`Re-evaluation complete for #${node.seq}`);
+      // Force-close edit mode so fresh content is visible
+      if (isEditing) {
+        setIsEditing(false);
+        setEditTitle(node.title);
+        setEditDescription(node.description || "");
+      }
     }
-  }, [reevaluateQueued, isEditing, node.title, node.description]);
+  }, [reevaluateQueued, isEditing, node.title, node.description, node.seq, showToast]);
 
   // Track enrichQueued transitions: clear optimistic state and sync fields on completion
   const prevEnrichQueuedRef = useRef(false);
@@ -129,12 +153,15 @@ export function MacroNodeCard({
     if (enrichQueued) setEnriching(false); // polling picked up pending task — clear optimistic flag
     const wasQueued = prevEnrichQueuedRef.current;
     prevEnrichQueuedRef.current = enrichQueued;
-    if (wasQueued && !enrichQueued && isEditing) {
-      // Enrich completed: update edit fields with fresh node data
-      setEditTitle(node.title);
-      setEditDescription(node.description || "");
+    if (wasQueued && !enrichQueued) {
+      showToast(`Enrichment complete for #${node.seq}`);
+      if (isEditing) {
+        // Enrich completed: update edit fields with fresh node data
+        setEditTitle(node.title);
+        setEditDescription(node.description || "");
+      }
     }
-  }, [enrichQueued, isEditing, node.title, node.description]);
+  }, [enrichQueued, isEditing, node.title, node.description, node.seq, showToast]);
 
   // Clear optimistic running flag once node status transitions to queued/running/done/blocked
   useEffect(() => {
@@ -175,6 +202,7 @@ export function MacroNodeCard({
     setWarning(null);
     try {
       await runNode(blueprintId, node.id);
+      broadcastOperation?.("run", node.id);
       // Fire-and-forget resolved — keep running=true as optimistic state.
       // onRefresh triggers parent poll; useEffect clears running once status transitions.
       onRefresh?.();
@@ -261,6 +289,7 @@ export function MacroNodeCard({
     setReevaluating(true);
     try {
       await reevaluateNode(blueprintId, node.id);
+      broadcastOperation?.("reevaluate", node.id);
       // Fire-and-forget: result will be applied in background
       // Trigger parent refresh to start polling for changes
       onRefresh?.();
@@ -285,6 +314,7 @@ export function MacroNodeCard({
       // picks up the pending "enrich" task (enrichQueued), then enrichQueued
       // takes over the loading state. enriching is cleared in the useEffect above.
       if ("status" in result) {
+        broadcastOperation?.("enrich", node.id);
         onRefresh?.();
         // Don't setEnriching(false) — enrichQueued will take over
       } else {
@@ -327,7 +357,7 @@ export function MacroNodeCard({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-xs text-text-muted font-mono flex-shrink-0">
-                #{node.order + 1}
+                #{node.seq}
               </span>
               {isEditing ? (
                 <input
@@ -359,6 +389,11 @@ export function MacroNodeCard({
               }`}>
                 {running ? "running" : reevaluateQueued ? "re-eval" : node.status === "queued" ? (queuePosition > 0 ? `queued #${queuePosition}` : "queued") : node.status}
               </span>
+              {hasSuggestions && node.status === "done" && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0 bg-accent-amber/20 text-accent-amber" title="Has follow-up suggestions">
+                  +ideas
+                </span>
+              )}
             </div>
             {!expanded && !isEditing && node.description && (
               <div className="mt-1">
@@ -397,9 +432,10 @@ export function MacroNodeCard({
               <>
                 <button
                   onClick={handleEditStart}
-                  title="Edit node"
+                  disabled={!!blueprintBusy}
+                  title={blueprintBusy ? busyTip : "Edit node"}
                   aria-label="Edit node"
-                  className="p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors hidden sm:block"
+                  className="p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm1.414 1.06a.25.25 0 0 0-.354 0L3.463 11.098a.25.25 0 0 0-.064.108l-.631 2.208 2.208-.63a.25.25 0 0 0 .108-.064l8.609-8.61a.25.25 0 0 0 0-.353l-1.086-1.086-.18.18Z" />
@@ -408,10 +444,10 @@ export function MacroNodeCard({
                 {(node.status === "pending" || node.status === "skipped") && (
                   <button
                     onClick={handleSkip}
-                    disabled={skipping}
-                    title={skipping ? "Updating node status..." : node.status === "skipped" ? "Unskip node" : "Skip node"}
+                    disabled={skipping || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
+                    title={blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot skip while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot skip while AI re-evaluation is in progress" : skipping ? "Updating node status..." : node.status === "skipped" ? "Unskip node" : "Skip node"}
                     aria-label={node.status === "skipped" ? "Unskip node" : "Skip node"}
-                    className="p-1.5 rounded-md text-text-muted hover:text-accent-yellow hover:bg-accent-yellow/10 transition-colors disabled:opacity-50 hidden sm:block"
+                    className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                       <path d="M4.5 2a.5.5 0 0 1 .5.5v11a.5.5 0 0 1-1 0v-11a.5.5 0 0 1 .5-.5Zm7.5.5a.5.5 0 0 0-.83-.38l-5 4.5a.5.5 0 0 0 0 .74l5 4.5A.5.5 0 0 0 12 11.5v-9Z" transform="scale(-1,1) translate(-16,0)" />
@@ -420,9 +456,10 @@ export function MacroNodeCard({
                 )}
                 <button
                   onClick={handleDeleteClick}
-                  title="Delete node"
+                  disabled={enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
+                  title={blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot delete while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot delete while AI re-evaluation is in progress" : "Delete node"}
                   aria-label="Delete node"
-                  className="p-1.5 rounded-md text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors hidden sm:block"
+                  className="p-1.5 rounded-md text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75ZM11 3V1.75A1.75 1.75 0 0 0 9.25 0h-2.5A1.75 1.75 0 0 0 5 1.75V3H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 14h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11Zm-5.47 1.5.7 7h-1.46l-.7-7h1.46Zm2.97 7V4.5h-1v7h1Zm2.97 0-.7-7h1.46l.7 7h-1.46Z" />
@@ -434,8 +471,8 @@ export function MacroNodeCard({
             {blueprintId && node.status !== "running" && node.status !== "queued" && !isEditing && (
               <button
                 onClick={handleReevaluate}
-                disabled={reevaluating || reevaluateQueued}
-                title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : "AI reads your codebase and updates this node's title, description, and status"}
+                disabled={reevaluating || reevaluateQueued || !!blueprintBusy}
+                title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : blueprintBusy ? busyTip : "AI reads your codebase and updates this node's title, description, and status"}
                 aria-label={reevaluateQueued ? "Re-evaluation queued" : reevaluating ? "Re-evaluating node" : "Re-evaluate node with AI"}
                 className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 hidden sm:block"
               >
@@ -468,21 +505,21 @@ export function MacroNodeCard({
                   <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-border-primary bg-bg-secondary shadow-lg py-1" onClick={(e) => e.stopPropagation()}>
                     {canManage && (
                       <>
-                        <button onClick={(e) => { handleEditStart(e); setMobileMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors">
+                        <button onClick={(e) => { handleEditStart(e); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
                           Edit
                         </button>
                         {(node.status === "pending" || node.status === "skipped") && (
-                          <button onClick={(e) => { handleSkip(e); setMobileMenuOpen(false); }} disabled={skipping} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
+                          <button onClick={(e) => { handleSkip(e); setMobileMenuOpen(false); }} disabled={skipping || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
                             {node.status === "skipped" ? "Unskip" : "Skip"}
                           </button>
                         )}
-                        <button onClick={(e) => { handleDeleteClick(e); setMobileMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs text-accent-red hover:bg-accent-red/10 transition-colors">
+                        <button onClick={(e) => { handleDeleteClick(e); setMobileMenuOpen(false); }} disabled={enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-50">
                           Delete
                         </button>
                       </>
                     )}
                     {node.status !== "running" && node.status !== "queued" && (
-                      <button onClick={(e) => { handleReevaluate(e); setMobileMenuOpen(false); }} disabled={reevaluating || reevaluateQueued} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
+                      <button onClick={(e) => { handleReevaluate(e); setMobileMenuOpen(false); }} disabled={reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
                         {reevaluating || reevaluateQueued ? "Re-evaluating..." : "Re-evaluate"}
                       </button>
                     )}
@@ -542,9 +579,9 @@ export function MacroNodeCard({
               <>
                 <button
                   onClick={handleRun}
-                  disabled={running}
+                  disabled={running || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
                   aria-label={running ? "AI is running this node" : "Run node"}
-                  title={running ? "AI is executing this node in a Claude Code session..." : "Execute this node using Claude Code"}
+                  title={running ? "AI is executing this node in an agent session..." : blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot run while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot run while AI re-evaluation is in progress" : "Execute this node using the selected agent"}
                   className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                 >
                   {running ? (
@@ -691,21 +728,58 @@ export function MacroNodeCard({
               </div>
             )}
 
-            {/* Artifacts */}
-            {(node.inputArtifacts.length > 0 || node.outputArtifacts.length > 0) && (
+            {/* Input Artifacts */}
+            {node.inputArtifacts.length > 0 && (
               <div>
-                <h4 className="text-xs text-text-muted mb-1">Artifacts</h4>
+                <h4 className="text-xs text-text-muted mb-1">
+                  Input Artifacts ({node.inputArtifacts.length})
+                </h4>
                 <div className="space-y-1">
                   {node.inputArtifacts.map((a) => (
-                    <div key={a.id} className="text-xs text-text-secondary flex items-center gap-1.5">
-                      <span className="text-accent-blue">&#8592;</span>
-                      <span className="capitalize">{a.type.replace(/_/g, " ")}</span>
+                    <div key={a.id}>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleArtifact(a.id); }}
+                        className="text-xs text-text-secondary flex items-center gap-1.5 w-full text-left hover:text-text-primary transition-colors"
+                        aria-expanded={expandedArtifacts.has(a.id)}
+                      >
+                        <span className={`transition-transform text-[10px] ${expandedArtifacts.has(a.id) ? "rotate-90" : ""}`}>▶</span>
+                        <span className="text-accent-blue">&#8592;</span>
+                        <span className="capitalize">{a.type.replace(/_/g, " ")}</span>
+                      </button>
+                      {expandedArtifacts.has(a.id) && a.content && (
+                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-48 overflow-y-auto ml-5 [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs" onClick={(e) => e.stopPropagation()}>
+                          <MarkdownContent content={a.content} maxHeight="none" />
+                        </div>
+                      )}
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Output Artifacts */}
+            {node.outputArtifacts.length > 0 && (
+              <div>
+                <h4 className="text-xs text-text-muted mb-1">
+                  Output Artifacts ({node.outputArtifacts.length})
+                </h4>
+                <div className="space-y-1">
                   {node.outputArtifacts.map((a) => (
-                    <div key={a.id} className="text-xs text-text-secondary flex items-center gap-1.5">
-                      <span className="text-accent-green">&#8594;</span>
-                      <span className="capitalize">{a.type.replace(/_/g, " ")}</span>
+                    <div key={a.id}>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); toggleArtifact(a.id); }}
+                        className="text-xs text-text-secondary flex items-center gap-1.5 w-full text-left hover:text-text-primary transition-colors"
+                        aria-expanded={expandedArtifacts.has(a.id)}
+                      >
+                        <span className={`transition-transform text-[10px] ${expandedArtifacts.has(a.id) ? "rotate-90" : ""}`}>▶</span>
+                        <span className="text-accent-green">&#8594;</span>
+                        <span className="capitalize">{a.type.replace(/_/g, " ")}</span>
+                      </button>
+                      {expandedArtifacts.has(a.id) && a.content && (
+                        <div className="text-xs bg-bg-tertiary rounded p-2 mt-1 max-h-48 overflow-y-auto ml-5 [&_.space-y-3]:space-y-1.5 [&_.space-y-3]:text-xs" onClick={(e) => e.stopPropagation()}>
+                          <MarkdownContent content={a.content} maxHeight="none" />
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -742,12 +816,12 @@ export function MacroNodeCard({
                                 e.stopPropagation();
                                 setResumingExecId(exec.id);
                                 resumeNodeSession(blueprintId, node.id, exec.id)
-                                  .then(() => onRefresh?.())
+                                  .then(() => { broadcastOperation?.("resume", node.id); onRefresh?.(); })
                                   .catch(() => setResumingExecId(null));
                               }}
-                              disabled={resumingExecId === exec.id || running}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-green-600/15 text-green-500 hover:bg-green-600/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                              title={resumingExecId === exec.id ? "AI is resuming the failed session..." : running ? "Cannot resume while node is running" : "Resume this failed session — AI continues with full context from the previous attempt"}
+                              disabled={resumingExecId === exec.id || running || !!blueprintBusy}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                              title={resumingExecId === exec.id ? "AI is resuming the failed session..." : blueprintBusy ? busyTip : running ? "Cannot resume while node is running" : "Resume this failed session — AI continues with full context from the previous attempt"}
                               aria-label={resumingExecId === exec.id ? "Resuming session" : "Resume failed session"}
                             >
                               {resumingExecId === exec.id ? (

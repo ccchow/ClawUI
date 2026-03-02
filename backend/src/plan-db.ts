@@ -13,7 +13,8 @@ export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
 export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
 export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
 export type ReportedStatus = "done" | "failed" | "blocked" | null;
-export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps";
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps" | "coordinate";
+export type InsightSeverity = "info" | "warning" | "critical";
 
 // Layer 1: Blueprint (was "Plan")
 export interface Blueprint {
@@ -111,6 +112,18 @@ export interface NodeSuggestion {
   title: string;
   description: string;
   used: boolean;
+  createdAt: string;
+}
+
+export interface BlueprintInsight {
+  id: string;
+  blueprintId: string;
+  sourceNodeId?: string;
+  role: string;
+  severity: InsightSeverity;
+  message: string;
+  read: boolean;
+  dismissed: boolean;
   createdAt: string;
 }
 
@@ -226,6 +239,18 @@ export function initPlanTables(): void {
         created_at    TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS blueprint_insights (
+        id              TEXT PRIMARY KEY,
+        blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        source_node_id  TEXT REFERENCES macro_nodes(id) ON DELETE SET NULL,
+        role            TEXT NOT NULL,
+        severity        TEXT NOT NULL DEFAULT 'info',
+        message         TEXT NOT NULL,
+        read            INTEGER NOT NULL DEFAULT 0,
+        dismissed       INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_macro_nodes_blueprint ON macro_nodes(blueprint_id, "order");
       CREATE INDEX IF NOT EXISTS idx_artifacts_source ON artifacts(source_node_id);
       CREATE INDEX IF NOT EXISTS idx_artifacts_target ON artifacts(target_node_id);
@@ -238,6 +263,7 @@ export function initPlanTables(): void {
       CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
       CREATE INDEX IF NOT EXISTS idx_suggestions_node ON node_suggestions(node_id);
       CREATE INDEX IF NOT EXISTS idx_suggestions_blueprint ON node_suggestions(blueprint_id);
+      CREATE INDEX IF NOT EXISTS idx_insights_blueprint_read ON blueprint_insights(blueprint_id, read);
     `);
   }
 
@@ -380,6 +406,25 @@ export function initPlanTables(): void {
       const maxSeq = db.prepare("SELECT MAX(seq) as max_seq FROM macro_nodes WHERE blueprint_id = ?").get(id) as { max_seq: number | null };
       db.prepare("UPDATE blueprints SET next_node_seq = ? WHERE id = ?").run((maxSeq?.max_seq ?? 0) + 1, id);
     }
+  }
+
+  // Incremental migration: create blueprint_insights table if not exists
+  const insightTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='blueprint_insights'").all();
+  if (insightTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS blueprint_insights (
+        id              TEXT PRIMARY KEY,
+        blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        source_node_id  TEXT REFERENCES macro_nodes(id) ON DELETE SET NULL,
+        role            TEXT NOT NULL,
+        severity        TEXT NOT NULL DEFAULT 'info',
+        message         TEXT NOT NULL,
+        read            INTEGER NOT NULL DEFAULT 0,
+        dismissed       INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_insights_blueprint_read ON blueprint_insights(blueprint_id, read);
+    `);
   }
 
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
@@ -1559,4 +1604,107 @@ export function markSuggestionUsed(id: string): NodeSuggestion | null {
 export function deleteSuggestion(id: string): void {
   const db = getDb();
   db.prepare("DELETE FROM node_suggestions WHERE id = ?").run(id);
+}
+
+// ─── Blueprint Insights ─────────────────────────────────────
+
+interface InsightRow {
+  id: string;
+  blueprint_id: string;
+  source_node_id: string | null;
+  role: string;
+  severity: string;
+  message: string;
+  read: number;
+  dismissed: number;
+  created_at: string;
+}
+
+function rowToInsight(row: InsightRow): BlueprintInsight {
+  return {
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    ...(row.source_node_id ? { sourceNodeId: row.source_node_id } : {}),
+    role: row.role,
+    severity: row.severity as InsightSeverity,
+    message: row.message,
+    read: row.read === 1,
+    dismissed: row.dismissed === 1,
+    createdAt: row.created_at,
+  };
+}
+
+export function createInsight(
+  blueprintId: string,
+  sourceNodeId: string | null,
+  role: string,
+  severity: InsightSeverity,
+  message: string,
+): BlueprintInsight {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO blueprint_insights (id, blueprint_id, source_node_id, role, severity, message, read, dismissed, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+  `).run(id, blueprintId, sourceNodeId, role, severity, message, now);
+  return {
+    id,
+    blueprintId,
+    ...(sourceNodeId ? { sourceNodeId } : {}),
+    role,
+    severity,
+    message,
+    read: false,
+    dismissed: false,
+    createdAt: now,
+  };
+}
+
+export function getInsightsForBlueprint(
+  blueprintId: string,
+  opts?: { unreadOnly?: boolean },
+): BlueprintInsight[] {
+  const db = getDb();
+  let sql = "SELECT * FROM blueprint_insights WHERE blueprint_id = ? AND dismissed = 0";
+  const params: (string | number)[] = [blueprintId];
+  if (opts?.unreadOnly) {
+    sql += " AND read = 0";
+  }
+  sql += " ORDER BY created_at DESC";
+  const rows = db.prepare(sql).all(...params) as InsightRow[];
+  return rows.map(rowToInsight);
+}
+
+export function getUnreadInsightCount(blueprintId: string): number {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT COUNT(*) as cnt FROM blueprint_insights WHERE blueprint_id = ? AND read = 0 AND dismissed = 0",
+  ).get(blueprintId) as { cnt: number };
+  return row.cnt;
+}
+
+export function markInsightRead(insightId: string): BlueprintInsight | null {
+  const db = getDb();
+  db.prepare("UPDATE blueprint_insights SET read = 1 WHERE id = ?").run(insightId);
+  const row = db.prepare("SELECT * FROM blueprint_insights WHERE id = ?").get(insightId) as InsightRow | undefined;
+  return row ? rowToInsight(row) : null;
+}
+
+export function markAllInsightsRead(blueprintId: string): void {
+  const db = getDb();
+  db.prepare("UPDATE blueprint_insights SET read = 1 WHERE blueprint_id = ? AND read = 0").run(blueprintId);
+}
+
+export function dismissInsight(insightId: string): void {
+  const db = getDb();
+  db.prepare("UPDATE blueprint_insights SET dismissed = 1 WHERE id = ?").run(insightId);
+}
+
+export function getTotalUnreadInsightCount(): number {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT COUNT(*) as cnt FROM blueprint_insights WHERE read = 0 AND dismissed = 0",
+  ).get() as { cnt: number };
+  return row.cnt;
 }

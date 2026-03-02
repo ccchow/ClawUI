@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   type Blueprint,
+  type BlueprintInsight,
   type MacroNodeStatus,
   type PendingTask,
   getBlueprint,
@@ -21,6 +22,11 @@ import {
   unarchiveBlueprint as unarchiveBlueprintApi,
   starBlueprint as starBlueprintApi,
   unstarBlueprint as unstarBlueprintApi,
+  fetchBlueprintInsights,
+  markInsightRead as markInsightReadApi,
+  markAllInsightsRead as markAllInsightsReadApi,
+  dismissInsight as dismissInsightApi,
+  coordinateBlueprint,
 } from "@/lib/api";
 import { AgentBadge } from "@/components/AgentSelector";
 import { StatusIndicator } from "@/components/StatusIndicator";
@@ -30,6 +36,8 @@ import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { computeDepLayout } from "@/components/DependencyGraph";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
+import { useToast } from "@/components/Toast";
+import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 
 export default function BlueprintDetailPage() {
   const params = useParams();
@@ -98,12 +106,31 @@ export default function BlueprintDetailPage() {
       return next;
     });
   }, [updateUrlParam]);
+
+  const handleNodeSearchInput = useCallback((value: string) => {
+    setNodeSearchInput(value);
+    if (nodeSearchTimerRef.current) clearTimeout(nodeSearchTimerRef.current);
+    nodeSearchTimerRef.current = setTimeout(() => {
+      setNodeSearchQuery(value.trim().toLowerCase());
+    }, 300);
+  }, []);
+
+  // Cleanup node search debounce timer
+  useEffect(() => {
+    return () => { if (nodeSearchTimerRef.current) clearTimeout(nodeSearchTimerRef.current); };
+  }, []);
+  const [nodeSearchInput, setNodeSearchInput] = useState("");
+  const [nodeSearchQuery, setNodeSearchQuery] = useState("");
+  const nodeSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showOlderNodes, setShowOlderNodes] = useState(false);
   const [generateInstruction, setGenerateInstruction] = useState("");
   const [approving, setApproving] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [reevaluating, setReevaluating] = useState(false);
   const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
+  const [insights, setInsights] = useState<BlueprintInsight[]>([]);
+  const [insightsOpen, setInsightsOpen] = useState(true);
+  const [showDismissed, setShowDismissed] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartRef = useRef<number | null>(null);
   const MAX_POLL_DURATION = 35 * 60 * 1000; // 35 min safety cap
@@ -126,6 +153,16 @@ export default function BlueprintDetailPage() {
   const descRef = useRef<HTMLTextAreaElement>(null);
   const recoveryAttempted = useRef(false);
 
+  const { showToast } = useToast();
+
+  // Cross-tab sync: when another tab fires an operation on this blueprint,
+  // immediately fetch fresh data so shouldPoll activates within one cycle.
+  const broadcastOperation = useBlueprintBroadcast(id, () => {
+    loadBlueprint();
+    getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => {});
+    fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+  });
+
   const loadBlueprint = useCallback(() => {
     return getBlueprint(id)
       .then((bp) => {
@@ -144,6 +181,7 @@ export default function BlueprintDetailPage() {
     // Also fetch queue status on initial load so pendingTasks is populated
     // immediately (prevents losing visibility of queued reevaluate/enrich ops)
     getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => { /* non-critical: UI still functional */ });
+    fetchBlueprintInsights(id).then(setInsights).catch(() => { /* non-critical */ });
   }, [loadBlueprint, id]);
 
   // Auto-recover lost sessions for nodes failed by server restart
@@ -191,6 +229,7 @@ export default function BlueprintDetailPage() {
     setNewNodeIds(new Set());
     try {
       await generatePlan(id, generateInstruction.trim() || undefined);
+      broadcastOperation("generate");
       // Generate is now fire-and-forget — reload to pick up pending task,
       // then polling will detect new nodes as Claude creates them via API
       await loadBlueprint();
@@ -230,10 +269,12 @@ export default function BlueprintDetailPage() {
         Promise.all([
           getBlueprint(id),
           getQueueStatus(id),
+          fetchBlueprintInsights(id),
         ])
-          .then(([bp, queueInfo]) => {
+          .then(([bp, queueInfo, freshInsights]) => {
             setBlueprint(bp);
             setPendingTasks(queueInfo.pendingTasks);
+            setInsights(freshInsights);
             // Track newly created nodes during generation
             if (preGenerateNodeIdsRef.current) {
               const freshIds = bp.nodes
@@ -300,6 +341,7 @@ export default function BlueprintDetailPage() {
     setError(null);
     try {
       await reevaluateAllNodes(id);
+      broadcastOperation("reevaluate_all");
       // Refresh to pick up pending tasks
       const bp = await getBlueprint(id);
       setBlueprint(bp);
@@ -316,6 +358,7 @@ export default function BlueprintDetailPage() {
     setError(null);
     try {
       await runAllNodes(id);
+      broadcastOperation("run_all");
       // Start polling — the useEffect above will handle it once status becomes "running"
       const bp = await getBlueprint(id);
       setBlueprint(bp);
@@ -328,6 +371,52 @@ export default function BlueprintDetailPage() {
   const handleRefresh = () => {
     loadBlueprint();
     getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => { /* non-critical: UI still functional */ });
+    fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+  };
+
+  const handleCoordinate = async () => {
+    setError(null);
+    try {
+      await coordinateBlueprint(id);
+      broadcastOperation("coordinate");
+      const bp = await getBlueprint(id);
+      setBlueprint(bp);
+      getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => {});
+      fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Coordinator failed");
+    }
+  };
+
+  // Insight handlers — optimistic updates
+  const handleMarkInsightRead = async (insightId: string) => {
+    setInsights((prev) => prev.map((i) => i.id === insightId ? { ...i, read: true } : i));
+    try {
+      await markInsightReadApi(id, insightId);
+    } catch {
+      // Revert on error
+      setInsights((prev) => prev.map((i) => i.id === insightId ? { ...i, read: false } : i));
+    }
+  };
+
+  const handleMarkAllInsightsRead = async () => {
+    const prevInsights = insights;
+    setInsights((prev) => prev.map((i) => ({ ...i, read: true })));
+    try {
+      await markAllInsightsReadApi(id);
+    } catch {
+      setInsights(prevInsights);
+    }
+  };
+
+  const handleDismissInsight = async (insightId: string) => {
+    setInsights((prev) => prev.map((i) => i.id === insightId ? { ...i, dismissed: true } : i));
+    try {
+      await dismissInsightApi(id, insightId);
+    } catch {
+      // Revert on error
+      setInsights((prev) => prev.map((i) => i.id === insightId ? { ...i, dismissed: false } : i));
+    }
   };
 
   const handleAddNode = async (e: React.FormEvent) => {
@@ -386,6 +475,17 @@ export default function BlueprintDetailPage() {
       setEnriching(false);
     }
   };
+
+  // Toast when coordinator task completes
+  const prevCoordinatingRef = useRef(false);
+  useEffect(() => {
+    const wasCoordinating = prevCoordinatingRef.current;
+    const nowCoordinating = pendingTasks.some(t => t.type === "coordinate");
+    prevCoordinatingRef.current = nowCoordinating;
+    if (wasCoordinating && !nowCoordinating) {
+      showToast("Coordinator finished analyzing insights");
+    }
+  }, [pendingTasks, showToast]);
 
   // Compute dependency depth for each node (topological level in the DAG)
   // Root nodes (no deps) = depth 0; depth = max(depth of deps) + 1
@@ -455,8 +555,14 @@ export default function BlueprintDetailPage() {
   }
 
   const isGeneratingTask = pendingTasks.some(t => t.type === "generate");
+  const isReevaluatingTask = pendingTasks.some(t => t.type === "reevaluate");
+  const isRunningTask = pendingTasks.some(t => t.type === "run");
+  const isCoordinatingTask = pendingTasks.some(t => t.type === "coordinate");
+  const unreadInsightCount = insights.filter((i) => !i.read && !i.dismissed).length;
   const newNodeCount = newNodeIds.size;
   const isRunning = blueprint.status === "running" || runningAll;
+  // Name of the active blueprint-wide operation (for tooltip), or undefined if idle
+  const blueprintBusy = isGeneratingTask ? "Generate" : (isRunning || isRunningTask) ? "Run All" : undefined;
   const canRunAll = (blueprint.status === "approved" || blueprint.status === "failed" || blueprint.status === "paused")
     && blueprint.nodes.some((n) => n.status === "pending" || n.status === "failed");
 
@@ -471,10 +577,13 @@ export default function BlueprintDetailPage() {
     skipped: 6,
   };
 
-  // Apply status filter then sort
-  const filteredNodes = statusFilter === "all"
+  // Apply status filter + search filter then sort
+  let filteredNodes = statusFilter === "all"
     ? blueprint.nodes
     : blueprint.nodes.filter((n) => n.status === statusFilter);
+  if (nodeSearchQuery) {
+    filteredNodes = filteredNodes.filter((n) => n.title.toLowerCase().includes(nodeSearchQuery));
+  }
 
   // Active vs completed tier: active statuses always above completed ones
   const completedStatuses = new Set<MacroNodeStatus>(["done", "skipped"]);
@@ -497,7 +606,9 @@ export default function BlueprintDetailPage() {
       return b.createdAt.localeCompare(a.createdAt);
     });
   } else {
-    displayNodes = reverseOrder ? [...filteredNodes].reverse() : filteredNodes;
+    displayNodes = [...filteredNodes].sort((a, b) =>
+      reverseOrder ? b.seq - a.seq : a.seq - b.seq
+    );
   }
 
   // Smart grouping: only collapse done/skipped nodes, never hide active ones
@@ -570,7 +681,7 @@ export default function BlueprintDetailPage() {
               <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
             </svg>
           </button>
-          <StatusIndicator status={blueprint.status} />
+          <StatusIndicator status={blueprint.status} context="blueprint" />
           {editingTitle ? (
             <input
               ref={titleRef}
@@ -597,19 +708,19 @@ export default function BlueprintDetailPage() {
                   (e.target as HTMLInputElement).blur();
                 }
               }}
-              readOnly={generating || enriching || reevaluating}
-              className={`text-xl font-semibold min-w-0 flex-1 px-2 py-0.5 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary focus:outline-none ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : ""}`}
+              readOnly={generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask}
+              className={`text-xl font-semibold min-w-0 flex-1 px-2 py-0.5 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary focus:outline-none ${generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "opacity-60 cursor-not-allowed" : ""}`}
             />
           ) : (
             <h1
-              className={`text-xl font-semibold truncate min-w-0 flex-1 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
+              className={`text-xl font-semibold truncate min-w-0 flex-1 transition-colors ${generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
               onClick={() => {
-                if (generating || enriching || reevaluating) return;
+                if (generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask) return;
                 setTitleValue(blueprint.title);
                 setEditingTitle(true);
                 setTimeout(() => titleRef.current?.focus(), 0);
               }}
-              title={generating || enriching || reevaluating ? "Editing disabled during AI operation" : "Click to edit"}
+              title={generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "Editing disabled during AI operation" : "Click to edit"}
             >
               {blueprint.title}
             </h1>
@@ -641,12 +752,12 @@ export default function BlueprintDetailPage() {
             {canRunAll && (
               <button
                 onClick={handleRunAll}
-                disabled={isRunning}
-                title={isRunning ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using Claude Code"}
+                disabled={isRunning || isRunningTask}
+                title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using the selected agent"}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
               >
-                {isRunning ? (
-                  <><AISparkle size="xs" /> Running...</>
+                {isRunning || isRunningTask ? (
+                  <><AISparkle size="xs" /> In Progress...</>
                 ) : (
                   <>
                     <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>
@@ -717,20 +828,20 @@ export default function BlueprintDetailPage() {
                 setDescValue(blueprint.description || "");
               }
             }}
-            readOnly={generating || enriching || reevaluating}
-            className={`w-full text-sm px-3 py-2 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary placeholder:text-text-muted focus:outline-none resize-y min-h-[60px] mb-3 ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : ""}`}
+            readOnly={generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask}
+            className={`w-full text-sm px-3 py-2 rounded-lg bg-bg-tertiary border border-accent-blue text-text-primary placeholder:text-text-muted focus:outline-none resize-y min-h-[60px] mb-3 ${generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "opacity-60 cursor-not-allowed" : ""}`}
             rows={2}
           />
         ) : (
           <div
-            className={`text-sm mb-3 transition-colors ${generating || enriching || reevaluating ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
+            className={`text-sm mb-3 transition-colors ${generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:text-text-primary"}`}
             onClick={() => {
-              if (generating || enriching || reevaluating) return;
+              if (generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask) return;
               setDescValue(blueprint.description || "");
               setEditingDesc(true);
               setTimeout(() => descRef.current?.focus(), 0);
             }}
-            title={generating || enriching || reevaluating ? "Editing disabled during AI operation" : "Click to edit"}
+            title={generating || enriching || reevaluating || isGeneratingTask || isReevaluatingTask ? "Editing disabled during AI operation" : "Click to edit"}
           >
             {blueprint.description ? (
               <MarkdownContent content={blueprint.description} maxHeight="200px" />
@@ -746,18 +857,18 @@ export default function BlueprintDetailPage() {
         )}
 
         {/* Generate instruction + action buttons — ChatGPT-style unified input */}
-        <div className={`rounded-xl border bg-bg-secondary transition-colors ${generating ? "border-accent-purple/40" : "border-border-primary focus-within:border-accent-purple/60"}`}>
+        <div className={`rounded-xl border bg-bg-secondary transition-colors ${generating || isGeneratingTask ? "border-accent-purple/40" : "border-border-primary focus-within:border-accent-purple/60"}`}>
           <textarea
             rows={2}
             value={generateInstruction}
             onChange={(e) => setGenerateInstruction(e.target.value)}
-            readOnly={generating}
+            readOnly={generating || isGeneratingTask}
             placeholder="Describe what to generate or change (e.g. 'add auth support', 'focus on testing')..."
-            className={`w-full px-4 pt-3 pb-1 bg-transparent text-text-primary text-sm placeholder:text-text-muted focus:outline-none resize-none max-h-32 overflow-y-auto ${generating ? "opacity-60 cursor-not-allowed" : ""}`}
+            className={`w-full px-4 pt-3 pb-1 bg-transparent text-text-primary text-sm placeholder:text-text-muted focus:outline-none resize-none max-h-32 overflow-y-auto ${generating || isGeneratingTask ? "opacity-60 cursor-not-allowed" : ""}`}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
-                if (!generating) handleGenerate();
+                if (!generating && !isGeneratingTask) handleGenerate();
               }
             }}
           />
@@ -770,7 +881,8 @@ export default function BlueprintDetailPage() {
                     <span className="text-xs text-accent-blue whitespace-nowrap">Reevaluate?</span>
                     <button
                       onClick={handleReevaluateAll}
-                      className="px-2 py-0.5 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.97] transition-all"
+                      disabled={isReevaluatingTask}
+                      className="px-2 py-0.5 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       Yes
                     </button>
@@ -784,8 +896,8 @@ export default function BlueprintDetailPage() {
                 ) : (
                   <button
                     onClick={handleReevaluateAll}
-                    disabled={isRunning || reevaluating || generateCooldown}
-                    title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
+                    disabled={isRunning || reevaluating || generateCooldown || isReevaluatingTask}
+                    title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || isReevaluatingTask ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
                     className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                   >
                     {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
@@ -809,7 +921,8 @@ export default function BlueprintDetailPage() {
                   <span className="text-xs text-accent-purple whitespace-nowrap">Regenerate?</span>
                   <button
                     onClick={() => handleGenerate(true)}
-                    className="px-2 py-0.5 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.97] transition-all"
+                    disabled={isGeneratingTask}
+                    className="px-2 py-0.5 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Yes
                   </button>
@@ -823,18 +936,18 @@ export default function BlueprintDetailPage() {
               ) : (
                 <button
                   onClick={() => handleGenerate()}
-                  disabled={generating}
-                  title={generating ? "AI is generating task nodes..." : `Use AI to decompose the blueprint into executable task nodes (${navigator?.userAgent?.includes("Mac") ? "⌘" : "Ctrl"}+Enter)`}
+                  disabled={generating || isGeneratingTask}
+                  title={generating || isGeneratingTask ? "AI is generating task nodes..." : `Use AI to decompose the blueprint into executable task nodes (${navigator?.userAgent?.includes("Mac") ? "⌘" : "Ctrl"}+Enter)`}
                   aria-label="Generate nodes"
                   className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed ${
-                    generating
+                    generating || isGeneratingTask
                       ? "px-3 py-1.5 bg-accent-purple/20 text-accent-purple"
                       : blueprint.nodes.length === 0
                         ? "p-2 bg-accent-purple text-white hover:bg-accent-purple/90"
                         : "p-2 text-accent-purple hover:bg-accent-purple/15"
                   }`}
                 >
-                  {generating ? (
+                  {generating || isGeneratingTask ? (
                     <><AISparkle size="xs" /> Generating...</>
                   ) : (
                     <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -865,6 +978,140 @@ export default function BlueprintDetailPage() {
           {error}
         </div>
       )}
+
+      {/* Insights Panel */}
+      {insights.length > 0 && (() => {
+        const visibleInsights = showDismissed ? insights : insights.filter((i) => !i.dismissed);
+        const unreadCount = insights.filter((i) => !i.read && !i.dismissed).length;
+        const dismissedCount = insights.filter((i) => i.dismissed).length;
+        if (visibleInsights.length === 0 && dismissedCount === 0) return null;
+
+        const severityConfig = {
+          critical: { bg: "bg-accent-red/10", border: "border-accent-red/30", text: "text-accent-red", dot: "bg-accent-red" },
+          warning: { bg: "bg-accent-amber/10", border: "border-accent-amber/30", text: "text-accent-amber", dot: "bg-accent-amber" },
+          info: { bg: "bg-accent-blue/10", border: "border-accent-blue/30", text: "text-accent-blue", dot: "bg-accent-blue" },
+        };
+
+        return (
+          <div className="mb-4 rounded-xl border border-border-primary bg-bg-secondary overflow-hidden">
+            {/* Header */}
+            <button
+              onClick={() => setInsightsOpen((v) => !v)}
+              className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-bg-tertiary/50 transition-colors"
+            >
+              <svg className={`w-3 h-3 text-text-muted transition-transform ${insightsOpen ? "rotate-90" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+              <span className="text-sm font-medium text-text-primary">Insights</span>
+              {unreadCount > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-accent-red/20 text-accent-red">
+                  {unreadCount}
+                </span>
+              )}
+              <span className="text-xs text-text-muted ml-auto">
+                {visibleInsights.length} insight{visibleInsights.length !== 1 ? "s" : ""}
+              </span>
+              {unreadCount > 0 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleMarkAllInsightsRead(); }}
+                  className="text-[11px] text-accent-blue hover:text-accent-blue/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-blue/10"
+                >
+                  Mark all read
+                </button>
+              )}
+              <button
+                onClick={(e) => { e.stopPropagation(); handleCoordinate(); }}
+                disabled={isRunning || isCoordinatingTask || unreadInsightCount === 0}
+                title={isCoordinatingTask ? "Coordinator is analyzing insights..." : unreadInsightCount === 0 ? "No unread insights to analyze" : "Agent analyzes unread insights and creates/updates nodes"}
+                className="text-[11px] text-accent-purple hover:text-accent-purple/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-purple/10 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isCoordinatingTask ? (<><AISparkle size="xs" /> Analyzing...</>) : "Analyze"}
+              </button>
+            </button>
+
+            {/* Insight list */}
+            {insightsOpen && (
+              <div className="border-t border-border-primary">
+                {visibleInsights.length === 0 ? (
+                  <div className="px-4 py-3 text-xs text-text-muted">All insights dismissed.</div>
+                ) : (
+                  <div className="divide-y divide-border-primary">
+                    {visibleInsights.map((insight) => {
+                      const cfg = severityConfig[insight.severity] || severityConfig.info;
+                      const sourceNode = insight.sourceNodeId
+                        ? blueprint.nodes.find((n) => n.id === insight.sourceNodeId)
+                        : null;
+                      return (
+                        <div
+                          key={insight.id}
+                          className={`px-4 py-2.5 flex items-start gap-2.5 transition-colors ${insight.dismissed ? "opacity-50" : ""} ${!insight.read && !insight.dismissed ? "bg-bg-tertiary/30" : ""}`}
+                        >
+                          {/* Severity dot */}
+                          <span className={`flex-shrink-0 mt-1.5 w-2 h-2 rounded-full ${cfg.dot}`} title={insight.severity} />
+                          {/* Content */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.text}`}>
+                                {insight.role}
+                              </span>
+                              <span className={`text-[10px] px-1 py-0.5 rounded capitalize ${cfg.bg} ${cfg.text}`}>
+                                {insight.severity}
+                              </span>
+                              {sourceNode && (
+                                <Link
+                                  href={`/blueprints/${id}/nodes/${insight.sourceNodeId}`}
+                                  className="text-[10px] text-accent-blue hover:text-accent-blue/80 transition-colors truncate max-w-[120px]"
+                                >
+                                  #{sourceNode.seq} {sourceNode.title}
+                                </Link>
+                              )}
+                              <span className="text-[10px] text-text-muted ml-auto flex-shrink-0">
+                                {new Date(insight.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                              </span>
+                            </div>
+                            <p className="text-sm text-text-secondary">{insight.message}</p>
+                          </div>
+                          {/* Actions */}
+                          <div className="flex items-center gap-1 flex-shrink-0 mt-0.5">
+                            {!insight.read && !insight.dismissed && (
+                              <button
+                                onClick={() => handleMarkInsightRead(insight.id)}
+                                className="p-1 rounded text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors"
+                                title="Mark as read"
+                                aria-label="Mark insight as read"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                              </button>
+                            )}
+                            {!insight.dismissed && (
+                              <button
+                                onClick={() => handleDismissInsight(insight.id)}
+                                className="p-1 rounded text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors"
+                                title="Dismiss"
+                                aria-label="Dismiss insight"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {dismissedCount > 0 && (
+                  <div className="px-4 py-2 border-t border-border-primary">
+                    <button
+                      onClick={() => setShowDismissed((v) => !v)}
+                      className="text-[11px] text-text-muted hover:text-text-secondary transition-colors"
+                    >
+                      {showDismissed ? "Hide" : "Show"} {dismissedCount} dismissed
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Add Node */}
       <div className="mb-4">
@@ -924,7 +1171,7 @@ export default function BlueprintDetailPage() {
                           : "border-border-primary text-text-muted hover:border-border-hover"
                       }`}
                     >
-                      #{n.order + 1} {n.title.length > 30 ? n.title.slice(0, 30) + "…" : n.title}
+                      #{n.seq} {n.title.length > 30 ? n.title.slice(0, 30) + "…" : n.title}
                     </button>
                   ))}
                 </div>
@@ -989,11 +1236,36 @@ export default function BlueprintDetailPage() {
       ) : (
         <div>
           <div className="flex items-center justify-between mb-3 gap-2">
-            <span className="text-xs text-text-muted flex-shrink-0">
-              {statusFilter === "all"
-                ? `${blueprint.nodes.length} node${blueprint.nodes.length !== 1 ? "s" : ""}`
-                : `${filteredNodes.length}/${blueprint.nodes.length} nodes`}
-            </span>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="text-xs text-text-muted">
+                {statusFilter === "all" && !nodeSearchQuery
+                  ? `${blueprint.nodes.length} node${blueprint.nodes.length !== 1 ? "s" : ""}`
+                  : `${filteredNodes.length}/${blueprint.nodes.length} nodes`}
+              </span>
+              <div className="relative">
+                <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+                </svg>
+                <input
+                  type="text"
+                  value={nodeSearchInput}
+                  onChange={(e) => handleNodeSearchInput(e.target.value)}
+                  placeholder="Filter nodes..."
+                  className="w-28 sm:w-36 pl-7 pr-2 py-0.5 rounded-full text-[11px] bg-bg-tertiary text-text-primary placeholder:text-text-muted border border-transparent focus:border-border-hover focus:outline-none transition-colors"
+                />
+                {nodeSearchInput && (
+                  <button
+                    onClick={() => { setNodeSearchInput(""); setNodeSearchQuery(""); }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                    aria-label="Clear node search"
+                  >
+                    <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 6L6 18" /><path d="M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="flex items-center gap-1.5 flex-wrap justify-end">
               {(["all", "pending", "queued", "running", "done", "failed", "blocked", "skipped"] as const).map((s) => {
                 const count = s === "all" ? blueprint.nodes.length : blueprint.nodes.filter((n) => n.status === s).length;
@@ -1079,15 +1351,29 @@ export default function BlueprintDetailPage() {
               </button>
             </div>
           </div>
-          {filteredNodes.length === 0 && statusFilter !== "all" && (
+          {filteredNodes.length === 0 && (statusFilter !== "all" || nodeSearchQuery) && (
             <div className="text-center py-8 text-text-muted text-sm border border-dashed border-border-primary rounded-xl">
-              No <span className="capitalize">{statusFilter}</span> nodes.{" "}
-              <button
-                onClick={() => setStatusFilter("all")}
-                className="text-accent-blue hover:underline"
-              >
-                Show all
-              </button>
+              {nodeSearchQuery ? (
+                <>
+                  No nodes matching &ldquo;{nodeSearchQuery}&rdquo;.{" "}
+                  <button
+                    onClick={() => { setNodeSearchInput(""); setNodeSearchQuery(""); }}
+                    className="text-accent-blue hover:underline"
+                  >
+                    Clear search
+                  </button>
+                </>
+              ) : (
+                <>
+                  No <span className="capitalize">{statusFilter}</span> nodes.{" "}
+                  <button
+                    onClick={() => setStatusFilter("all")}
+                    className="text-accent-blue hover:underline"
+                  >
+                    Show all
+                  </button>
+                </>
+              )}
             </div>
           )}
           {showOlderNodes || olderDisplayNodes.length === 0 ? (
@@ -1129,6 +1415,9 @@ export default function BlueprintDetailPage() {
                           defaultExpanded={false}
                           isLastDisplayed={displayIdx === displayNodes.length - 1}
                           depLanes={depLayouts[displayIdx]}
+                          broadcastOperation={broadcastOperation}
+                          hasSuggestions={(node.suggestionCount ?? 0) > 0}
+                          blueprintBusy={blueprintBusy}
                         />
                       </div>
                     </Fragment>
@@ -1154,6 +1443,9 @@ export default function BlueprintDetailPage() {
                       defaultExpanded={false}
                       isLastDisplayed={displayIdx === topDisplayNodes.length - 1}
                       depLanes={depLayouts[displayIdx]}
+                      broadcastOperation={broadcastOperation}
+                      hasSuggestions={(node.suggestionCount ?? 0) > 0}
+                      blueprintBusy={blueprintBusy}
                     />
                   </div>
                 );

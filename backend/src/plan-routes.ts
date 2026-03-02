@@ -35,15 +35,21 @@ import {
   getActiveRelatedSession,
   createSuggestion,
   getSuggestionsForNode,
-  deleteSuggestionsForNode,
   deleteSuggestion,
   markSuggestionUsed,
+  createInsight,
+  getInsightsForBlueprint,
+  markInsightRead,
+  markAllInsightsRead,
+  dismissInsight,
+  getTotalUnreadInsightCount,
 } from "./plan-db.js";
-import type { ArtifactType, ExecutionType, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
+import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
 import { syncSession } from "./db.js";
 import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession, resolveNodeRoles } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runAgentInteractive, getApiBase, getAuthParam } from "./plan-generator.js";
+import { coordinateBlueprint } from "./plan-coordinator.js";
 import { getRole } from "./roles/role-registry.js";
 import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
@@ -1507,6 +1513,142 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/suggestions-callback", (req, 
     res.json({ success: true, count: totalCount });
   } catch (err) {
     log.error(`Suggestions callback failed: ${err instanceof Error ? err.message : err}`);
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/nodes/:nodeId/insights-callback — callback for blueprint-level insights
+// Called by the agent during evaluation to surface cross-cutting observations
+planRouter.post("/api/blueprints/:id/nodes/:nodeId/insights-callback", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const nodeId = req.params.nodeId;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+    const node = blueprint.nodes.find((n) => n.id === nodeId);
+    if (!node) { res.status(404).json({ error: "Node not found" }); return; }
+
+    const { insights } = req.body as {
+      insights?: Array<{ role?: string; severity?: string; message?: string }>;
+    };
+
+    if (!Array.isArray(insights) || insights.length === 0) {
+      res.status(400).json({ error: "Missing or empty 'insights' array" });
+      return;
+    }
+
+    const validSeverities = new Set(["info", "warning", "critical"]);
+    const valid = insights.filter(
+      (i) => i.role && typeof i.role === "string" && i.message && typeof i.message === "string" && validSeverities.has(i.severity || ""),
+    );
+
+    if (valid.length === 0) {
+      res.status(400).json({ error: "No valid insights (each must have role, severity, and message)" });
+      return;
+    }
+
+    for (const i of valid) {
+      createInsight(blueprintId, nodeId, i.role!, i.severity! as InsightSeverity, i.message!);
+    }
+
+    log.info(`Insights callback for node ${nodeId.slice(0, 8)} "${node.title}": ${valid.length} insights created`);
+    res.json({ success: true, count: valid.length });
+  } catch (err) {
+    log.error(`Insights callback failed: ${err instanceof Error ? err.message : err}`);
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/insights — list insights for a blueprint
+planRouter.get("/api/blueprints/:id/insights", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const unreadOnly = req.query.unread === "true";
+    const insights = getInsightsForBlueprint(req.params.id, { unreadOnly });
+    res.json(insights);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/insights/:insightId/mark-read — mark a single insight as read
+planRouter.post("/api/blueprints/:id/insights/:insightId/mark-read", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const updated = markInsightRead(req.params.insightId);
+    if (!updated) { res.status(404).json({ error: "Insight not found" }); return; }
+
+    res.json(updated);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/insights/mark-all-read — mark all insights as read for a blueprint
+planRouter.post("/api/blueprints/:id/insights/mark-all-read", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    markAllInsightsRead(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/insights/:insightId/dismiss — dismiss a single insight
+planRouter.post("/api/blueprints/:id/insights/:insightId/dismiss", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    dismissInsight(req.params.insightId);
+    res.json({ success: true });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/insights/unread-count — aggregate unread insight count across all blueprints
+planRouter.get("/api/insights/unread-count", (_req, res) => {
+  try {
+    const count = getTotalUnreadInsightCount();
+    res.json({ count });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/coordinate — trigger blueprint coordinator to process unread insights
+// Fire-and-forget: returns immediately with {status:"queued"}, runs async
+planRouter.post("/api/blueprints/:id/coordinate", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+
+    addPendingTask(blueprintId, { type: "coordinate", queuedAt: new Date().toISOString() });
+
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await coordinateBlueprint(blueprintId);
+      } finally {
+        removePendingTask(blueprintId, undefined, "coordinate");
+      }
+    }).catch((err) => {
+      log.error(`Coordinate blueprint ${blueprintId.slice(0, 8)} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued" });
+  } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
 });

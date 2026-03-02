@@ -223,11 +223,30 @@ A well-configured environment = higher-quality nodes + fewer retries = significa
 * **Auth token** — Random token generated on each startup, required on all `/api/*` requests. CORS locked to `127.0.0.1:3000`.
 * **`--dangerously-skip-permissions`** — Required by Claude Code for programmatic use. ClawUI passes it automatically; this is a Claude Code requirement, not a ClawUI design choice.
 
+## 🔌 Multi-Agent Support
+
+ClawUI supports multiple AI agent backends — switch at startup via the `AGENT_TYPE` environment variable:
+
+| Agent | `AGENT_TYPE` | Description |
+|---|---|---|
+| **Claude Code** | `claude` (default) | Anthropic's official CLI |
+| **OpenClaw** | `openclaw` | Open-source Claude Code fork with custom model providers |
+| **Pi Mono** | `pi` | Lightweight coding agent |
+| **Codex CLI** | `codex` | OpenAI's Codex CLI agent |
+
+```bash
+AGENT_TYPE=openclaw npm run dev
+```
+
+All blueprint operations (generation, execution, evaluation, enrichment) route through the selected agent runtime.
+
 ## 🔮 Coming Soon
 
 - **OpenClaw/Pi Support** — Open protocol for agent orchestration UIs to work with any coding agent backend.
 - **Codex CLI Support**
 - **Windows Support**
+- **Parallel node execution** — Run independent nodes concurrently
+- **Blueprint templates** — Reusable task graph patterns
 
 ## 🤝 Contributing
 

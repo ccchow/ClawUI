@@ -23,6 +23,7 @@ import { registerRuntime } from "./agent-runtime.js";
 import type { TimelineNode } from "./jsonl-parser.js";
 import type { FailureReason } from "./plan-db.js";
 import type { ContextPressure, SessionAnalysis } from "./jsonl-parser.js";
+import { readSessionHeader } from "./session-header.js";
 
 const log = createLogger("agent-openclaw");
 
@@ -306,167 +307,6 @@ function summarize(text: string, maxLen = 120): string {
   return firstLine.slice(0, maxLen - 1) + "…";
 }
 
-// ─── Session health analysis ────────────────────────────────
-
-/**
- * Analyze an OpenClaw session JSONL file for health indicators.
- * Checks for compaction events, error events, and token usage.
- */
-export function analyzeOpenClawSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
-  let filePath: string | null = knownFilePath ?? null;
-
-  if (!filePath) {
-    // Scan local + Docker instance directories for session files
-    const openclawRoot = join(homedir(), ".openclaw");
-    const agentsDirs: string[] = [];
-
-    // Local agents dir
-    const localAgentsDir = join(openclawRoot, "agents");
-    if (existsSync(localAgentsDir)) agentsDirs.push(localAgentsDir);
-
-    // Docker instance dirs: ~/.openclaw/openclaw-*/agents/
-    if (existsSync(openclawRoot)) {
-      try {
-        const entries = readdirSync(openclawRoot, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isDirectory() || !entry.name.startsWith("openclaw-")) continue;
-          const dockerAgentsDir = join(openclawRoot, entry.name, "agents");
-          if (existsSync(dockerAgentsDir)) agentsDirs.push(dockerAgentsDir);
-        }
-      } catch { /* skip */ }
-    }
-
-    for (const agentsDir of agentsDirs) {
-      const agents = readdirSync(agentsDir, { withFileTypes: true });
-      for (const agent of agents) {
-        if (!agent.isDirectory()) continue;
-        const sessionsDir = join(agentsDir, agent.name, "sessions");
-        if (!existsSync(sessionsDir)) continue;
-        const candidate = join(sessionsDir, `${sessionId}.jsonl`);
-        if (existsSync(candidate)) {
-          filePath = candidate;
-          break;
-        }
-      }
-      if (filePath) break;
-    }
-  }
-
-  if (!filePath) return null;
-
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-
-  const lines = raw.trim().split("\n");
-  let compactCount = 0;
-  let peakTokens = 0;
-  let lastApiError: string | null = null;
-  let messageCount = 0;
-  let lastCompactLineIdx = -1;
-  let responsesAfterLastCompact = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
-
-    messageCount++;
-
-    // Detect compaction events
-    if (obj.type === "compaction" || obj.type === "compact_boundary") {
-      compactCount++;
-      lastCompactLineIdx = i;
-      responsesAfterLastCompact = 0;
-      // Track pre-compaction token count
-      const preTokens = (obj as unknown as OpenClawCompaction).preTokens;
-      if (preTokens && preTokens > peakTokens) {
-        peakTokens = preTokens;
-      }
-    }
-
-    // Count successful assistant messages after last compaction
-    if (lastCompactLineIdx >= 0 && obj.type === "message") {
-      const msg = obj as unknown as OpenClawMessage;
-      if (msg.message?.role === "assistant") {
-        responsesAfterLastCompact++;
-      }
-    }
-
-    // Track errors
-    if (obj.type === "error") {
-      const err = obj as unknown as OpenClawError;
-      lastApiError = err.message ?? "Unknown error";
-    }
-
-    // Track peak token usage from assistant messages
-    if (obj.type === "message") {
-      const msg = obj as unknown as OpenClawMessage;
-      if (msg.message?.role === "assistant" && msg.message.usage) {
-        const usage = msg.message.usage;
-        const total = (usage.input ?? 0) + (usage.output ?? 0);
-        if (total > peakTokens) peakTokens = total;
-        if (usage.totalTokens && usage.totalTokens > peakTokens) {
-          peakTokens = usage.totalTokens;
-        }
-      }
-    }
-  }
-
-  const endedAfterCompaction = lastCompactLineIdx >= 0 && responsesAfterLastCompact <= 1;
-
-  // Determine context pressure level (same thresholds as Claude/Pi)
-  let contextPressure: ContextPressure = "none";
-  if (compactCount >= 3 || (compactCount >= 2 && endedAfterCompaction)) {
-    contextPressure = "critical";
-  } else if (compactCount >= 2 || (compactCount >= 1 && peakTokens > 150_000)) {
-    contextPressure = "high";
-  } else if (compactCount >= 1 || peakTokens > 120_000) {
-    contextPressure = "moderate";
-  }
-
-  // Determine failure reason
-  let failureReason: FailureReason = null;
-  let detail = "";
-
-  if (lastApiError) {
-    if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
-      failureReason = "context_exhausted";
-      detail = `Session ended with context error: ${lastApiError}`;
-    } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
-      failureReason = "output_token_limit";
-      detail = `Session ended with output token limit error: ${lastApiError}`;
-    } else {
-      failureReason = "error";
-      detail = `API error: ${lastApiError}`;
-    }
-  } else if (endedAfterCompaction && compactCount >= 2) {
-    failureReason = "context_exhausted";
-    detail = `Session compacted ${compactCount} times and ended immediately after the last compaction (peak ${peakTokens} tokens).`;
-  } else if (compactCount >= 3) {
-    failureReason = "context_exhausted";
-    detail = `Session compacted ${compactCount} times (peak ${peakTokens} tokens).`;
-  }
-
-  return {
-    failureReason,
-    detail,
-    compactCount,
-    peakTokens,
-    lastApiError,
-    messageCount,
-    contextPressure,
-    endedAfterCompaction,
-    responsesAfterLastCompact,
-  };
-}
-
 // ─── Runtime class ──────────────────────────────────────────
 
 export class OpenClawAgentRuntime implements AgentRuntime {
@@ -722,21 +562,11 @@ export class OpenClawAgentRuntime implements AgentRuntime {
 
   /**
    * Check if a session file's header cwd matches the given project cwd.
-   * Reads only the first line of the file for efficiency.
+   * Uses shared readSessionHeader() to read only the first line.
    */
   private matchesProjectCwd(filePath: string, projectCwd: string): boolean {
-    try {
-      const raw = readFileSync(filePath, "utf-8");
-      const firstNewline = raw.indexOf("\n");
-      const firstLine = firstNewline >= 0 ? raw.slice(0, firstNewline) : raw;
-      const header = JSON.parse(firstLine) as OpenClawSessionHeader;
-      if (header.type === "session" && header.cwd) {
-        return header.cwd === projectCwd;
-      }
-    } catch {
-      // Can't read or parse — skip
-    }
-    return false;
+    const header = readSessionHeader(filePath);
+    return header?.cwd === projectCwd;
   }
 
   /**
@@ -788,6 +618,140 @@ export class OpenClawAgentRuntime implements AgentRuntime {
 
     return null;
   }
+
+  /**
+   * Analyze an OpenClaw session JSONL file for health indicators.
+   * Checks for compaction events, error events, and token usage.
+   */
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+    let filePath: string | null = knownFilePath ?? null;
+
+    if (!filePath) {
+      filePath = this.findSessionFile(sessionId);
+    }
+
+    if (!filePath) return null;
+
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const lines = raw.trim().split("\n");
+    let compactCount = 0;
+    let peakTokens = 0;
+    let lastApiError: string | null = null;
+    let messageCount = 0;
+    let lastCompactLineIdx = -1;
+    let responsesAfterLastCompact = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+
+      messageCount++;
+
+      // Detect compaction events
+      if (obj.type === "compaction" || obj.type === "compact_boundary") {
+        compactCount++;
+        lastCompactLineIdx = i;
+        responsesAfterLastCompact = 0;
+        // Track pre-compaction token count
+        const preTokens = (obj as unknown as OpenClawCompaction).preTokens;
+        if (preTokens && preTokens > peakTokens) {
+          peakTokens = preTokens;
+        }
+      }
+
+      // Count successful assistant messages after last compaction
+      if (lastCompactLineIdx >= 0 && obj.type === "message") {
+        const msg = obj as unknown as OpenClawMessage;
+        if (msg.message?.role === "assistant") {
+          responsesAfterLastCompact++;
+        }
+      }
+
+      // Track errors
+      if (obj.type === "error") {
+        const err = obj as unknown as OpenClawError;
+        lastApiError = err.message ?? "Unknown error";
+      }
+
+      // Track peak token usage from assistant messages
+      if (obj.type === "message") {
+        const msg = obj as unknown as OpenClawMessage;
+        if (msg.message?.role === "assistant" && msg.message.usage) {
+          const usage = msg.message.usage;
+          const total = (usage.input ?? 0) + (usage.output ?? 0);
+          if (total > peakTokens) peakTokens = total;
+          if (usage.totalTokens && usage.totalTokens > peakTokens) {
+            peakTokens = usage.totalTokens;
+          }
+        }
+      }
+    }
+
+    const endedAfterCompaction = lastCompactLineIdx >= 0 && responsesAfterLastCompact <= 1;
+
+    // Determine context pressure level (same thresholds as Claude/Pi)
+    let contextPressure: ContextPressure = "none";
+    if (compactCount >= 3 || (compactCount >= 2 && endedAfterCompaction)) {
+      contextPressure = "critical";
+    } else if (compactCount >= 2 || (compactCount >= 1 && peakTokens > 150_000)) {
+      contextPressure = "high";
+    } else if (compactCount >= 1 || peakTokens > 120_000) {
+      contextPressure = "moderate";
+    }
+
+    // Determine failure reason
+    let failureReason: FailureReason = null;
+    let detail = "";
+
+    if (lastApiError) {
+      if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
+        failureReason = "context_exhausted";
+        detail = `Session ended with context error: ${lastApiError}`;
+      } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
+        failureReason = "output_token_limit";
+        detail = `Session ended with output token limit error: ${lastApiError}`;
+      } else {
+        failureReason = "error";
+        detail = `API error: ${lastApiError}`;
+      }
+    } else if (endedAfterCompaction && compactCount >= 2) {
+      failureReason = "context_exhausted";
+      detail = `Session compacted ${compactCount} times and ended immediately after the last compaction (peak ${peakTokens} tokens).`;
+    } else if (compactCount >= 3) {
+      failureReason = "context_exhausted";
+      detail = `Session compacted ${compactCount} times (peak ${peakTokens} tokens).`;
+    }
+
+    return {
+      failureReason,
+      detail,
+      compactCount,
+      peakTokens,
+      lastApiError,
+      messageCount,
+      contextPressure,
+      endedAfterCompaction,
+      responsesAfterLastCompact,
+    };
+  }
+}
+
+/**
+ * Standalone wrapper for backward compatibility.
+ * Delegates to OpenClawAgentRuntime.analyzeSessionHealth().
+ */
+export function analyzeOpenClawSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+  return new OpenClawAgentRuntime().analyzeSessionHealth(sessionId, knownFilePath);
 }
 
 // ─── Self-registration ───────────────────────────────────────

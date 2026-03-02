@@ -46,10 +46,10 @@ describe("StatusIndicator", () => {
     }
   });
 
-  it("falls back to gray for unknown status", () => {
+  it("falls back to muted color for unknown status", () => {
     render(<StatusIndicator status="unknown-status" />);
     const dot = screen.getByTitle("unknown-status");
-    expect(dot.className).toContain("bg-gray-400");
+    expect(dot.className).toContain("bg-text-muted");
   });
 
   it("renders as a span element with role img", () => {

@@ -1,10 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
-  registerRole,
   getRole,
-  clearRoles,
 } from "../roles/role-registry.js";
-import type { RoleDefinition, RolePrompts } from "../roles/role-registry.js";
 import type { Blueprint, MacroNode } from "../plan-db.js";
 
 // Import role modules for side-effect registration

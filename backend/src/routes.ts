@@ -1,14 +1,18 @@
 import { Router } from "express";
 import { execFile, spawn } from "node:child_process";
 import { join } from "node:path";
-import { getSessionCwd, analyzeSessionHealth } from "./jsonl-parser.js";
+import { getSessionCwd } from "./jsonl-parser.js";
 import { runPrompt, validateSessionId } from "./cli-runner.js";
-import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession, getAvailableAgents, getSessionAgentType } from "./db.js";
+import { acquireSessionLock, releaseSessionLock, isSessionRunning } from "./session-lock.js";
+import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession, getAvailableAgents, getSessionAgentType, getSessionCwdFromDb } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
 import type { AgentType } from "./agent-runtime.js";
-import { analyzePiSessionHealth } from "./agent-pimono.js";
-import { analyzeOpenClawSessionHealth } from "./agent-openclaw.js";
-import { analyzeCodexSessionHealth } from "./agent-codex.js";
+import { getRegisteredRuntimes, getRuntimeByType } from "./agent-runtime.js";
+// Side-effect imports: ensure all agent runtimes are registered before getRegisteredRuntimes() is called
+import "./agent-claude.js";
+import "./agent-pimono.js";
+import "./agent-openclaw.js";
+import "./agent-codex.js";
 import { getAppState, updateAppState, trackSessionView } from "./app-state.js";
 import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
 import { createLogger } from "./logger.js";
@@ -152,6 +156,7 @@ router.get("/api/sync", (_req, res) => {
 });
 
 // POST /api/sessions/:id/run — execute a prompt and get suggestions in one call
+// Dispatches through the correct AgentRuntime based on the session's agent type.
 router.post("/api/sessions/:id/run", async (req, res) => {
   const sessionId = req.params.id as string;
   try {
@@ -165,27 +170,66 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       res.status(400).json({ error: "Prompt too long (max 10000 chars)" });
       return;
     }
-    const cwd = getSessionCwd(sessionId);
-    const { output, suggestions } = await runPrompt(sessionId, prompt.trim(), cwd);
 
-    // Re-sync this session after running a prompt (new data in JSONL)
-    syncSession(sessionId);
+    // Per-session lock: prevent concurrent runs on the same session
+    if (!acquireSessionLock(sessionId)) {
+      res.status(409).json({ error: "Session is already running" });
+      return;
+    }
 
-    res.json({ output, suggestions });
+    try {
+      // Resolve the agent runtime for this session
+      const agentType: AgentType = getSessionAgentType(sessionId) ?? "claude";
+      const runtimes = getRegisteredRuntimes();
+      const factory = runtimes.get(agentType) ?? runtimes.get("claude");
+      if (!factory) {
+        res.status(500).json({ error: `No agent runtime available for type "${agentType}"` });
+        return;
+      }
+      const runtime = factory();
+
+      if (!runtime.capabilities.supportsResume) {
+        res.status(400).json({ error: `Agent type "${agentType}" does not support session resume` });
+        return;
+      }
+
+      // Get CWD from DB (works for all agent types) with fallback to Claude-specific resolver
+      const cwd = getSessionCwdFromDb(sessionId) ?? getSessionCwd(sessionId);
+      const { output, suggestions } = await runPrompt(sessionId, prompt.trim(), cwd, runtime);
+
+      // Re-sync this session after running a prompt (new data in JSONL)
+      syncSession(sessionId);
+
+      res.json({ output, suggestions });
+    } finally {
+      releaseSessionLock(sessionId);
+    }
   } catch (err) {
     log.error(`POST /api/sessions/:id/run failed: ${String(err)}`);
     res.status(500).json({ error: safeError(err) });
   }
 });
 
+// GET /api/sessions/:id/status — lightweight check if a session has an active run
+router.get("/api/sessions/:id/status", (req, res) => {
+  try {
+    const sessionId = req.params.id as string;
+    res.json({ running: isSessionRunning(sessionId) });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
 // ─── Enrichment API (Layer 3) ─────────────────────────────────
 
-// GET /api/sessions/:id/meta — read session enrichment
+// GET /api/sessions/:id/meta — read session enrichment + agent type
 router.get("/api/sessions/:id/meta", (req, res) => {
   try {
+    const sessionId = req.params.id as string;
     const enrichments = getEnrichments();
-    const meta = enrichments.sessions[req.params.id as string];
-    res.json(meta ?? {});
+    const meta = enrichments.sessions[sessionId];
+    const agentType = getSessionAgentType(sessionId);
+    res.json({ ...(meta ?? {}), ...(agentType ? { agentType } : {}) });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
@@ -288,28 +332,19 @@ router.post("/api/dev/redeploy", (_req, res) => {
 });
 
 // GET /api/sessions/:id/health — analyze session context health
-// Uses the correct analyzer based on the session's agent type
+// Dispatches through the correct AgentRuntime based on the session's agent type
 router.get("/api/sessions/:id/health", (req, res) => {
   try {
     const sessionId = req.params.id as string;
-    const agentType = getSessionAgentType(sessionId) ?? "claude";
+    const agentType: AgentType = getSessionAgentType(sessionId) ?? "claude";
+    const runtime = getRuntimeByType(agentType);
 
-    let analysis;
-    switch (agentType) {
-      case "pi":
-        analysis = analyzePiSessionHealth(sessionId);
-        break;
-      case "openclaw":
-        analysis = analyzeOpenClawSessionHealth(sessionId);
-        break;
-      case "codex":
-        analysis = analyzeCodexSessionHealth(sessionId);
-        break;
-      case "claude":
-      default:
-        analysis = analyzeSessionHealth(sessionId);
-        break;
+    if (!runtime) {
+      res.status(500).json({ error: `No agent runtime available for type "${agentType}"` });
+      return;
     }
+
+    const analysis = runtime.analyzeSessionHealth(sessionId);
 
     if (!analysis) {
       res.status(404).json({ error: "Session file not found" });

@@ -147,10 +147,12 @@ function CollapsibleSection({
   label,
   content,
   defaultOpen = false,
+  renderMarkdown = false,
 }: {
   label: string;
   content: string;
   defaultOpen?: boolean;
+  renderMarkdown?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
 
@@ -171,9 +173,15 @@ function CollapsibleSection({
         <span className="ml-auto opacity-50">{content.length} chars</span>
       </button>
       {open && (
-        <pre className="px-3 py-2 text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[500px] overflow-y-auto border-t border-border-primary bg-bg-primary/50">
-          {content}
-        </pre>
+        renderMarkdown ? (
+          <div className="px-3 py-2 border-t border-border-primary bg-bg-primary/50">
+            <MarkdownContent content={content} maxHeight="500px" />
+          </div>
+        ) : (
+          <pre className="px-3 py-2 text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[500px] overflow-y-auto border-t border-border-primary bg-bg-primary/50">
+            {content}
+          </pre>
+        )
       )}
     </div>
   );
@@ -279,6 +287,7 @@ export function ToolPairNode({
               label="Output"
               content={toolResult.content}
               defaultOpen={toolResult.content.length < 2000}
+              renderMarkdown
             />
           </div>
         )}
@@ -327,7 +336,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
           <div className="flex items-center gap-3">
             <div className="animate-spin h-5 w-5 border-2 border-accent-amber border-t-transparent rounded-full" />
             <div>
-              <p className="text-sm font-medium text-accent-amber">Claude Code is working...</p>
+              <p className="text-sm font-medium text-accent-amber">Agent is working...</p>
               <p className="text-xs text-text-muted mt-1 font-mono">{node.content.slice(0, 150)}</p>
             </div>
           </div>
@@ -442,6 +451,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
                   label="Output"
                   content={node.content}
                   defaultOpen={node.content.length < 2000}
+                  renderMarkdown
                 />
               </>
             )}
@@ -451,9 +461,7 @@ export function TimelineNodeComponent({ node }: { node: TimelineNode }) {
               <MarkdownContent content={node.content} />
             )}
             {!isTool && node.type !== "assistant" && node.type !== "user" && (
-              <pre className="text-sm text-text-primary whitespace-pre-wrap break-words overflow-x-auto max-h-[600px] overflow-y-auto">
-                {node.content}
-              </pre>
+              <MarkdownContent content={node.content} maxHeight="600px" />
             )}
           </div>
         )}

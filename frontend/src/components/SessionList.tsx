@@ -287,7 +287,7 @@ export function SessionList({
               </svg>
               <p className="text-sm">No sessions found for this project</p>
               <p className="text-xs text-text-muted/70">
-                Sessions appear here when you use Claude Code.
+                Sessions appear here when you use an agent.
               </p>
             </div>
           )}

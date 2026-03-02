@@ -7,9 +7,11 @@ import {
   getTimeline,
   updateSessionMeta,
   getSessionMeta,
+  getSessionStatus,
   runPrompt,
   getSessionExecution,
   getBlueprint,
+  type AgentType,
   type TimelineNode,
   type Suggestion,
   type SessionMeta,
@@ -22,6 +24,8 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
 import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
+import { useSessionBroadcast } from "@/lib/useSessionBroadcast";
+import { AgentBadge } from "@/components/AgentSelector";
 
 const POLL_INTERVAL = 5_000;
 const POLL_INTERVAL_RUNNING = 2_000;
@@ -177,6 +181,7 @@ export default function SessionPage() {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [remoteRunning, setRemoteRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<number>(0);
   const [refreshLabel, setRefreshLabel] = useState("just now");
@@ -189,13 +194,22 @@ export default function SessionPage() {
   const thinkingNodeRef = useRef<TimelineNode | null>(null);
   const preRunNodeCountRef = useRef(0);
 
-  // Session enrichment meta
+  // Cross-tab broadcast: notify other tabs when this tab starts/stops a run
+  const broadcastRunState = useSessionBroadcast(id, (isRunning) => {
+    setRemoteRunning(isRunning);
+  });
+
+  // Combined disabled state: local run OR remote run detected
+  const isDisabled = running || remoteRunning;
+
+  // Session enrichment meta + agent type
   const [sessionMeta, setSessionMeta] = useState<{
     alias?: string;
     tags?: string[];
     notes?: string;
     starred?: boolean;
     archived?: boolean;
+    agentType?: AgentType;
   }>({});
 
   // Blueprint context (if this session was created by a plan execution)
@@ -246,8 +260,8 @@ export default function SessionPage() {
     setLoading(true);
 
     async function loadAll() {
-      // Fire all three fetches in parallel
-      const [nodesResult, metaResult, bpResult] = await Promise.allSettled([
+      // Fire all fetches in parallel
+      const [nodesResult, metaResult, bpResult, statusResult] = await Promise.allSettled([
         getTimeline(id),
         getSessionMeta(id),
         getSessionExecution(id).then(async (execution) => {
@@ -258,6 +272,7 @@ export default function SessionPage() {
           const nodeIndex = bp.nodes.findIndex((n) => n.id === execution.nodeId);
           return { blueprint: bp, node, nodeIndex };
         }),
+        getSessionStatus(id),
       ]);
 
       if (cancelled) return;
@@ -283,6 +298,11 @@ export default function SessionPage() {
 
       if (bpResult.status === "fulfilled" && bpResult.value) {
         setBlueprintContext(bpResult.value);
+      }
+
+      // Check if session is already running (e.g. from another tab or blueprint execution)
+      if (statusResult.status === "fulfilled" && statusResult.value?.running) {
+        setRemoteRunning(true);
       }
 
       // Restore suggestions from cookie
@@ -311,10 +331,27 @@ export default function SessionPage() {
       if (!document.hidden) {
         fetchNodes();
       }
-    }, running ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
+    }, (running || remoteRunning) ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [autoRefresh, loading, running, fetchNodes]);
+  }, [autoRefresh, loading, running, remoteRunning, fetchNodes]);
+
+  // Poll backend session status to detect remote runs (other tabs, blueprint execution)
+  useEffect(() => {
+    if (loading || running) return; // Skip when locally running — we know the state
+
+    const interval = setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const status = await getSessionStatus(id);
+        setRemoteRunning(status.running);
+      } catch {
+        // Ignore status poll errors
+      }
+    }, remoteRunning ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
+
+    return () => clearInterval(interval);
+  }, [id, loading, running, remoteRunning]);
 
   // Update the "Xm ago" label every second
   useEffect(() => {
@@ -334,6 +371,7 @@ export default function SessionPage() {
     runningRef.current = true;
     setError(null);
     setSuggestions([]);
+    broadcastRunState("start");
 
     const userNodeId = `run-${Date.now()}`;
     const thinkingNodeId = `thinking-${Date.now()}`;
@@ -343,7 +381,7 @@ export default function SessionPage() {
       id: thinkingNodeId,
       type: "system" as const,
       timestamp: now,
-      title: "⏳ Claude Code is working...",
+      title: "⏳ Agent is working...",
       content: prompt,
     };
 
@@ -382,6 +420,21 @@ export default function SessionPage() {
     } catch (e) {
       const elapsed = Date.now() - startTime;
       console.error("[ClawUI] Run failed:", { elapsed: `${elapsed}ms`, error: e });
+
+      // Handle 409 Conflict — session is already running in another tab
+      const is409 = e instanceof Error && e.message.includes("409");
+      if (is409) {
+        setRemoteRunning(true);
+        setError("Session is running in another tab");
+        // Remove optimistic nodes since the run didn't actually start
+        setNodes((prev) => prev.filter((n) => n.id !== userNodeId && n.id !== thinkingNodeId));
+        pollFingerprintRef.current = "";
+        setRunning(false);
+        runningRef.current = false;
+        thinkingNodeRef.current = null;
+        broadcastRunState("stop");
+        return;
+      }
       // Replace thinking node with error
       setNodes((prev) =>
         prev.map((n) =>
@@ -403,6 +456,7 @@ export default function SessionPage() {
       setRunning(false);
       runningRef.current = false;
       thinkingNodeRef.current = null;
+      broadcastRunState("stop");
     }
   };
 
@@ -578,15 +632,28 @@ export default function SessionPage() {
 
           {/* Action area — at top since timeline is newest-first */}
           <div className="mb-6 space-y-4">
-            <PromptInput
-              disabled={running}
-              loading={running}
-              onSubmit={handleRun}
-            />
+            <div className="flex items-center gap-2">
+              {sessionMeta.agentType && (
+                <AgentBadge agentType={sessionMeta.agentType} size="sm" />
+              )}
+              <div className="flex-1 min-w-0">
+                <PromptInput
+                  disabled={isDisabled}
+                  loading={running}
+                  onSubmit={handleRun}
+                />
+              </div>
+            </div>
+
+            {remoteRunning && !running && (
+              <div className="p-3 rounded-lg bg-accent-amber/10 border border-accent-amber/20 text-accent-amber text-sm">
+                Session is running in another tab
+              </div>
+            )}
 
             <SuggestionButtons
               suggestions={suggestions}
-              disabled={running}
+              disabled={isDisabled}
               onSelect={handleRun}
             />
 

@@ -5,6 +5,8 @@
  * must implement, plus a registry/factory for runtime selection.
  */
 
+import type { SessionAnalysis } from "./jsonl-parser.js";
+
 // ─── Types ───────────────────────────────────────────────────
 
 export type AgentType = "claude" | "openclaw" | "pi" | "codex";
@@ -16,7 +18,7 @@ export interface AgentCapabilities {
   supportsInteractive: boolean;
   /** Supports --output-format text for text-only output */
   supportsTextOutput: boolean;
-  /** Supports --dangerously-skip-permissions flag */
+  /** Supports a permission-bypass flag (e.g. --dangerously-skip-permissions, --dangerously-bypass-approvals-and-sandbox) */
   supportsDangerousMode: boolean;
 }
 
@@ -82,6 +84,13 @@ export interface AgentRuntime {
    * Strips agent-specific env vars that could cause conflicts.
    */
   cleanEnv(): NodeJS.ProcessEnv;
+
+  /**
+   * Analyze a session's JSONL file for health indicators.
+   * Checks for compaction events, API errors, token usage, and context pressure.
+   * Returns null if the session file doesn't exist.
+   */
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null;
 }
 
 // ─── Runtime Registry ────────────────────────────────────────
@@ -124,6 +133,18 @@ export function getActiveRuntime(): AgentRuntime {
  */
 export function getRegisteredRuntimes(): Map<AgentType, () => AgentRuntime> {
   return new Map(runtimeRegistry);
+}
+
+/**
+ * Get an agent runtime by type. Creates a fresh instance each time.
+ * Useful when you need a specific runtime (e.g., by session agent type)
+ * rather than the globally configured active runtime.
+ *
+ * Returns null if no runtime is registered for the given type.
+ */
+export function getRuntimeByType(type: AgentType): AgentRuntime | null {
+  const factory = runtimeRegistry.get(type);
+  return factory ? factory() : null;
 }
 
 /**

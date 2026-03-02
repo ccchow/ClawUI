@@ -839,6 +839,15 @@ export function getSessionAgentType(sessionId: string): AgentType | null {
   return (row?.agent_type as AgentType) ?? null;
 }
 
+/**
+ * Get the working directory for a session by ID from the SQLite index.
+ * Works for all agent types (Claude, OpenClaw, Pi, Codex).
+ */
+export function getSessionCwdFromDb(sessionId: string): string | undefined {
+  const row = db.prepare("SELECT cwd FROM sessions WHERE id = ?").get(sessionId) as { cwd: string | null } | undefined;
+  return row?.cwd ?? undefined;
+}
+
 export function getTimeline(sessionId: string): TimelineNode[] {
   const rows = db.prepare(`
     SELECT id, type, timestamp, title, content, tool_name, tool_input, tool_result, tool_use_id

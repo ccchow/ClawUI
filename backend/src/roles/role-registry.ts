@@ -23,6 +23,8 @@ export interface RolePrompts {
   suggestionsTemplate: string;
   /** Reevaluate-all: how to verify completion */
   reevaluationVerification: string;
+  /** Cross-cutting observations this role should surface during evaluation */
+  insightsTemplate: string;
 }
 
 export interface RoleDefinition {

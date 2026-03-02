@@ -29,13 +29,16 @@ const statusLabels: Record<string, string> = {
 export function StatusIndicator({
   status,
   size = "md",
+  context,
 }: {
   status: string;
   size?: "sm" | "md";
+  context?: "blueprint" | "node";
 }) {
   const sizeClass = size === "sm" ? "w-2 h-2" : "w-2.5 h-2.5";
-  const colorClass = statusColors[status] ?? "bg-gray-400";
-  const label = statusLabels[status] ?? status;
+  const colorClass = statusColors[status] ?? "bg-text-muted";
+  const baseLabel = statusLabels[status] ?? status;
+  const label = context === "blueprint" && status === "running" ? "In Progress" : baseLabel;
 
   return (
     <span

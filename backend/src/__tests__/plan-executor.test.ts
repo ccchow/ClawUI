@@ -51,17 +51,18 @@ function createTestDb(): Database.Database {
 
 // ─── Serial Queue Tests ──────────────────────────────────────
 
-describe("enqueueBlueprintTask serial queue behavior", () => {
-  // Re-implement the queue logic from plan-executor.ts for isolated testing
+describe("workspace serial queue behavior (enqueueBlueprintTask)", () => {
+  // Re-implement the queue logic from plan-executor.ts for isolated testing.
+  // Queue is keyed by workspace (projectCwd), not blueprintId.
   function createQueue() {
     const queues = new Map<string, Array<{ task: () => Promise<unknown>; resolve: (val: unknown) => void; reject: (err: Error) => void }>>();
     const running = new Set<string>();
 
-    async function drainQueue(bpId: string): Promise<void> {
-      if (running.has(bpId)) return;
-      const queue = queues.get(bpId);
+    async function drainQueue(wsKey: string): Promise<void> {
+      if (running.has(wsKey)) return;
+      const queue = queues.get(wsKey);
       if (!queue || queue.length === 0) return;
-      running.add(bpId);
+      running.add(wsKey);
       while (queue.length > 0) {
         const item = queue.shift()!;
         try {
@@ -71,29 +72,29 @@ describe("enqueueBlueprintTask serial queue behavior", () => {
           item.reject(err instanceof Error ? err : new Error(String(err)));
         }
       }
-      running.delete(bpId);
-      queues.delete(bpId);
+      running.delete(wsKey);
+      queues.delete(wsKey);
     }
 
-    function enqueue<T>(bpId: string, task: () => Promise<T>): Promise<T> {
+    function enqueue<T>(wsKey: string, task: () => Promise<T>): Promise<T> {
       return new Promise<T>((resolve, reject) => {
-        const queue = queues.get(bpId) ?? [];
+        const queue = queues.get(wsKey) ?? [];
         queue.push({ task, resolve: resolve as (val: unknown) => void, reject });
-        queues.set(bpId, queue);
-        drainQueue(bpId);
+        queues.set(wsKey, queue);
+        drainQueue(wsKey);
       });
     }
 
     return { enqueue, running, queues };
   }
 
-  it("executes tasks serially (one at a time per blueprint)", async () => {
+  it("executes tasks serially (one at a time per workspace)", async () => {
     const { enqueue } = createQueue();
     const executionOrder: number[] = [];
     const activeCount = { current: 0, max: 0 };
 
     const promises = [1, 2, 3].map((i) =>
-      enqueue("bp-1", async () => {
+      enqueue("/workspace/a", async () => {
         activeCount.current++;
         activeCount.max = Math.max(activeCount.max, activeCount.current);
         executionOrder.push(i);
@@ -109,37 +110,70 @@ describe("enqueueBlueprintTask serial queue behavior", () => {
     expect(activeCount.max).toBe(1);
   });
 
-  it("allows parallel execution across different blueprints", async () => {
+  it("allows parallel execution across different workspaces", async () => {
     const { enqueue } = createQueue();
     const startedAt: Record<string, number> = {};
 
-    const p1 = enqueue("bp-1", async () => {
-      startedAt["bp-1"] = Date.now();
+    const p1 = enqueue("/workspace/a", async () => {
+      startedAt["/workspace/a"] = Date.now();
       await new Promise((r) => setTimeout(r, 50));
+      return "ws-a-done";
+    });
+
+    const p2 = enqueue("/workspace/b", async () => {
+      startedAt["/workspace/b"] = Date.now();
+      await new Promise((r) => setTimeout(r, 50));
+      return "ws-b-done";
+    });
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toBe("ws-a-done");
+    expect(r2).toBe("ws-b-done");
+    const diff = Math.abs(startedAt["/workspace/a"] - startedAt["/workspace/b"]);
+    expect(diff).toBeLessThan(30);
+  });
+
+  it("serializes tasks from different blueprints sharing the same workspace", async () => {
+    const { enqueue } = createQueue();
+    const executionOrder: string[] = [];
+    const activeCount = { current: 0, max: 0 };
+
+    // Both blueprints use the same workspace key
+    const wsKey = "/shared/workspace";
+
+    const p1 = enqueue(wsKey, async () => {
+      activeCount.current++;
+      activeCount.max = Math.max(activeCount.max, activeCount.current);
+      executionOrder.push("bp-1-task");
+      await new Promise((r) => setTimeout(r, 10));
+      activeCount.current--;
       return "bp-1-done";
     });
 
-    const p2 = enqueue("bp-2", async () => {
-      startedAt["bp-2"] = Date.now();
-      await new Promise((r) => setTimeout(r, 50));
+    const p2 = enqueue(wsKey, async () => {
+      activeCount.current++;
+      activeCount.max = Math.max(activeCount.max, activeCount.current);
+      executionOrder.push("bp-2-task");
+      await new Promise((r) => setTimeout(r, 10));
+      activeCount.current--;
       return "bp-2-done";
     });
 
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1).toBe("bp-1-done");
     expect(r2).toBe("bp-2-done");
-    const diff = Math.abs(startedAt["bp-1"] - startedAt["bp-2"]);
-    expect(diff).toBeLessThan(30);
+    expect(executionOrder).toEqual(["bp-1-task", "bp-2-task"]);
+    expect(activeCount.max).toBe(1); // Only one at a time
   });
 
   it("handles task errors without breaking the queue", async () => {
     const { enqueue } = createQueue();
 
-    const p1 = enqueue("bp-1", async () => {
+    const p1 = enqueue("/workspace/a", async () => {
       throw new Error("Task 1 failed");
     });
 
-    const p2 = enqueue("bp-1", async () => {
+    const p2 = enqueue("/workspace/a", async () => {
       return "task-2-ok";
     });
 
@@ -150,75 +184,109 @@ describe("enqueueBlueprintTask serial queue behavior", () => {
   it("cleans up queue state after all tasks complete", async () => {
     const { enqueue, running, queues } = createQueue();
 
-    await enqueue("bp-1", async () => "done");
+    await enqueue("/workspace/a", async () => "done");
 
-    expect(running.has("bp-1")).toBe(false);
-    expect(queues.has("bp-1")).toBe(false);
+    expect(running.has("/workspace/a")).toBe(false);
+    expect(queues.has("/workspace/a")).toBe(false);
   });
 });
 
 // ─── Pending Task Tracking ───────────────────────────────────
 
-describe("PendingTask tracking", () => {
-  it("adds and removes pending tasks", () => {
-    const map = new Map<string, Array<{ type: string; nodeId?: string; queuedAt: string }>>();
+describe("PendingTask tracking (workspace-keyed)", () => {
+  it("adds and removes pending tasks keyed by workspace", () => {
+    // Workspace-keyed map (simulates workspacePendingTasks)
+    const map = new Map<string, Array<{ type: string; nodeId?: string; blueprintId: string; queuedAt: string }>>();
 
-    function addPendingTask(bpId: string, task: { type: string; nodeId?: string; queuedAt: string }): void {
-      const tasks = map.get(bpId) ?? [];
-      tasks.push(task);
-      map.set(bpId, tasks);
+    function addPendingTask(wsKey: string, blueprintId: string, task: { type: string; nodeId?: string; queuedAt: string }): void {
+      const tasks = map.get(wsKey) ?? [];
+      tasks.push({ ...task, blueprintId });
+      map.set(wsKey, tasks);
     }
 
-    function removePendingTask(bpId: string, nodeId?: string, type?: string): void {
-      const tasks = map.get(bpId) ?? [];
+    function removePendingTask(wsKey: string, blueprintId: string, nodeId?: string, type?: string): void {
+      const tasks = map.get(wsKey) ?? [];
       const idx = tasks.findIndex(
-        (t) => (!nodeId || t.nodeId === nodeId) && (!type || t.type === type),
+        (t) => t.blueprintId === blueprintId && (!nodeId || t.nodeId === nodeId) && (!type || t.type === type),
       );
       if (idx >= 0) tasks.splice(idx, 1);
-      if (tasks.length === 0) map.delete(bpId);
-      else map.set(bpId, tasks);
+      if (tasks.length === 0) map.delete(wsKey);
+      else map.set(wsKey, tasks);
     }
 
-    addPendingTask("bp-1", { type: "run", nodeId: "n1", queuedAt: "2024-01-01T00:00:00Z" });
-    addPendingTask("bp-1", { type: "run", nodeId: "n2", queuedAt: "2024-01-01T00:00:01Z" });
-    expect(map.get("bp-1")).toHaveLength(2);
+    const wsKey = "/workspace/project";
+    addPendingTask(wsKey, "bp-1", { type: "run", nodeId: "n1", queuedAt: "2024-01-01T00:00:00Z" });
+    addPendingTask(wsKey, "bp-1", { type: "run", nodeId: "n2", queuedAt: "2024-01-01T00:00:01Z" });
+    expect(map.get(wsKey)).toHaveLength(2);
 
-    removePendingTask("bp-1", "n1", "run");
-    expect(map.get("bp-1")).toHaveLength(1);
-    expect(map.get("bp-1")![0].nodeId).toBe("n2");
+    removePendingTask(wsKey, "bp-1", "n1", "run");
+    expect(map.get(wsKey)).toHaveLength(1);
+    expect(map.get(wsKey)![0].nodeId).toBe("n2");
 
-    removePendingTask("bp-1", "n2", "run");
-    expect(map.has("bp-1")).toBe(false);
+    removePendingTask(wsKey, "bp-1", "n2", "run");
+    expect(map.has(wsKey)).toBe(false);
   });
 
-  it("getQueueInfo returns correct state", () => {
-    const pendingTasks = new Map<string, Array<{ type: string; nodeId?: string; queuedAt: string }>>();
+  it("tasks from different blueprints share same workspace key", () => {
+    const map = new Map<string, Array<{ type: string; nodeId?: string; blueprintId: string; queuedAt: string }>>();
+
+    function addPendingTask(wsKey: string, blueprintId: string, task: { type: string; nodeId?: string; queuedAt: string }): void {
+      const tasks = map.get(wsKey) ?? [];
+      tasks.push({ ...task, blueprintId });
+      map.set(wsKey, tasks);
+    }
+
+    const wsKey = "/workspace/shared";
+    addPendingTask(wsKey, "bp-1", { type: "run", nodeId: "n1", queuedAt: "2024-01-01T00:00:00Z" });
+    addPendingTask(wsKey, "bp-2", { type: "run", nodeId: "n2", queuedAt: "2024-01-01T00:00:01Z" });
+
+    const tasks = map.get(wsKey)!;
+    expect(tasks).toHaveLength(2);
+    expect(tasks[0].blueprintId).toBe("bp-1");
+    expect(tasks[1].blueprintId).toBe("bp-2");
+  });
+
+  it("getQueueInfo returns correct state for a workspace", () => {
+    const pendingTasks = new Map<string, Array<{ type: string; nodeId?: string; blueprintId: string; queuedAt: string }>>();
     const running = new Set<string>();
     const queues = new Map<string, unknown[]>();
 
-    function getQueueInfo(bpId: string) {
+    function getQueueInfo(wsKey: string, blueprintId: string) {
       return {
-        running: running.has(bpId),
-        queueLength: (queues.get(bpId) ?? []).length,
-        pendingTasks: pendingTasks.get(bpId) ?? [],
+        running: running.has(wsKey),
+        queueLength: (queues.get(wsKey) ?? []).length,
+        pendingTasks: (pendingTasks.get(wsKey) ?? []).filter(t => t.blueprintId === blueprintId),
       };
     }
 
+    const wsKey = "/workspace/project";
+
     // Initially empty
-    let info = getQueueInfo("bp-1");
+    let info = getQueueInfo(wsKey, "bp-1");
     expect(info.running).toBe(false);
     expect(info.queueLength).toBe(0);
     expect(info.pendingTasks).toHaveLength(0);
 
-    // Simulate active state
-    running.add("bp-1");
-    pendingTasks.set("bp-1", [{ type: "run", nodeId: "n1", queuedAt: "2024-01-01T00:00:00Z" }]);
-    queues.set("bp-1", [{}, {}]);
+    // Simulate active state with tasks from two blueprints
+    running.add(wsKey);
+    pendingTasks.set(wsKey, [
+      { type: "run", nodeId: "n1", blueprintId: "bp-1", queuedAt: "2024-01-01T00:00:00Z" },
+      { type: "run", nodeId: "n2", blueprintId: "bp-2", queuedAt: "2024-01-01T00:00:01Z" },
+    ]);
+    queues.set(wsKey, [{}, {}]);
 
-    info = getQueueInfo("bp-1");
+    // getQueueInfo for bp-1 should only return bp-1's pending tasks
+    info = getQueueInfo(wsKey, "bp-1");
     expect(info.running).toBe(true);
     expect(info.queueLength).toBe(2);
     expect(info.pendingTasks).toHaveLength(1);
+    expect(info.pendingTasks[0].nodeId).toBe("n1");
+
+    // getQueueInfo for bp-2 should only return bp-2's pending tasks
+    info = getQueueInfo(wsKey, "bp-2");
+    expect(info.running).toBe(true);
+    expect(info.pendingTasks).toHaveLength(1);
+    expect(info.pendingTasks[0].nodeId).toBe("n2");
   });
 });
 
@@ -231,29 +299,28 @@ describe("Prompt building logic", () => {
       description: "Implement JWT auth for the API",
       projectCwd: "/tmp/project",
       nodes: [
-        { id: "n1", order: 0, title: "Setup" },
-        { id: "n2", order: 1, title: "Implement" },
+        { id: "n1", order: 0, seq: 1, title: "Setup" },
+        { id: "n2", order: 1, seq: 2, title: "Implement" },
       ],
     };
-    const node = { id: "n2", order: 1, title: "Implement", description: "Write the JWT handler", prompt: "Use jsonwebtoken library" };
+    const node = { id: "n2", order: 1, seq: 2, title: "Implement", description: "Write the JWT handler", prompt: "Use jsonwebtoken library" };
     const inputArtifacts = [
-      { node: { order: 0, title: "Setup" }, artifact: { content: "Installed jsonwebtoken and created config" } },
+      { node: { order: 0, seq: 1, title: "Setup" }, artifact: { content: "Installed jsonwebtoken and created config" } },
     ];
 
-    const total = blueprint.nodes.length;
-    let prompt = `You are executing step ${node.order + 1}/${total} of a development plan: "${blueprint.title}"\n\n`;
+    let prompt = `You are executing step #${node.seq} of a development plan: "${blueprint.title}"\n\n`;
     if (blueprint.description) prompt += `## Plan Description\n${blueprint.description}\n\n`;
     if (inputArtifacts.length > 0) {
       prompt += `## Context from previous steps:\n`;
       for (const { node: depNode, artifact } of inputArtifacts) {
-        prompt += `### Step ${depNode.order + 1}: ${depNode.title}\n${artifact.content}\n\n`;
+        prompt += `### Step #${depNode.seq}: ${depNode.title}\n${artifact.content}\n\n`;
       }
     }
-    prompt += `## Your Task (Step ${node.order + 1}): ${node.title}\n`;
+    prompt += `## Your Task (Step #${node.seq}): ${node.title}\n`;
     if (node.description) prompt += `${node.description}\n\n`;
     if (node.prompt) prompt += `${node.prompt}\n\n`;
 
-    expect(prompt).toContain("step 2/2");
+    expect(prompt).toContain("step #2");
     expect(prompt).toContain("Build Auth System");
     expect(prompt).toContain("Implement JWT auth");
     expect(prompt).toContain("Context from previous steps");
@@ -263,11 +330,11 @@ describe("Prompt building logic", () => {
   });
 
   it("builds a prompt without input artifacts", () => {
-    const node = { order: 0, title: "Setup", description: "Initialize project" };
-    let prompt = `You are executing step ${node.order + 1}/3 of a development plan: "My Plan"\n\n`;
-    prompt += `## Your Task (Step ${node.order + 1}): ${node.title}\n${node.description}\n\n`;
+    const node = { order: 0, seq: 1, title: "Setup", description: "Initialize project" };
+    let prompt = `You are executing step #${node.seq} of a development plan: "My Plan"\n\n`;
+    prompt += `## Your Task (Step #${node.seq}): ${node.title}\n${node.description}\n\n`;
 
-    expect(prompt).toContain("step 1/3");
+    expect(prompt).toContain("step #1");
     expect(prompt).toContain("Initialize project");
     expect(prompt).not.toContain("Context from previous steps");
   });
@@ -1405,32 +1472,43 @@ describe("removeQueuedTask logic", () => {
 // ─── getGlobalQueueInfo logic ───────────────────────────────
 
 describe("getGlobalQueueInfo aggregation logic", () => {
-  it("aggregates tasks across blueprints", () => {
+  it("aggregates tasks across blueprints with queue positions", () => {
     const running = new Set(["bp-1"]);
     const runningNodeId = new Map([["bp-1", "n1"]]);
     const pendingTasks = new Map<string, Array<{ type: string; nodeId?: string; queuedAt: string }>>([
       ["bp-1", [{ type: "run", nodeId: "n2", queuedAt: "2024-01-01T00:00:00Z" }]],
       ["bp-2", [
-        { type: "run", nodeId: "n3", queuedAt: "2024-01-01T00:00:01Z" },
         { type: "reevaluate", nodeId: "n4", queuedAt: "2024-01-01T00:00:02Z" },
+        { type: "run", nodeId: "n3", queuedAt: "2024-01-01T00:00:01Z" },
       ]],
     ]);
 
-    interface Task { blueprintId: string; type: string; nodeId?: string }
+    interface Task { blueprintId: string; type: string; nodeId?: string; queuePosition?: number }
     const tasks: Task[] = [];
 
     for (const bpId of running) {
       tasks.push({ blueprintId: bpId, type: "running", nodeId: runningNodeId.get(bpId) });
     }
     for (const [bpId, pending] of pendingTasks) {
-      for (const t of pending) {
-        tasks.push({ blueprintId: bpId, type: t.type, nodeId: t.nodeId });
+      const sorted = [...pending].sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
+      for (let i = 0; i < sorted.length; i++) {
+        const t = sorted[i];
+        tasks.push({ blueprintId: bpId, type: t.type, nodeId: t.nodeId, queuePosition: i + 1 });
       }
     }
 
     expect(tasks).toHaveLength(4);
+    // Running task has no queuePosition
     expect(tasks[0]).toEqual({ blueprintId: "bp-1", type: "running", nodeId: "n1" });
-    expect(tasks.filter(t => t.blueprintId === "bp-2")).toHaveLength(2);
+    // Pending tasks get 1-indexed queuePosition sorted by queuedAt
+    const bp1Pending = tasks.filter(t => t.blueprintId === "bp-1" && t.type !== "running");
+    expect(bp1Pending).toHaveLength(1);
+    expect(bp1Pending[0].queuePosition).toBe(1);
+    // bp-2: n3 queued earlier than n4, so n3 is position 1, n4 is position 2
+    const bp2Tasks = tasks.filter(t => t.blueprintId === "bp-2");
+    expect(bp2Tasks).toHaveLength(2);
+    expect(bp2Tasks[0]).toMatchObject({ nodeId: "n3", queuePosition: 1 });
+    expect(bp2Tasks[1]).toMatchObject({ nodeId: "n4", queuePosition: 2 });
   });
 
   it("returns empty when nothing is running", () => {
@@ -1816,19 +1894,19 @@ describe("requeueOrphanedNodes logic", () => {
     expect(pendingTasks.get("bp-1")![0].nodeId).toBe("n1");
   });
 
-  it("serial queue ensures orphaned nodes from same blueprint run sequentially", async () => {
-    // Re-implement queue to verify serial execution for orphan re-queue
+  it("serial queue ensures tasks in same workspace run sequentially", async () => {
+    // Re-implement queue to verify serial execution within a workspace
     const executionOrder: string[] = [];
 
     function createQueue() {
       const queues = new Map<string, Array<{ task: () => Promise<void>; resolve: (val: void) => void; reject: (err: Error) => void }>>();
       const running = new Set<string>();
 
-      async function drainQueue(bpId: string): Promise<void> {
-        if (running.has(bpId)) return;
-        const queue = queues.get(bpId);
+      async function drainQueue(wsKey: string): Promise<void> {
+        if (running.has(wsKey)) return;
+        const queue = queues.get(wsKey);
         if (!queue || queue.length === 0) return;
-        running.add(bpId);
+        running.add(wsKey);
         while (queue.length > 0) {
           const item = queue.shift()!;
           try {
@@ -1838,16 +1916,16 @@ describe("requeueOrphanedNodes logic", () => {
             item.reject(err instanceof Error ? err : new Error(String(err)));
           }
         }
-        running.delete(bpId);
-        queues.delete(bpId);
+        running.delete(wsKey);
+        queues.delete(wsKey);
       }
 
-      function enqueue(bpId: string, task: () => Promise<void>): Promise<void> {
+      function enqueue(wsKey: string, task: () => Promise<void>): Promise<void> {
         return new Promise<void>((resolve, reject) => {
-          const queue = queues.get(bpId) ?? [];
+          const queue = queues.get(wsKey) ?? [];
           queue.push({ task, resolve, reject });
-          queues.set(bpId, queue);
-          drainQueue(bpId);
+          queues.set(wsKey, queue);
+          drainQueue(wsKey);
         });
       }
 
@@ -1856,9 +1934,9 @@ describe("requeueOrphanedNodes logic", () => {
 
     const { enqueue } = createQueue();
 
-    // Simulate re-queuing 3 orphaned nodes from bp-1
+    // Simulate 3 tasks in the same workspace
     const promises = ["n1", "n2", "n3"].map(nodeId =>
-      enqueue("bp-1", async () => {
+      enqueue("/workspace/project", async () => {
         executionOrder.push(`start:${nodeId}`);
         // Simulate async execution
         await new Promise(resolve => setTimeout(resolve, 5));
@@ -1876,7 +1954,7 @@ describe("requeueOrphanedNodes logic", () => {
     ]);
   });
 
-  it("orphaned nodes from different blueprints can execute in parallel", async () => {
+  it("tasks from different workspaces can execute in parallel", async () => {
     const active = new Set<string>();
     let maxConcurrent = 0;
 
@@ -1884,11 +1962,11 @@ describe("requeueOrphanedNodes logic", () => {
       const queues = new Map<string, Array<{ task: () => Promise<void>; resolve: (val: void) => void; reject: (err: Error) => void }>>();
       const running = new Set<string>();
 
-      async function drainQueue(bpId: string): Promise<void> {
-        if (running.has(bpId)) return;
-        const queue = queues.get(bpId);
+      async function drainQueue(wsKey: string): Promise<void> {
+        if (running.has(wsKey)) return;
+        const queue = queues.get(wsKey);
         if (!queue || queue.length === 0) return;
-        running.add(bpId);
+        running.add(wsKey);
         while (queue.length > 0) {
           const item = queue.shift()!;
           try {
@@ -1898,16 +1976,16 @@ describe("requeueOrphanedNodes logic", () => {
             item.reject(err instanceof Error ? err : new Error(String(err)));
           }
         }
-        running.delete(bpId);
-        queues.delete(bpId);
+        running.delete(wsKey);
+        queues.delete(wsKey);
       }
 
-      function enqueue(bpId: string, task: () => Promise<void>): Promise<void> {
+      function enqueue(wsKey: string, task: () => Promise<void>): Promise<void> {
         return new Promise<void>((resolve, reject) => {
-          const queue = queues.get(bpId) ?? [];
+          const queue = queues.get(wsKey) ?? [];
           queue.push({ task, resolve, reject });
-          queues.set(bpId, queue);
-          drainQueue(bpId);
+          queues.set(wsKey, queue);
+          drainQueue(wsKey);
         });
       }
 
@@ -1916,19 +1994,19 @@ describe("requeueOrphanedNodes logic", () => {
 
     const { enqueue } = createQueue();
 
-    // Enqueue orphaned nodes from 3 different blueprints
-    const promises = ["bp-1", "bp-2", "bp-3"].map(bpId =>
-      enqueue(bpId, async () => {
-        active.add(bpId);
+    // Enqueue tasks from 3 different workspaces
+    const promises = ["/ws/a", "/ws/b", "/ws/c"].map(wsKey =>
+      enqueue(wsKey, async () => {
+        active.add(wsKey);
         maxConcurrent = Math.max(maxConcurrent, active.size);
         await new Promise(resolve => setTimeout(resolve, 10));
-        active.delete(bpId);
+        active.delete(wsKey);
       }),
     );
 
     await Promise.all(promises);
 
-    // All 3 blueprints should have been active concurrently
+    // All 3 workspaces should have been active concurrently
     expect(maxConcurrent).toBe(3);
   });
 

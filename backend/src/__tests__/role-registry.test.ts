@@ -22,6 +22,7 @@ function makePrompts(overrides: Partial<RolePrompts> = {}): RolePrompts {
     verificationSteps: "test verify",
     suggestionsTemplate: "test suggestions",
     reevaluationVerification: "test reevaluation",
+    insightsTemplate: "test insights",
     ...overrides,
   };
 }

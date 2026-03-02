@@ -29,6 +29,7 @@ function makeMockNode(overrides: Partial<MacroNode> = {}): MacroNode {
     id: "node-1",
     blueprintId: "bp-1",
     order: 0,
+    seq: 1,
     title: "Test Node",
     description: "A test node description",
     status: "pending",
@@ -207,6 +208,32 @@ describe("MacroNodeCard", () => {
     );
     const title = screen.getByText("Test Node");
     expect(title.tagName).toBe("SPAN");
+  });
+
+  it("disables Run button when blueprintBusy is set", () => {
+    render(
+      <MacroNodeCard node={makeMockNode({ status: "pending" })} index={0} total={3} blueprintId="bp-1" blueprintBusy="Run All" />,
+    );
+    const runBtn = screen.getByRole("button", { name: "Run node" });
+    expect(runBtn).toBeDisabled();
+    expect(runBtn).toHaveAttribute("title", "Waiting for Run All to complete");
+  });
+
+  it("disables Re-evaluate, Edit, Skip, Delete buttons when blueprintBusy is set and shows tooltip", () => {
+    render(
+      <MacroNodeCard node={makeMockNode({ status: "pending" })} index={0} total={3} blueprintId="bp-1" blueprintBusy="Generate" />,
+    );
+    const busyTip = "Waiting for Generate to complete";
+    // All action buttons should be disabled
+    expect(screen.getByLabelText("Edit node")).toBeDisabled();
+    expect(screen.getByLabelText("Skip node")).toBeDisabled();
+    expect(screen.getByLabelText("Delete node")).toBeDisabled();
+    expect(screen.getByLabelText("Re-evaluate node with AI")).toBeDisabled();
+    // Each disabled button shows the operation-specific tooltip
+    expect(screen.getByLabelText("Edit node")).toHaveAttribute("title", busyTip);
+    expect(screen.getByLabelText("Skip node")).toHaveAttribute("title", busyTip);
+    expect(screen.getByLabelText("Delete node")).toHaveAttribute("title", busyTip);
+    expect(screen.getByLabelText("Re-evaluate node with AI")).toHaveAttribute("title", busyTip);
   });
 
   it("shows delete confirmation dialog on delete click", () => {

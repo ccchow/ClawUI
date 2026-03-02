@@ -72,6 +72,13 @@ If the status is NOT COMPLETE, skip the suggestions call.`,
 
 1. Review requirement documents and acceptance criteria for completeness.
 2. Then DIRECTLY update ALL nodes in a SINGLE batch API call.`,
+
+    insightsTemplate: `After evaluating this node, consider cross-cutting product observations:
+- Requirement drift: Has the implementation diverged from the original requirements in ways that affect other features?
+- Scope creep: Are there unplanned additions or changes that expand the project scope beyond what was agreed?
+- UX inconsistencies: Are there user experience patterns in this node that conflict with patterns established in other nodes?
+- Stakeholder concerns: Are there unaddressed stakeholder requirements or feedback that this node's work makes visible?
+Surface these as blueprint-level insights with appropriate severity (info for observations, warning for drift/inconsistencies, critical for scope or requirement conflicts).`,
   },
 };
 

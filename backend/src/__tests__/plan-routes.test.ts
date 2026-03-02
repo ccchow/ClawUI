@@ -48,6 +48,7 @@ vi.mock("../plan-db.js", () => ({
           id: "node-1",
           blueprintId: id,
           order: 0,
+          seq: 1,
           title: "Step 1",
           description: "First step",
           status: "pending",
@@ -92,6 +93,7 @@ vi.mock("../plan-db.js", () => ({
       id: "node-new",
       blueprintId,
       order: (data.order as number) ?? 0,
+      seq: 1,
       title: data.title,
       description: data.description ?? "",
       status: "pending",
@@ -110,6 +112,7 @@ vi.mock("../plan-db.js", () => ({
         id: nodeId,
         blueprintId: bpId,
         order: 0,
+        seq: 1,
         title: (patch.title as string) ?? "Step 1",
         description: (patch.description as string) ?? "",
         status: (patch.status as string) ?? "pending",
@@ -183,6 +186,8 @@ vi.mock("../plan-db.js", () => ({
     { id: "rs-1", nodeId: "node-1", blueprintId: "bp-1", sessionId: "session-1", type: "enrich", startedAt: "2024-01-01" },
   ]),
   createRelatedSession: vi.fn(),
+  completeRelatedSession: vi.fn(),
+  getActiveRelatedSession: vi.fn(() => null),
   starBlueprint: vi.fn((id: string) => {
     if (id === "missing") return null;
     return { id, title: "Starred BP", status: "draft", starred: true, nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
@@ -191,6 +196,56 @@ vi.mock("../plan-db.js", () => ({
     if (id === "missing") return null;
     return { id, title: "Unstarred BP", status: "draft", starred: false, nodes: [], createdAt: "2024-01-01", updatedAt: "2024-01-01" };
   }),
+  createSuggestion: vi.fn(
+    (blueprintId: string, nodeId: string, title: string, description: string) => ({
+      id: "sug-1",
+      nodeId,
+      blueprintId,
+      title,
+      description,
+      used: false,
+      createdAt: "2024-01-01T00:00:00Z",
+    })
+  ),
+  getSuggestionsForNode: vi.fn(() => []),
+  deleteSuggestionsForNode: vi.fn(),
+  deleteSuggestion: vi.fn(),
+  markSuggestionUsed: vi.fn((id: string) => ({
+    id,
+    nodeId: "node-1",
+    blueprintId: "bp-1",
+    title: "Marked",
+    description: "",
+    used: true,
+    createdAt: "2024-01-01T00:00:00Z",
+  })),
+  createInsight: vi.fn(
+    (blueprintId: string, sourceNodeId: string | null, role: string, severity: string, message: string) => ({
+      id: "insight-1",
+      blueprintId,
+      ...(sourceNodeId ? { sourceNodeId } : {}),
+      role,
+      severity,
+      message,
+      read: false,
+      dismissed: false,
+      createdAt: "2024-01-01T00:00:00Z",
+    })
+  ),
+  getInsightsForBlueprint: vi.fn(() => []),
+  markInsightRead: vi.fn((id: string) => ({
+    id,
+    blueprintId: "bp-1",
+    sourceNodeId: "node-1",
+    role: "sde",
+    severity: "info",
+    message: "Test insight",
+    read: true,
+    dismissed: false,
+    createdAt: "2024-01-01T00:00:00Z",
+  })),
+  markAllInsightsRead: vi.fn(),
+  dismissInsight: vi.fn(),
 }));
 
 vi.mock("../plan-executor.js", () => ({
@@ -204,6 +259,7 @@ vi.mock("../plan-executor.js", () => ({
   enqueueBlueprintTask: vi.fn(async (_id: string, task: () => Promise<unknown>) =>
     task()
   ),
+  resolveWorkspaceKey: vi.fn((blueprintId: string) => blueprintId),
   getQueueInfo: vi.fn(() => ({
     running: false,
     queueLength: 0,
@@ -228,6 +284,10 @@ vi.mock("../plan-generator.js", () => ({
   runClaudeInteractiveGen: vi.fn(async () => ""),
   getApiBase: vi.fn(() => "http://localhost:3001"),
   getAuthParam: vi.fn(() => "auth=test-token"),
+}));
+
+vi.mock("../plan-coordinator.js", () => ({
+  coordinateBlueprint: vi.fn(async () => {}),
 }));
 
 vi.mock("../db.js", () => ({
@@ -258,6 +318,15 @@ import {
   starBlueprint,
   unstarBlueprint,
   getRelatedSessionsForNode,
+  createSuggestion,
+  getSuggestionsForNode,
+  deleteSuggestion,
+  markSuggestionUsed,
+  createInsight,
+  getInsightsForBlueprint,
+  markInsightRead,
+  markAllInsightsRead,
+  dismissInsight,
 } from "../plan-db.js";
 import {
   applyGraphMutations,
@@ -1007,6 +1076,70 @@ describe("plan-routes", () => {
     });
   });
 
+  describe("GET /api/blueprints with search", () => {
+    it("passes search filter to listBlueprints", async () => {
+      await request(app).get("/api/blueprints?search=feature");
+      expect(listBlueprints).toHaveBeenCalledWith(
+        expect.objectContaining({ search: "feature" })
+      );
+    });
+
+    it("combines search with other filters", async () => {
+      await request(app).get("/api/blueprints?search=test&status=draft&projectCwd=/test");
+      expect(listBlueprints).toHaveBeenCalledWith({
+        status: "draft",
+        projectCwd: "/test",
+        search: "test",
+        includeArchived: false,
+      });
+    });
+  });
+
+  describe("GET /api/blueprints/:id with search (node filtering)", () => {
+    it("filters nodes by search query", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test Blueprint",
+        description: "desc",
+        status: "draft",
+        projectCwd: "/test",
+        nodes: [
+          {
+            id: "node-1", blueprintId: "bp-1", order: 0, seq: 1,
+            title: "Setup database", description: "", status: "pending",
+            dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+          {
+            id: "node-2", blueprintId: "bp-1", order: 1, seq: 2,
+            title: "Build API endpoints", description: "", status: "pending",
+            dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+          {
+            id: "node-3", blueprintId: "bp-1", order: 2, seq: 3,
+            title: "Setup frontend", description: "", status: "pending",
+            dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      });
+
+      const res = await request(app).get("/api/blueprints/bp-1?search=setup");
+      expect(res.status).toBe(200);
+      expect(res.body.nodes.length).toBe(2);
+      expect(res.body.nodes.every((n: { title: string }) => n.title.toLowerCase().includes("setup"))).toBe(true);
+    });
+
+    it("returns all nodes when no search param", async () => {
+      const res = await request(app).get("/api/blueprints/bp-1");
+      expect(res.status).toBe(200);
+      expect(res.body.nodes.length).toBe(1); // default mock has 1 node
+    });
+  });
+
   // ─── Run node with dependency validation ──────────────────
 
   describe("POST /api/blueprints/:id/nodes/:nodeId/run", () => {
@@ -1039,6 +1172,7 @@ describe("plan-routes", () => {
             id: "node-1",
             blueprintId: "bp-1",
             order: 0,
+            seq: 1,
             title: "Step 1",
             description: "First step",
             status: "queued",
@@ -1089,6 +1223,7 @@ describe("plan-routes", () => {
             id: "node-1",
             blueprintId: "bp-1",
             order: 0,
+            seq: 1,
             title: "Step 1",
             description: "First step",
             status: "running",
@@ -1116,6 +1251,394 @@ describe("plan-routes", () => {
         .post("/api/blueprints/bp-1/nodes/node-1/unqueue");
       expect(res.status).toBe(400);
       expect(res.body.error).toContain("must be \"queued\" to unqueue");
+    });
+  });
+
+  // ─── Suggestion CRUD lifecycle ─────────────────────────
+
+  describe("POST /api/blueprints/:id/nodes/:nodeId/suggestions-callback", () => {
+    it("creates suggestions and returns count", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "Add logging", description: "Add structured logging to all endpoints" },
+            { title: "Add tests", description: "Write unit tests for the new module" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.count).toBe(2);
+      expect(getSuggestionsForNode).toHaveBeenCalledWith("node-1");
+      expect(createSuggestion).toHaveBeenCalledTimes(2);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add logging", "Add structured logging to all endpoints");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add tests", "Write unit tests for the new module");
+    });
+
+    it("defaults description to empty string when omitted", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({ suggestions: [{ title: "Quick fix" }] });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Quick fix", "");
+    });
+
+    it("limits to max 3 suggestions", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "S1" },
+            { title: "S2" },
+            { title: "S3" },
+            { title: "S4 should be dropped" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(3);
+      expect(createSuggestion).toHaveBeenCalledTimes(3);
+      // S4 must not have been created
+      expect(createSuggestion).not.toHaveBeenCalledWith(
+        expect.anything(), expect.anything(), "S4 should be dropped", expect.anything()
+      );
+    });
+
+    it("skips already-existing suggestions by title (dedup on re-evaluation)", async () => {
+      // Simulate existing suggestions from a prior callback
+      (getSuggestionsForNode as ReturnType<typeof vi.fn>).mockReturnValueOnce([
+        { id: "existing-1", nodeId: "node-1", blueprintId: "bp-1", title: "Add logging", description: "Old desc", createdAt: "2024-01-01" },
+      ]);
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "Add logging", description: "Updated desc" },
+            { title: "New suggestion", description: "Brand new" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(2);
+      // Only the new suggestion should be created; existing one is kept
+      expect(createSuggestion).toHaveBeenCalledTimes(1);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "New suggestion", "Brand new");
+      expect(deleteSuggestion).not.toHaveBeenCalled();
+    });
+
+    it("removes stale suggestions not in incoming set", async () => {
+      (getSuggestionsForNode as ReturnType<typeof vi.fn>).mockReturnValueOnce([
+        { id: "old-1", nodeId: "node-1", blueprintId: "bp-1", title: "Stale one", description: "", createdAt: "2024-01-01" },
+        { id: "old-2", nodeId: "node-1", blueprintId: "bp-1", title: "Keep me", description: "", createdAt: "2024-01-01" },
+      ]);
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({ suggestions: [{ title: "Keep me" }, { title: "Brand new" }] });
+      expect(res.status).toBe(200);
+      // "Stale one" removed, "Keep me" kept, "Brand new" created
+      expect(deleteSuggestion).toHaveBeenCalledTimes(1);
+      expect(deleteSuggestion).toHaveBeenCalledWith("old-1");
+      expect(createSuggestion).toHaveBeenCalledTimes(1);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Brand new", "");
+    });
+
+    it("returns 400 when suggestions array is missing", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Missing or empty");
+      expect(createSuggestion).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when suggestions array is empty", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({ suggestions: [] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Missing or empty");
+    });
+
+    it("returns 400 when all suggestions are malformed (validate-before-delete guard)", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { description: "no title" },
+            { title: "", description: "empty title" },
+            { title: 123, description: "numeric title" },
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("No valid suggestions");
+      expect(getSuggestionsForNode).not.toHaveBeenCalled();
+      expect(createSuggestion).not.toHaveBeenCalled();
+    });
+
+    it("filters out malformed suggestions but keeps valid ones", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "", description: "empty title — invalid" },
+            { title: "Valid one", description: "This is fine" },
+            { description: "missing title — invalid" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      expect(createSuggestion).toHaveBeenCalledTimes(1);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Valid one", "This is fine");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/suggestions-callback")
+        .send({ suggestions: [{ title: "test" }] });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Blueprint not found");
+    });
+
+    it("returns 404 for node not in blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/nonexistent/suggestions-callback")
+        .send({ suggestions: [{ title: "test" }] });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Node not found");
+    });
+  });
+
+  describe("GET /api/blueprints/:blueprintId/nodes/:nodeId/suggestions", () => {
+    it("returns suggestions for a node", async () => {
+      const mockSuggestions = [
+        { id: "sug-1", nodeId: "node-1", blueprintId: "bp-1", title: "Add logging", description: "desc1", used: false, createdAt: "2024-01-01" },
+        { id: "sug-2", nodeId: "node-1", blueprintId: "bp-1", title: "Add tests", description: "desc2", used: true, createdAt: "2024-01-01" },
+      ];
+      (getSuggestionsForNode as ReturnType<typeof vi.fn>).mockReturnValueOnce(mockSuggestions);
+
+      const res = await request(app)
+        .get("/api/blueprints/bp-1/nodes/node-1/suggestions");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(mockSuggestions);
+      expect(getSuggestionsForNode).toHaveBeenCalledWith("node-1");
+    });
+
+    it("returns empty array when no suggestions exist", async () => {
+      // Default mock already returns []
+      const res = await request(app)
+        .get("/api/blueprints/bp-1/nodes/node-1/suggestions");
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual([]);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .get("/api/blueprints/missing/nodes/node-1/suggestions");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Blueprint not found");
+    });
+
+    it("returns 404 for node not in blueprint", async () => {
+      const res = await request(app)
+        .get("/api/blueprints/bp-1/nodes/nonexistent/suggestions");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Node not found");
+    });
+  });
+
+  // ─── Mark suggestion as used ─────────────────────────
+
+  describe("POST /api/blueprints/:blueprintId/nodes/:nodeId/suggestions/:suggestionId/mark-used", () => {
+    it("marks a suggestion as used and returns it", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions/sug-1/mark-used");
+      expect(res.status).toBe(200);
+      expect(res.body.used).toBe(true);
+      expect(markSuggestionUsed).toHaveBeenCalledWith("sug-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/suggestions/sug-1/mark-used");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Blueprint not found");
+    });
+
+    it("returns 404 for node not in blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/nonexistent/suggestions/sug-1/mark-used");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Node not found");
+    });
+
+    it("returns 404 for nonexistent suggestion", async () => {
+      (markSuggestionUsed as ReturnType<typeof vi.fn>).mockReturnValueOnce(null);
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions/nonexistent/mark-used");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Suggestion not found");
+    });
+  });
+
+  // ─── Insights callback endpoint ─────────────────────────
+
+  describe("POST /api/blueprints/:id/nodes/:nodeId/insights-callback", () => {
+    it("creates insights and returns count", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({
+          insights: [
+            { role: "sde", severity: "warning", message: "Shared utility changed" },
+            { role: "qa", severity: "info", message: "Test coverage gap in auth module" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.count).toBe(2);
+      expect(createInsight).toHaveBeenCalledTimes(2);
+      expect(createInsight).toHaveBeenCalledWith("bp-1", "node-1", "sde", "warning", "Shared utility changed");
+      expect(createInsight).toHaveBeenCalledWith("bp-1", "node-1", "qa", "info", "Test coverage gap in auth module");
+    });
+
+    it("returns 400 for empty insights array", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({ insights: [] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Missing or empty");
+    });
+
+    it("returns 400 for missing insights field", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Missing or empty");
+    });
+
+    it("returns 400 when all insights are invalid", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({
+          insights: [
+            { role: "sde", severity: "unknown", message: "Bad severity" },
+            { severity: "info", message: "Missing role" },
+            { role: "qa", severity: "warning" }, // missing message
+          ],
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("No valid insights");
+    });
+
+    it("filters invalid insights and creates valid ones", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({
+          insights: [
+            { role: "sde", severity: "critical", message: "Breaking API change" },
+            { role: "qa", severity: "bad-severity", message: "Invalid" }, // bad severity
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      expect(createInsight).toHaveBeenCalledTimes(1);
+      expect(createInsight).toHaveBeenCalledWith("bp-1", "node-1", "sde", "critical", "Breaking API change");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/nodes/node-1/insights-callback")
+        .send({ insights: [{ role: "sde", severity: "info", message: "Test" }] });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing node", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/nonexistent/insights-callback")
+        .send({ insights: [{ role: "sde", severity: "info", message: "Test" }] });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Insights read/management endpoints ─────────────────────────
+
+  describe("GET /api/blueprints/:id/insights", () => {
+    it("returns insights for blueprint", async () => {
+      (getInsightsForBlueprint as ReturnType<typeof vi.fn>).mockReturnValueOnce([
+        { id: "i-1", blueprintId: "bp-1", sourceNodeId: "node-1", role: "sde", severity: "warning", message: "Test", read: false, dismissed: false, createdAt: "2024-01-01" },
+      ]);
+      const res = await request(app).get("/api/blueprints/bp-1/insights");
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].id).toBe("i-1");
+      expect(getInsightsForBlueprint).toHaveBeenCalledWith("bp-1", { unreadOnly: false });
+    });
+
+    it("supports unread filter", async () => {
+      (getInsightsForBlueprint as ReturnType<typeof vi.fn>).mockReturnValueOnce([]);
+      const res = await request(app).get("/api/blueprints/bp-1/insights?unread=true");
+      expect(res.status).toBe(200);
+      expect(getInsightsForBlueprint).toHaveBeenCalledWith("bp-1", { unreadOnly: true });
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).get("/api/blueprints/missing/insights");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/insights/:insightId/mark-read", () => {
+    it("marks insight as read", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/insights/insight-1/mark-read");
+      expect(res.status).toBe(200);
+      expect(res.body.read).toBe(true);
+      expect(markInsightRead).toHaveBeenCalledWith("insight-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/insights/insight-1/mark-read");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for nonexistent insight", async () => {
+      (markInsightRead as ReturnType<typeof vi.fn>).mockReturnValueOnce(null);
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/insights/nonexistent/mark-read");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Insight not found");
+    });
+  });
+
+  describe("POST /api/blueprints/:id/insights/mark-all-read", () => {
+    it("marks all insights as read", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/insights/mark-all-read");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(markAllInsightsRead).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/insights/mark-all-read");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/insights/:insightId/dismiss", () => {
+    it("dismisses an insight", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/insights/insight-1/dismiss");
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(dismissInsight).toHaveBeenCalledWith("insight-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/insights/insight-1/dismiss");
+      expect(res.status).toBe(404);
     });
   });
 

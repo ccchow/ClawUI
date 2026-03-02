@@ -15,6 +15,8 @@ import { cleanEnvForClaude, stripAnsi } from "./cli-utils.js";
 import { createLogger } from "./logger.js";
 import type { AgentRuntime, AgentCapabilities } from "./agent-runtime.js";
 import { registerRuntime } from "./agent-runtime.js";
+import { analyzeSessionHealth as analyzeClaudeSessionHealth } from "./jsonl-parser.js";
+import type { SessionAnalysis } from "./jsonl-parser.js";
 
 const log = createLogger("agent-claude");
 const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
@@ -377,6 +379,14 @@ close $of
     }
 
     return newestId;
+  }
+
+  /**
+   * Analyze a Claude session JSONL file for health indicators.
+   * Delegates to the shared implementation in jsonl-parser.ts.
+   */
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+    return analyzeClaudeSessionHealth(sessionId, knownFilePath);
   }
 }
 

@@ -318,137 +318,6 @@ function summarize(text: string, maxLen = 120): string {
   return firstLine.slice(0, maxLen - 1) + "…";
 }
 
-// ─── Session health analysis ────────────────────────────────
-
-/**
- * Analyze a Pi Mono session JSONL file for health indicators.
- * Checks for compaction events, error stop reasons, and token usage.
- */
-export function analyzePiSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
-  let filePath: string | null = knownFilePath ?? null;
-
-  if (!filePath) {
-    const sessionsDir = join(homedir(), ".pi", "agent", "sessions");
-    if (!existsSync(sessionsDir)) return null;
-
-    // Scan all project directories
-    const entries = readdirSync(sessionsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const candidate = join(sessionsDir, entry.name, `${sessionId}.jsonl`);
-      if (existsSync(candidate)) {
-        filePath = candidate;
-        break;
-      }
-    }
-  }
-
-  if (!filePath) return null;
-
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-
-  const lines = raw.trim().split("\n");
-  let compactCount = 0;
-  let peakTokens = 0;
-  let lastApiError: string | null = null;
-  let messageCount = 0;
-  let lastCompactLineIdx = -1;
-  let responsesAfterLastCompact = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    let obj: Record<string, unknown>;
-    try {
-      obj = JSON.parse(lines[i]);
-    } catch {
-      continue;
-    }
-
-    messageCount++;
-
-    // Detect compaction events
-    if (obj.type === "compaction") {
-      compactCount++;
-      lastCompactLineIdx = i;
-      responsesAfterLastCompact = 0;
-    }
-
-    // Count successful assistant responses after last compaction
-    if (lastCompactLineIdx >= 0 && obj.role === "assistant" && obj.stopReason !== "error") {
-      responsesAfterLastCompact++;
-    }
-
-    // Track errors from assistant messages
-    if (obj.role === "assistant" && obj.stopReason === "error") {
-      const text = extractPiText(obj.content as string | PiContentBlock[]);
-      if (text) lastApiError = text;
-    }
-
-    // Track peak token usage from assistant messages
-    if (obj.role === "assistant" && obj.stopReason !== "error") {
-      const usage = obj.usage as { input?: number; output?: number; totalTokens?: number } | undefined;
-      if (usage) {
-        const total = (usage.input ?? 0) + (usage.output ?? 0);
-        if (total > peakTokens) peakTokens = total;
-        if (usage.totalTokens && usage.totalTokens > peakTokens) {
-          peakTokens = usage.totalTokens;
-        }
-      }
-    }
-  }
-
-  const endedAfterCompaction = lastCompactLineIdx >= 0 && responsesAfterLastCompact <= 1;
-
-  // Determine context pressure level (same thresholds as Claude)
-  let contextPressure: ContextPressure = "none";
-  if (compactCount >= 3 || (compactCount >= 2 && endedAfterCompaction)) {
-    contextPressure = "critical";
-  } else if (compactCount >= 2 || (compactCount >= 1 && peakTokens > 150_000)) {
-    contextPressure = "high";
-  } else if (compactCount >= 1 || peakTokens > 120_000) {
-    contextPressure = "moderate";
-  }
-
-  // Determine failure reason
-  let failureReason: FailureReason = null;
-  let detail = "";
-
-  if (lastApiError) {
-    if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
-      failureReason = "context_exhausted";
-      detail = `Session ended with context error: ${lastApiError}`;
-    } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
-      failureReason = "output_token_limit";
-      detail = `Session ended with output token limit error: ${lastApiError}`;
-    } else {
-      failureReason = "error";
-      detail = `API error: ${lastApiError}`;
-    }
-  } else if (endedAfterCompaction && compactCount >= 2) {
-    failureReason = "context_exhausted";
-    detail = `Session compacted ${compactCount} times and ended immediately after the last compaction (peak ${peakTokens} tokens).`;
-  } else if (compactCount >= 3) {
-    failureReason = "context_exhausted";
-    detail = `Session compacted ${compactCount} times (peak ${peakTokens} tokens).`;
-  }
-
-  return {
-    failureReason,
-    detail,
-    compactCount,
-    peakTokens,
-    lastApiError,
-    messageCount,
-    contextPressure,
-    endedAfterCompaction,
-    responsesAfterLastCompact,
-  };
-}
-
 // ─── Runtime class ──────────────────────────────────────────
 
 export class PiMonoAgentRuntime implements AgentRuntime {
@@ -456,7 +325,7 @@ export class PiMonoAgentRuntime implements AgentRuntime {
 
   readonly capabilities: AgentCapabilities = {
     supportsResume: true,
-    supportsInteractive: false, // Pi print mode handles tool use natively
+    supportsInteractive: true,  // Pi print mode supports full tool use (curl, etc.)
     supportsTextOutput: true,   // -p flag = print mode
     supportsDangerousMode: false, // Pi has no permission system to skip
   };
@@ -635,6 +504,143 @@ export class PiMonoAgentRuntime implements AgentRuntime {
 
     return null;
   }
+
+  /**
+   * Analyze a Pi Mono session JSONL file for health indicators.
+   * Checks for compaction events, error stop reasons, and token usage.
+   */
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+    let filePath: string | null = knownFilePath ?? null;
+
+    if (!filePath) {
+      const sessionsDir = join(homedir(), ".pi", "agent", "sessions");
+      if (!existsSync(sessionsDir)) return null;
+
+      // Scan all project directories
+      const entries = readdirSync(sessionsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = join(sessionsDir, entry.name, `${sessionId}.jsonl`);
+        if (existsSync(candidate)) {
+          filePath = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!filePath) return null;
+
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, "utf-8");
+    } catch {
+      return null;
+    }
+
+    const lines = raw.trim().split("\n");
+    let compactCount = 0;
+    let peakTokens = 0;
+    let lastApiError: string | null = null;
+    let messageCount = 0;
+    let lastCompactLineIdx = -1;
+    let responsesAfterLastCompact = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(lines[i]);
+      } catch {
+        continue;
+      }
+
+      messageCount++;
+
+      // Detect compaction events
+      if (obj.type === "compaction") {
+        compactCount++;
+        lastCompactLineIdx = i;
+        responsesAfterLastCompact = 0;
+      }
+
+      // Count successful assistant responses after last compaction
+      if (lastCompactLineIdx >= 0 && obj.role === "assistant" && obj.stopReason !== "error") {
+        responsesAfterLastCompact++;
+      }
+
+      // Track errors from assistant messages
+      if (obj.role === "assistant" && obj.stopReason === "error") {
+        const text = extractPiText(obj.content as string | PiContentBlock[]);
+        if (text) lastApiError = text;
+      }
+
+      // Track peak token usage from assistant messages
+      if (obj.role === "assistant" && obj.stopReason !== "error") {
+        const usage = obj.usage as { input?: number; output?: number; totalTokens?: number } | undefined;
+        if (usage) {
+          const total = (usage.input ?? 0) + (usage.output ?? 0);
+          if (total > peakTokens) peakTokens = total;
+          if (usage.totalTokens && usage.totalTokens > peakTokens) {
+            peakTokens = usage.totalTokens;
+          }
+        }
+      }
+    }
+
+    const endedAfterCompaction = lastCompactLineIdx >= 0 && responsesAfterLastCompact <= 1;
+
+    // Determine context pressure level (same thresholds as Claude)
+    let contextPressure: ContextPressure = "none";
+    if (compactCount >= 3 || (compactCount >= 2 && endedAfterCompaction)) {
+      contextPressure = "critical";
+    } else if (compactCount >= 2 || (compactCount >= 1 && peakTokens > 150_000)) {
+      contextPressure = "high";
+    } else if (compactCount >= 1 || peakTokens > 120_000) {
+      contextPressure = "moderate";
+    }
+
+    // Determine failure reason
+    let failureReason: FailureReason = null;
+    let detail = "";
+
+    if (lastApiError) {
+      if (lastApiError.includes("context") || lastApiError.includes("token limit")) {
+        failureReason = "context_exhausted";
+        detail = `Session ended with context error: ${lastApiError}`;
+      } else if (lastApiError.includes("output") && lastApiError.includes("token")) {
+        failureReason = "output_token_limit";
+        detail = `Session ended with output token limit error: ${lastApiError}`;
+      } else {
+        failureReason = "error";
+        detail = `API error: ${lastApiError}`;
+      }
+    } else if (endedAfterCompaction && compactCount >= 2) {
+      failureReason = "context_exhausted";
+      detail = `Session compacted ${compactCount} times and ended immediately after the last compaction (peak ${peakTokens} tokens).`;
+    } else if (compactCount >= 3) {
+      failureReason = "context_exhausted";
+      detail = `Session compacted ${compactCount} times (peak ${peakTokens} tokens).`;
+    }
+
+    return {
+      failureReason,
+      detail,
+      compactCount,
+      peakTokens,
+      lastApiError,
+      messageCount,
+      contextPressure,
+      endedAfterCompaction,
+      responsesAfterLastCompact,
+    };
+  }
+}
+
+/**
+ * Standalone wrapper for backward compatibility.
+ * Delegates to PiMonoAgentRuntime.analyzeSessionHealth().
+ */
+export function analyzePiSessionHealth(sessionId: string, knownFilePath?: string): SessionAnalysis | null {
+  return new PiMonoAgentRuntime().analyzeSessionHealth(sessionId, knownFilePath);
 }
 
 // ─── Self-registration ───────────────────────────────────────

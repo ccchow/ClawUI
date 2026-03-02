@@ -183,7 +183,7 @@ const FILTER_CONFIG: { key: FilterKey; label: string; icon: string; color: strin
   { key: "user", label: "User", icon: "👤", color: "text-text-muted border-border-primary", activeColor: "text-accent-blue border-accent-blue bg-accent-blue/10" },
   { key: "assistant", label: "Assistant", icon: "🤖", color: "text-text-muted border-border-primary", activeColor: "text-accent-purple border-accent-purple bg-accent-purple/10" },
   { key: "tool", label: "Tool", icon: "🔧", color: "text-text-muted border-border-primary", activeColor: "text-accent-amber border-accent-amber bg-accent-amber/10" },
-  { key: "mcp_tool", label: "MCP Tool", icon: "🔌", color: "text-text-muted border-border-primary", activeColor: "text-cyan-400 border-cyan-400 bg-cyan-400/10" },
+  { key: "mcp_tool", label: "MCP Tool", icon: "🔌", color: "text-text-muted border-border-primary", activeColor: "text-accent-green border-accent-green bg-accent-green/10" },
 ];
 
 /** Check if a tool name belongs to an MCP server (mcp__serverName__toolName) */
@@ -272,7 +272,7 @@ const MERGE_COLORS: Record<string, string> = {
   user: "border-accent-blue text-accent-blue",
   assistant: "border-accent-purple text-accent-purple",
   tool: "border-accent-amber text-accent-amber",
-  mcp_tool: "border-cyan-400 text-cyan-400",
+  mcp_tool: "border-accent-green text-accent-green",
   system: "border-text-muted text-text-muted",
   error: "border-accent-red text-accent-red",
 };

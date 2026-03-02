@@ -11,6 +11,7 @@ vi.mock("../db.js", () => ({
   syncAll: vi.fn(),
   syncSession: vi.fn(),
   getSessionAgentType: vi.fn(() => "claude"),
+  getSessionCwdFromDb: vi.fn(() => "/test/cwd"),
   getAvailableAgents: vi.fn(() => []),
 }));
 
@@ -56,25 +57,36 @@ vi.mock("../cli-runner.js", () => ({
 
 vi.mock("../jsonl-parser.js", () => ({
   getSessionCwd: vi.fn(() => "/test/cwd"),
-  analyzeSessionHealth: vi.fn(() => null),
 }));
 
 vi.mock("../plan-db.js", () => ({
   getNodeInfoForSessions: vi.fn(() => new Map()),
 }));
 
-vi.mock("../agent-pimono.js", () => ({
-  analyzePiSessionHealth: vi.fn(() => null),
-}));
+vi.mock("../agent-runtime.js", () => {
+  const mockRuntime = {
+    type: "claude",
+    capabilities: { supportsResume: true, supportsInteractive: true, supportsTextOutput: true, supportsDangerousMode: true },
+    resumeSession: vi.fn(async () => "mock output"),
+    analyzeSessionHealth: vi.fn(() => null),
+  };
+  const mockFactory = vi.fn(() => mockRuntime);
+  return {
+    getRegisteredRuntimes: vi.fn(() => new Map([["claude", mockFactory]])),
+    getActiveRuntime: vi.fn(() => mockRuntime),
+    getRuntimeByType: vi.fn(() => mockRuntime),
+    registerRuntime: vi.fn(),
+    resetActiveRuntime: vi.fn(),
+  };
+});
 
-vi.mock("../agent-openclaw.js", () => ({
-  analyzeOpenClawSessionHealth: vi.fn(() => null),
-  OpenClawAgentRuntime: vi.fn(),
-}));
+vi.mock("../agent-claude.js", () => ({}));
 
-vi.mock("../agent-codex.js", () => ({
-  analyzeCodexSessionHealth: vi.fn(() => null),
-}));
+vi.mock("../agent-pimono.js", () => ({}));
+
+vi.mock("../agent-openclaw.js", () => ({}));
+
+vi.mock("../agent-codex.js", () => ({}));
 
 import router from "../routes.js";
 import {
@@ -93,7 +105,7 @@ import {
 } from "../enrichment.js";
 import { getAppState, updateAppState, trackSessionView } from "../app-state.js";
 import { runPrompt } from "../cli-runner.js";
-import { analyzeSessionHealth } from "../jsonl-parser.js";
+import { getRuntimeByType, getRegisteredRuntimes } from "../agent-runtime.js";
 
 function createApp() {
   const app = express();
@@ -446,7 +458,8 @@ describe("routes", () => {
 
   describe("GET /api/sessions/:id/health", () => {
     it("returns session health analysis", async () => {
-      vi.mocked(analyzeSessionHealth).mockReturnValue({
+      const mockRuntime = vi.mocked(getRuntimeByType)("claude")!;
+      vi.mocked(mockRuntime.analyzeSessionHealth).mockReturnValue({
         failureReason: "context_exhausted",
         detail: "Session compacted 3 times",
         compactCount: 3,
@@ -466,7 +479,8 @@ describe("routes", () => {
     });
 
     it("returns 404 when session file not found", async () => {
-      vi.mocked(analyzeSessionHealth).mockReturnValue(null);
+      const mockRuntime = vi.mocked(getRuntimeByType)("claude")!;
+      vi.mocked(mockRuntime.analyzeSessionHealth).mockReturnValue(null);
 
       const res = await request(app).get("/api/sessions/missing/health");
       expect(res.status).toBe(404);
@@ -474,7 +488,8 @@ describe("routes", () => {
     });
 
     it("returns 500 on error", async () => {
-      vi.mocked(analyzeSessionHealth).mockImplementation(() => {
+      const mockRuntime = vi.mocked(getRuntimeByType)("claude")!;
+      vi.mocked(mockRuntime.analyzeSessionHealth).mockImplementation(() => {
         throw new Error("file read error");
       });
 
@@ -577,6 +592,29 @@ describe("routes", () => {
       expect(res.status).toBe(400);
     });
 
+    it("returns 400 when agent does not support resume", async () => {
+      const noResumeRuntime = {
+        type: "claude",
+        capabilities: { supportsResume: false, supportsInteractive: true, supportsTextOutput: true, supportsDangerousMode: true },
+        resumeSession: vi.fn(),
+        analyzeSessionHealth: vi.fn(() => null),
+      };
+      const originalImpl = vi.mocked(getRegisteredRuntimes).getMockImplementation();
+      vi.mocked(getRegisteredRuntimes).mockReturnValue(
+        new Map([["claude", vi.fn(() => noResumeRuntime)]]) as any,
+      );
+
+      const res = await request(app)
+        .post("/api/sessions/s1/run")
+        .send({ prompt: "test prompt" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("does not support session resume");
+      expect(noResumeRuntime.resumeSession).not.toHaveBeenCalled();
+
+      // Restore the original mock so subsequent tests aren't affected
+      if (originalImpl) vi.mocked(getRegisteredRuntimes).mockImplementation(originalImpl);
+    });
+
     it("trims prompt before sending to CLI", async () => {
       // Reset mocks that may have been overridden by error handling tests
       vi.mocked(syncSession).mockImplementation(() => {});
@@ -589,10 +627,11 @@ describe("routes", () => {
         .post("/api/sessions/s1/run")
         .send({ prompt: "  test prompt  " });
       expect(res.status).toBe(200);
-      // runPrompt should have been called with trimmed prompt
+      // runPrompt should have been called with trimmed prompt and a runtime
       expect(runPrompt).toHaveBeenCalledWith(
         "s1",
         "test prompt",
+        expect.anything(),
         expect.anything()
       );
     });

@@ -17,6 +17,7 @@ import {
   recoverStaleExecutions,
   createRelatedSession,
   completeRelatedSession,
+  getInsightsForBlueprint,
 } from "./plan-db.js";
 import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
@@ -36,7 +37,7 @@ import type { RoleDefinition } from "./roles/role-registry.js";
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate";
   nodeId?: string;
   blueprintId: string;
   queuedAt: string;
@@ -732,6 +733,7 @@ function buildEvaluationPrompt(
   const authParam = getAuthParam();
   const callbackUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/evaluation-callback?${authParam}`;
   const suggestionsUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/suggestions-callback?${authParam}`;
+  const insightsUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/insights-callback?${authParam}`;
 
   // Resolve roles for evaluation context
   const roleIds = resolveNodeRoles(node, blueprint);
@@ -818,10 +820,34 @@ ${suggestionsContent}
 
 Then make one curl call to the suggestions endpoint:
 
-curl -s -X POST '${suggestionsUrl}' -H 'Content-Type: application/json' -d '{"suggestions": [{"title": "...", "description": "..."}, {"title": "...", "description": "..."}, {"title": "...", "description": "..."}]}'
+curl -s -X POST '${suggestionsUrl}' -H 'Content-Type: application/json' -d '{"suggestions": [{"title": "...", "description": "..."}, {"title": "...", "description": "..."}, {"title": "...", "description": "..."}]}'`;
+
+  // Build insights section using role-specific insight templates
+  let insightsContent: string;
+  if (roles.length === 1) {
+    insightsContent = roles[0].prompts.insightsTemplate;
+  } else if (roles.length > 1) {
+    insightsContent = roles
+      .map((r) => `### ${r.label}\n${r.prompts.insightsTemplate}`)
+      .join("\n\n");
+  } else {
+    const sde = getRole("sde");
+    insightsContent = sde?.prompts.insightsTemplate ?? "";
+  }
+
+  prompt += `
+
+## Blueprint-Level Insights
+${insightsContent}
+
+Only send insights if you observe issues that affect areas OUTSIDE the current node's scope. Do not duplicate the evaluation result or suggestions. If no cross-cutting issues exist, skip this call.
+
+If you have cross-cutting observations, make one curl call:
+
+curl -s -X POST '${insightsUrl}' -H 'Content-Type: application/json' -d '{"insights": [{"role": "<role-id>", "severity": "info|warning|critical", "message": "..."}]}'
 
 ## CRITICAL — DO NOT REPEAT
-- You must call each endpoint AT MOST ONCE. Do not repeat either curl call.
+- You must call each endpoint AT MOST ONCE. Do not repeat any curl call.
 - After completing your curl call(s), your task is COMPLETE. Do not verify, retry, or repeat.`;
   return prompt;
 }
@@ -1004,6 +1030,28 @@ export async function evaluateNodeCompletion(
   }
 
   log.info(`Evaluation for node ${nodeId.slice(0, 8)} "${node.title}" completed (result applied via callback)`);
+
+  // Auto-trigger coordinator if critical insights exist
+  try {
+    const criticalInsights = getInsightsForBlueprint(blueprintId, { unreadOnly: true }).filter(i => i.severity === "critical");
+    if (criticalInsights.length > 0) {
+      log.info(`${criticalInsights.length} critical insight(s) detected for blueprint ${blueprintId.slice(0, 8)} — auto-triggering coordinator`);
+      addPendingTask(blueprintId, { type: "coordinate", queuedAt: new Date().toISOString() });
+      const { coordinateBlueprint: coordFn } = await import("./plan-coordinator.js");
+      enqueueBlueprintTask(blueprintId, async () => {
+        try {
+          await coordFn(blueprintId);
+        } finally {
+          removePendingTask(blueprintId, undefined, "coordinate");
+        }
+      }).catch((err) => {
+        log.error(`Auto-coordinate for blueprint ${blueprintId.slice(0, 8)} failed: ${err instanceof Error ? err.message : err}`);
+      });
+    }
+  } catch (err) {
+    log.error(`Failed to check critical insights for auto-coordination: ${err instanceof Error ? err.message : err}`);
+  }
+
   return null;
 }
 

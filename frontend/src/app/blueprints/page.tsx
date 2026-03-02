@@ -25,7 +25,7 @@ function stripMarkdown(text: string): string {
 
 const STATUS_FILTERS: { label: string; value: BlueprintStatus | "all" }[] = [
   { label: "Approved", value: "approved" },
-  { label: "Running", value: "running" },
+  { label: "In Progress", value: "running" },
   { label: "Done", value: "done" },
   { label: "Draft", value: "draft" },
   { label: "Failed", value: "failed" },
@@ -61,6 +61,10 @@ export default function BlueprintsPage() {
     initialStatus && VALID_BP_STATUSES.has(initialStatus) ? initialStatus as BlueprintStatus | "all" : "approved"
   );
   const [showArchived, setShowArchivedRaw] = useState(searchParams.get("archived") === "1");
+  // Search
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Optimistic star overrides: blueprintId -> starred value
   const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
   const statusFilterRef = useRef(statusFilter);
@@ -89,6 +93,19 @@ export default function BlueprintsPage() {
     syncFiltersToUrl(statusFilterRef.current, value);
   }, [syncFiltersToUrl]);
 
+  const handleSearchInput = useCallback((value: string) => {
+    setSearchInput(value);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => {
+      setSearchQuery(value.trim());
+    }, 300);
+  }, []);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+  }, []);
+
   // Save initial filter state to sessionStorage on mount
   useEffect(() => {
     syncFiltersToUrl(statusFilterRef.current, showArchivedRef.current);
@@ -96,11 +113,11 @@ export default function BlueprintsPage() {
   }, []);
 
   const loadBlueprints = useCallback(() => {
-    return listBlueprints({ includeArchived: showArchived })
+    return listBlueprints({ includeArchived: showArchived, search: searchQuery || undefined })
       .then(setBlueprints)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [showArchived]);
+  }, [showArchived, searchQuery]);
 
   useEffect(() => {
     setLoading(true);
@@ -228,8 +245,32 @@ export default function BlueprintsPage() {
         </Link>
       </div>
 
-      {/* Status filter chips + Archive toggle */}
+      {/* Search + Status filter chips + Archive toggle */}
       <div className="flex flex-wrap items-center gap-1.5 mb-4">
+        <div className="relative">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+          </svg>
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => handleSearchInput(e.target.value)}
+            placeholder="Search..."
+            className="w-36 sm:w-44 pl-8 pr-2 py-1 rounded-full text-xs bg-bg-tertiary text-text-primary placeholder:text-text-muted border border-transparent focus:border-border-hover focus:outline-none transition-colors"
+          />
+          {searchInput && (
+            <button
+              onClick={() => { setSearchInput(""); setSearchQuery(""); }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+              aria-label="Clear search"
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6L6 18" /><path d="M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <span className="w-px h-4 bg-border-primary mx-0.5" />
         {STATUS_FILTERS.map((f) => {
           const count = statusCounts[f.value] || 0;
           if (f.value !== "all" && count === 0) return null;
@@ -280,7 +321,17 @@ export default function BlueprintsPage() {
 
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-text-muted">
-          {effectiveBlueprints.length === 0 && !showArchived ? (
+          {searchQuery ? (
+            <p className="text-sm">
+              No blueprints matching &ldquo;{searchQuery}&rdquo;.{" "}
+              <button
+                onClick={() => { setSearchInput(""); setSearchQuery(""); }}
+                className="text-accent-blue hover:underline"
+              >
+                Clear search
+              </button>
+            </p>
+          ) : effectiveBlueprints.length === 0 && !showArchived ? (
             <div className="flex flex-col items-center gap-3">
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted/40">
                 <rect x="8" y="6" width="32" height="36" rx="3" />
@@ -291,7 +342,7 @@ export default function BlueprintsPage() {
               </svg>
               <p className="text-sm">No blueprints yet.</p>
               <p className="text-xs text-text-muted/70">
-                Blueprints orchestrate multi-step tasks with Claude Code.
+                Blueprints orchestrate multi-step tasks with an agent.
               </p>
               <Link
                 href="/blueprints/new"
@@ -304,7 +355,7 @@ export default function BlueprintsPage() {
             <p className="text-sm">No archived blueprints.</p>
           ) : (
             <p className="text-sm">
-              No {showArchived ? "archived " : ""}{statusFilter !== "all" ? statusFilter + " " : ""}blueprints.{" "}
+              No {showArchived ? "archived " : ""}{statusFilter !== "all" ? (statusFilter === "running" ? "in-progress " : statusFilter + " ") : ""}blueprints.{" "}
               {statusFilter !== "all" && (
                 <button
                   onClick={() => setStatusFilter("all")}
@@ -344,12 +395,12 @@ export default function BlueprintsPage() {
                           <path d="M8 1.5l2 4 4.5.65-3.25 3.17.77 4.48L8 11.77 3.98 13.8l.77-4.48L1.5 6.15 6 5.5z" />
                         </svg>
                       </button>
-                      <StatusIndicator status={bp.status} />
+                      <StatusIndicator status={bp.status} context="blueprint" />
                       <span className="font-medium text-text-primary truncate min-w-0">
                         {bp.title}
                       </span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-bg-tertiary text-text-muted capitalize flex-shrink-0">
-                        {bp.status}
+                        {bp.status === "running" ? "In Progress" : bp.status}
                       </span>
                       {bp.archivedAt && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-text-muted/10 text-text-muted flex-shrink-0">

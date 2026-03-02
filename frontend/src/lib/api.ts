@@ -139,6 +139,14 @@ export function runPrompt(
   });
 }
 
+export interface SessionStatus {
+  running: boolean;
+}
+
+export function getSessionStatus(sessionId: string): Promise<SessionStatus> {
+  return fetchJSON(`${API_BASE}/sessions/${sessionId}/status`);
+}
+
 export function getSessionMeta(
   sessionId: string
 ): Promise<Partial<SessionMeta> | null> {
@@ -247,6 +255,7 @@ export interface MacroNode {
   id: string;
   blueprintId: string;
   order: number;
+  seq: number;
   title: string;
   description: string;
   status: MacroNodeStatus;
@@ -260,6 +269,7 @@ export interface MacroNode {
   executions: NodeExecution[];
   error?: string;
   agentType?: AgentType;
+  suggestionCount?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -280,17 +290,21 @@ export interface Blueprint {
 
 // --- Blueprint APIs ---
 
-export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean }): Promise<Blueprint[]> {
+export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean; search?: string }): Promise<Blueprint[]> {
   const params = new URLSearchParams();
   if (filters?.status) params.set("status", filters.status);
   if (filters?.projectCwd) params.set("projectCwd", filters.projectCwd);
   if (filters?.includeArchived) params.set("includeArchived", "true");
+  if (filters?.search) params.set("search", filters.search);
   const qs = params.toString();
   return fetchJSON(`${API_BASE}/blueprints${qs ? `?${qs}` : ""}`);
 }
 
-export function getBlueprint(id: string): Promise<Blueprint> {
-  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`);
+export function getBlueprint(id: string, options?: { search?: string }): Promise<Blueprint> {
+  const params = new URLSearchParams();
+  if (options?.search) params.set("search", options.search);
+  const qs = params.toString();
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}${qs ? `?${qs}` : ""}`);
 }
 
 export function createBlueprint(data: {
@@ -503,7 +517,7 @@ export function getNodeExecutions(
   );
 }
 
-export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps";
+export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps" | "coordinate";
 
 export interface RelatedSession {
   id: string;
@@ -521,6 +535,15 @@ export function getRelatedSessions(
 ): Promise<RelatedSession[]> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/related-sessions`
+  );
+}
+
+export function getActiveRelatedSession(
+  blueprintId: string,
+  nodeId: string
+): Promise<RelatedSession | null> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/active-related-session`
   );
 }
 
@@ -545,8 +568,9 @@ export function runAllNodes(
 // --- Queue Status API ---
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate";
   nodeId?: string;
+  blueprintId: string;
   queuedAt: string;
 }
 
@@ -586,6 +610,7 @@ export interface GlobalQueueTask {
   nodeTitle?: string;
   blueprintTitle?: string;
   sessionId?: string;
+  queuePosition?: number;
 }
 
 export interface GlobalQueueInfo {
@@ -612,6 +637,107 @@ export function redeployStable(): Promise<{ ok: boolean; message: string }> {
 
 export function getSessionHealth(sessionId: string): Promise<SessionHealth> {
   return fetchJSON(`${API_BASE}/sessions/${sessionId}/health`);
+}
+
+// ─── Node Suggestions ─────────────────────────────────────────
+
+export interface NodeSuggestion {
+  id: string;
+  nodeId: string;
+  blueprintId: string;
+  title: string;
+  description: string;
+  used: boolean;
+  createdAt: string;
+}
+
+export function getSuggestionsForNode(
+  blueprintId: string,
+  nodeId: string
+): Promise<NodeSuggestion[]> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/suggestions`
+  );
+}
+
+export function markSuggestionUsed(
+  blueprintId: string,
+  nodeId: string,
+  suggestionId: string
+): Promise<NodeSuggestion> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}/suggestions/${encodeURIComponent(suggestionId)}/mark-used`,
+    { method: "POST" }
+  );
+}
+
+// ─── Image upload ─────────────────────────────────────────────
+
+// ─── Blueprint Insights ───────────────────────────────────────
+
+export type InsightSeverity = "info" | "warning" | "critical";
+
+export interface BlueprintInsight {
+  id: string;
+  blueprintId: string;
+  sourceNodeId?: string;
+  role: string;
+  severity: InsightSeverity;
+  message: string;
+  read: boolean;
+  dismissed: boolean;
+  createdAt: string;
+}
+
+export function fetchBlueprintInsights(
+  blueprintId: string,
+  opts?: { unreadOnly?: boolean },
+): Promise<BlueprintInsight[]> {
+  const params = new URLSearchParams();
+  if (opts?.unreadOnly) params.set("unread", "true");
+  const qs = params.toString();
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/insights${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export function markInsightRead(
+  blueprintId: string,
+  insightId: string,
+): Promise<BlueprintInsight> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/insights/${encodeURIComponent(insightId)}/mark-read`,
+    { method: "POST" },
+  );
+}
+
+export function markAllInsightsRead(
+  blueprintId: string,
+): Promise<{ success: boolean }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/insights/mark-all-read`,
+    { method: "POST" },
+  );
+}
+
+export function dismissInsight(
+  blueprintId: string,
+  insightId: string,
+): Promise<{ success: boolean }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/insights/${encodeURIComponent(insightId)}/dismiss`,
+    { method: "POST" },
+  );
+}
+
+export function getUnreadInsightCount(): Promise<{ count: number }> {
+  return fetchJSON(`${API_BASE}/insights/unread-count`);
+}
+
+export function coordinateBlueprint(blueprintId: string): Promise<{ status: string; blueprintId: string }> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/coordinate`, {
+    method: "POST",
+  });
 }
 
 // ─── Image upload ─────────────────────────────────────────────
