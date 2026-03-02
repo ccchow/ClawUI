@@ -156,6 +156,7 @@ For the full list, see [`docs/CODING-GOTCHAS.md`](docs/CODING-GOTCHAS.md). Most 
 - **OpenClaw Docker session scanning on Windows**: `getAllSessionsDirs()` scans `~/.openclaw/openclaw-*/agents/` for Docker instance sessions. This path pattern is Linux/macOS only — Docker Desktop on Windows uses WSL2, so container session paths differ and are not accessible at `%USERPROFILE%\.openclaw\openclaw-*\`. Windows users can only use local OpenClaw sessions (not Docker instances) unless running ClawUI inside WSL2.
 - **Codex sandbox behavior on Windows**: `--dangerously-bypass-approvals-and-sandbox` may behave differently on Windows due to OS-level sandboxing differences. The `workspace-write` sandbox that `--full-auto` forces is Linux-specific (uses seccomp/namespaces). On Windows, Codex may have fewer sandbox restrictions or different failure modes when network calls are needed.
 - **Codex/OpenClaw/Pi don't use `expect` on Windows**: These agent runtimes use `execFile` directly (not TTY wrapping), so the `expect` binary limitation does not apply. Only `agent-claude.ts` uses `expect` for TTY handling, and on Windows it uses `CLAUDE_CLI_JS` with direct node invocation instead.
+- **CRLF line endings block `git add` on Windows**: `.gitattributes` enforces `eol=lf` for all source files. Windows tools often write CRLF, causing `git add` to fail with `fatal: CRLF would be replaced by LF`. Setting `core.autocrlf=false` doesn't help — convert files with `sed -i 's/\r$//'` before staging.
 
 ## Environment Variables
 
