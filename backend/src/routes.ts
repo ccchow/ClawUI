@@ -18,6 +18,11 @@ import type { SessionEnrichment, NodeEnrichment } from "./enrichment.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DEV } from "./config.js";
 import { getNodeInfoForSessions } from "./plan-db.js";
+import { getAllRoles, getRole } from "./roles/role-registry.js";
+// Side-effect imports: ensure all roles are registered before getAllRoles()/getRole() is called
+import "./roles/role-sde.js";
+import "./roles/role-qa.js";
+import "./roles/role-pm.js";
 
 const log = createLogger("routes");
 
@@ -363,6 +368,33 @@ router.get("/api/agents", (_req, res) => {
   try {
     const agents = getAvailableAgents();
     res.json(agents);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// ─── Role Discovery ──────────────────────────────────────────
+
+// GET /api/roles — list all registered roles (prompts stripped)
+router.get("/api/roles", (_req, res) => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const roles = getAllRoles().map(({ prompts, ...rest }) => rest);
+    res.json(roles);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/roles/:id — get full role definition including prompts
+router.get("/api/roles/:id", (req, res) => {
+  try {
+    const role = getRole(req.params.id);
+    if (!role) {
+      res.status(404).json({ error: "Role not found" });
+      return;
+    }
+    res.json(role);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }

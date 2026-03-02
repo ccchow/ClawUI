@@ -6,6 +6,7 @@ import Link from "next/link";
 import { createBlueprint, type AgentType } from "@/lib/api";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AgentSelector } from "@/components/AgentSelector";
+import { RoleSelector } from "@/components/RoleSelector";
 
 export default function NewBlueprintPage() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export default function NewBlueprintPage() {
   const [description, setDescription] = useState("");
   const [projectCwd, setProjectCwd] = useState("");
   const [agentType, setAgentType] = useState<AgentType>("claude");
+  const [enabledRoles, setEnabledRoles] = useState<string[]>(["sde"]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cwdError, setCwdError] = useState<string | null>(null);
@@ -29,6 +31,8 @@ export default function NewBlueprintPage() {
         description: description.trim() || undefined,
         projectCwd: projectCwd.trim() || undefined,
         agentType,
+        enabledRoles,
+        defaultRole: enabledRoles[0],
       });
       router.push(autoGenerate ? `/blueprints/${bp.id}?generate=true` : `/blueprints/${bp.id}`);
     } catch (err) {
@@ -101,6 +105,12 @@ export default function NewBlueprintPage() {
         <AgentSelector
           value={agentType}
           onChange={setAgentType}
+          disabled={submitting}
+        />
+
+        <RoleSelector
+          value={enabledRoles}
+          onChange={setEnabledRoles}
           disabled={submitting}
         />
 

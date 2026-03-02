@@ -88,6 +88,47 @@ vi.mock("../agent-openclaw.js", () => ({}));
 
 vi.mock("../agent-codex.js", () => ({}));
 
+vi.mock("../roles/role-registry.js", () => ({
+  getAllRoles: vi.fn(() => [
+    {
+      id: "sde",
+      label: "Software Engineer",
+      description: "Writes code",
+      builtin: true,
+      prompts: { persona: "You are an SDE", workVerb: "implement" },
+      artifactTypes: ["code"],
+      blockerTypes: ["technical_limitation"],
+    },
+    {
+      id: "qa",
+      label: "QA Engineer",
+      description: "Tests code",
+      builtin: true,
+      prompts: { persona: "You are a QA", workVerb: "test" },
+      artifactTypes: ["test_plan"],
+      blockerTypes: ["missing_dependency"],
+    },
+  ]),
+  getRole: vi.fn((id: string) => {
+    if (id === "sde") {
+      return {
+        id: "sde",
+        label: "Software Engineer",
+        description: "Writes code",
+        builtin: true,
+        prompts: { persona: "You are an SDE", workVerb: "implement" },
+        artifactTypes: ["code"],
+        blockerTypes: ["technical_limitation"],
+      };
+    }
+    return undefined;
+  }),
+}));
+
+vi.mock("../roles/role-sde.js", () => ({}));
+vi.mock("../roles/role-qa.js", () => ({}));
+vi.mock("../roles/role-pm.js", () => ({}));
+
 import router from "../routes.js";
 import {
   getProjects,
@@ -106,6 +147,7 @@ import {
 import { getAppState, updateAppState, trackSessionView } from "../app-state.js";
 import { runPrompt } from "../cli-runner.js";
 import { getRuntimeByType, getRegisteredRuntimes } from "../agent-runtime.js";
+import { getAllRoles, getRole } from "../roles/role-registry.js";
 
 function createApp() {
   const app = express();
@@ -648,6 +690,61 @@ describe("routes", () => {
         .post("/api/sessions/s1/run")
         .send({ prompt: "do something" });
       expect(syncSession).toHaveBeenCalledWith("s1");
+    });
+  });
+
+  // ─── GET /api/roles ──────────────────────────────────────────
+
+  describe("GET /api/roles", () => {
+    it("returns roles with prompts stripped", async () => {
+      const res = await request(app).get("/api/roles");
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+      expect(res.body).toHaveLength(2);
+      expect(res.body[0].id).toBe("sde");
+      expect(res.body[0].label).toBe("Software Engineer");
+      // prompts should be stripped
+      expect(res.body[0].prompts).toBeUndefined();
+      expect(res.body[1].id).toBe("qa");
+      expect(res.body[1].prompts).toBeUndefined();
+    });
+
+    it("returns 500 on error", async () => {
+      vi.mocked(getAllRoles).mockImplementation(() => {
+        throw new Error("role registry error");
+      });
+
+      const res = await request(app).get("/api/roles");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("Internal server error");
+    });
+  });
+
+  // ─── GET /api/roles/:id ──────────────────────────────────────
+
+  describe("GET /api/roles/:id", () => {
+    it("returns full role definition with prompts", async () => {
+      const res = await request(app).get("/api/roles/sde");
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe("sde");
+      expect(res.body.prompts).toBeDefined();
+      expect(res.body.prompts.persona).toBe("You are an SDE");
+    });
+
+    it("returns 404 for unknown role", async () => {
+      const res = await request(app).get("/api/roles/nonexistent");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain("Role not found");
+    });
+
+    it("returns 500 on error", async () => {
+      vi.mocked(getRole).mockImplementation(() => {
+        throw new Error("role lookup error");
+      });
+
+      const res = await request(app).get("/api/roles/sde");
+      expect(res.status).toBe(500);
+      expect(res.body.error).toContain("Internal server error");
     });
   });
 });

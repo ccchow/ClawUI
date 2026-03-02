@@ -24,12 +24,14 @@ vi.mock("node:fs", async (importOriginal) => {
 // Mock plan-db
 vi.mock("../plan-db.js", () => ({
   createBlueprint: vi.fn(
-    (title: string, description?: string, projectCwd?: string) => ({
+    (title: string, description?: string, projectCwd?: string, _agentType?: string, enabledRoles?: string[], defaultRole?: string) => ({
       id: "bp-1",
       title,
       description: description ?? "",
       status: "draft",
       ...(projectCwd ? { projectCwd } : {}),
+      enabledRoles: enabledRoles ?? ["sde"],
+      defaultRole: defaultRole ?? "sde",
       nodes: [],
       createdAt: "2024-01-01T00:00:00Z",
       updatedAt: "2024-01-01T00:00:00Z",
@@ -278,10 +280,13 @@ vi.mock("../plan-executor.js", () => ({
     rewiredDependencies: [],
   })),
   resumeNodeSession: vi.fn(async () => {}),
+  resolveNodeRoles: vi.fn(() => ["sde"]),
+  buildArtifactPrompt: vi.fn(() => ""),
 }));
 
 vi.mock("../plan-generator.js", () => ({
-  runClaudeInteractiveGen: vi.fn(async () => ""),
+  runAgentInteractive: vi.fn(async () => ""),
+  runAgentText: vi.fn(async () => ""),
   getApiBase: vi.fn(() => "http://localhost:3001"),
   getAuthParam: vi.fn(() => "auth=test-token"),
 }));
@@ -289,6 +294,16 @@ vi.mock("../plan-generator.js", () => ({
 vi.mock("../plan-coordinator.js", () => ({
   coordinateBlueprint: vi.fn(async () => {}),
 }));
+
+vi.mock("../roles/role-registry.js", () => ({
+  getRole: vi.fn(() => undefined),
+  getAllRoles: vi.fn(() => []),
+  getBuiltinRoles: vi.fn(() => []),
+}));
+
+vi.mock("../roles/role-sde.js", () => ({}));
+vi.mock("../roles/role-qa.js", () => ({}));
+vi.mock("../roles/role-pm.js", () => ({}));
 
 vi.mock("../db.js", () => ({
   syncSession: vi.fn(),
@@ -380,6 +395,32 @@ describe("plan-routes", () => {
         .send({ title: "   " });
       expect(res.status).toBe(400);
     });
+
+    it("passes enabledRoles and defaultRole to createBlueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints")
+        .send({ title: "Multi-role BP", projectCwd: "/test", enabledRoles: ["sde", "qa"], defaultRole: "qa" });
+      expect(res.status).toBe(201);
+      expect(createBlueprint).toHaveBeenCalledWith(
+        "Multi-role BP",
+        undefined,
+        "/test",
+        undefined,
+        ["sde", "qa"],
+        "qa",
+      );
+      expect(res.body.enabledRoles).toEqual(["sde", "qa"]);
+      expect(res.body.defaultRole).toBe("qa");
+    });
+
+    it("defaults role fields when not provided", async () => {
+      const res = await request(app)
+        .post("/api/blueprints")
+        .send({ title: "Default Roles", projectCwd: "/test" });
+      expect(res.status).toBe(201);
+      expect(res.body.enabledRoles).toEqual(["sde"]);
+      expect(res.body.defaultRole).toBe("sde");
+    });
   });
 
   describe("GET /api/blueprints", () => {
@@ -469,6 +510,24 @@ describe("plan-routes", () => {
         .post("/api/blueprints/missing/nodes")
         .send({ title: "Step" });
       expect(res.status).toBe(404);
+    });
+
+    it("applies roles via updateMacroNode after creation", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes")
+        .send({ title: "QA Step", roles: ["qa"] });
+      expect(res.status).toBe(201);
+      expect(createMacroNode).toHaveBeenCalled();
+      expect(updateMacroNode).toHaveBeenCalledWith("bp-1", "node-new", { roles: ["qa"] });
+    });
+
+    it("skips updateMacroNode when no roles provided", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes")
+        .send({ title: "Plain Step" });
+      expect(res.status).toBe(201);
+      expect(createMacroNode).toHaveBeenCalled();
+      expect(updateMacroNode).not.toHaveBeenCalled();
     });
   });
 

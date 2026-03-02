@@ -8,6 +8,7 @@ import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { AISparkle } from "./AISparkle";
+import { RoleBadge } from "./RoleBadge";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
 import { useToast } from "./Toast";
 
@@ -394,6 +395,9 @@ export function MacroNodeCard({
                   +ideas
                 </span>
               )}
+              {node.roles && node.roles.length > 0 && node.roles.map((r) => (
+                <RoleBadge key={r} roleId={r} size="xs" />
+              ))}
             </div>
             {!expanded && !isEditing && node.description && (
               <div className="mt-1">

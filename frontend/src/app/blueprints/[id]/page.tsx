@@ -29,6 +29,8 @@ import {
   coordinateBlueprint,
 } from "@/lib/api";
 import { AgentBadge } from "@/components/AgentSelector";
+import { RoleBadge } from "@/components/RoleBadge";
+import { RoleSelector } from "@/components/RoleSelector";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MacroNodeCard } from "@/components/MacroNodeCard";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -736,6 +738,13 @@ export default function BlueprintDetailPage() {
           {blueprint.agentType && blueprint.agentType !== "claude" && (
             <AgentBadge agentType={blueprint.agentType} size="xs" />
           )}
+          {blueprint.enabledRoles && blueprint.enabledRoles.length > 1 && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {blueprint.enabledRoles.map((r) => (
+                <RoleBadge key={r} roleId={r} size="xs" />
+              ))}
+            </div>
+          )}
           {/* State-control actions + archive */}
           <div className="flex items-center gap-1 flex-shrink-0">
             {blueprint.status === "draft" && (
@@ -855,6 +864,21 @@ export default function BlueprintDetailPage() {
             {blueprint.projectCwd}
           </p>
         )}
+
+        <div className="mb-3">
+          <RoleSelector
+            value={blueprint.enabledRoles ?? ["sde"]}
+            onChange={async (newRoles) => {
+              try {
+                const updated = await updateBlueprint(id, { enabledRoles: newRoles, defaultRole: newRoles[0] });
+                setBlueprint(updated);
+              } catch {
+                // revert silently
+              }
+            }}
+            disabled={blueprint.status !== "draft" && blueprint.status !== "approved" && blueprint.status !== "paused"}
+          />
+        </div>
 
         {/* Generate instruction + action buttons — ChatGPT-style unified input */}
         <div className={`rounded-xl border bg-bg-secondary transition-colors ${generating || isGeneratingTask ? "border-accent-purple/40" : "border-border-primary focus-within:border-accent-purple/60"}`}>

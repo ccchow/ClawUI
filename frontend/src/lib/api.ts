@@ -98,6 +98,26 @@ export function getAgents(): Promise<AgentInfo[]> {
   return fetchJSON(`${API_BASE}/agents`);
 }
 
+// --- Role APIs ---
+
+export interface RoleInfo {
+  id: string;
+  label: string;
+  description: string;
+  icon?: string;
+  builtin: boolean;
+  artifactTypes: string[];
+  blockerTypes: string[];
+}
+
+export function fetchRoles(): Promise<RoleInfo[]> {
+  return fetchJSON(`${API_BASE}/roles`);
+}
+
+export function fetchRole(id: string): Promise<RoleInfo> {
+  return fetchJSON(`${API_BASE}/roles/${encodeURIComponent(id)}`);
+}
+
 export function getProjects(agentType?: AgentType): Promise<ProjectInfo[]> {
   const params = new URLSearchParams();
   if (agentType) params.set("agent", agentType);
@@ -204,7 +224,7 @@ export type MacroNodeStatus = "pending" | "queued" | "running" | "done" | "faile
 
 export interface Artifact {
   id: string;
-  type: "handoff_summary" | "file_diff" | "test_report" | "custom";
+  type: string;
   content: string;
   sourceNodeId: string;
   targetNodeId?: string;
@@ -269,6 +289,7 @@ export interface MacroNode {
   executions: NodeExecution[];
   error?: string;
   agentType?: AgentType;
+  roles?: string[];
   suggestionCount?: number;
   createdAt: string;
   updatedAt: string;
@@ -283,6 +304,8 @@ export interface Blueprint {
   starred?: boolean;
   archivedAt?: string;
   agentType?: AgentType;
+  enabledRoles?: string[];
+  defaultRole?: string;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -312,6 +335,8 @@ export function createBlueprint(data: {
   description?: string;
   projectCwd?: string;
   agentType?: AgentType;
+  enabledRoles?: string[];
+  defaultRole?: string;
 }): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints`, {
     method: "POST",
@@ -322,7 +347,7 @@ export function createBlueprint(data: {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType">>
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "enabledRoles" | "defaultRole">>
 ): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
     method: "PUT",
@@ -429,7 +454,7 @@ export function createMacroNode(
 export function updateMacroNode(
   blueprintId: string,
   nodeId: string,
-  patch: Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "order" | "prompt" | "agentType">>
+  patch: Partial<Pick<MacroNode, "title" | "description" | "status" | "dependencies" | "order" | "prompt" | "agentType" | "roles">>
 ): Promise<MacroNode> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/nodes/${encodeURIComponent(nodeId)}`,

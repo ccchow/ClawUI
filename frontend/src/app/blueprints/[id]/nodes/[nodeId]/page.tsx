@@ -37,6 +37,8 @@ import { MarkdownEditor } from "@/components/MarkdownEditor";
 import { AISparkle } from "@/components/AISparkle";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { AgentBadge } from "@/components/AgentSelector";
+import { RoleBadge } from "@/components/RoleBadge";
+import { RoleSelector } from "@/components/RoleSelector";
 import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 import { useToast } from "@/components/Toast";
 
@@ -103,6 +105,7 @@ export default function NodeDetailPage() {
   const recoveryAttempted = useRef(false);
   const prevStatusRef = useRef<string | null>(null);
   const [postCompletionPolls, setPostCompletionPolls] = useState(0);
+  const [recoveryPollDeadline, setRecoveryPollDeadline] = useState<number | null>(null); // epoch ms
   const { showToast } = useToast();
 
   // Cross-tab sync: when another tab fires an operation on this blueprint,
@@ -301,9 +304,32 @@ export default function NodeDetailPage() {
     const curr = node?.status ?? null;
     if (prev && (prev === "running" || prev === "queued") && curr && curr !== "running" && curr !== "queued") {
       setPostCompletionPolls(4); // 4 more cycles × 5s = 20s buffer for artifacts/evaluation
+      // If node failed due to server restart, start extended recovery polling (5 min)
+      if (curr === "failed" && node?.error?.includes("server restart")) {
+        setRecoveryPollDeadline(Date.now() + 5 * 60 * 1000);
+      }
     }
     prevStatusRef.current = curr;
-  }, [node?.status]);
+  }, [node?.status, node?.error]);
+
+  // Also detect server-restart failure on initial page load (when we didn't witness the transition)
+  useEffect(() => {
+    if (!node || recoveryPollDeadline !== null) return;
+    if (node.status === "failed" && node.error?.includes("server restart")) {
+      // Start recovery polling with 5 min deadline from page load
+      setRecoveryPollDeadline(Date.now() + 5 * 60 * 1000);
+    }
+  }, [node, recoveryPollDeadline]);
+
+  // Clear recovery polling when node transitions away from failed (backend recovered it)
+  useEffect(() => {
+    if (recoveryPollDeadline && node && node.status !== "failed") {
+      setRecoveryPollDeadline(null);
+      if (node.status === "done") {
+        showToast(`Node #${node.seq} recovered successfully`);
+      }
+    }
+  }, [node, recoveryPollDeadline, showToast]);
 
   // Navigate to blueprint page when split completes (node becomes skipped)
   useEffect(() => {
@@ -312,16 +338,27 @@ export default function NodeDetailPage() {
     }
   }, [splitting, node?.status, router, blueprintBackHref]);
 
-  // Auto-poll when node is running, queued, has pending tasks, or post-completion countdown active
+  // Auto-poll when node is running, queued, has pending tasks, post-completion countdown active,
+  // or server-restart recovery is being monitored by the backend
+  const isRecoveryPolling = recoveryPollDeadline !== null && Date.now() < recoveryPollDeadline;
   useEffect(() => {
-    const shouldPoll = node?.status === "running" || node?.status === "queued" || hasPendingTasks || postCompletionPolls > 0;
+    const activeRecoveryPoll = recoveryPollDeadline !== null && Date.now() < recoveryPollDeadline;
+    const shouldPoll = node?.status === "running" || node?.status === "queued" || hasPendingTasks || postCompletionPolls > 0 || activeRecoveryPoll;
     if (shouldPoll) {
+      // Use slower interval (10s) for recovery polling, normal (5s) otherwise
+      const interval = activeRecoveryPoll && !hasPendingTasks && node?.status !== "running" && node?.status !== "queued" && postCompletionPolls <= 0
+        ? 10000
+        : 5000;
       pollRef.current = setInterval(() => {
         if (postCompletionPolls > 0) {
           setPostCompletionPolls((c) => c - 1);
         }
+        // Expire recovery polling when deadline passes
+        if (recoveryPollDeadline !== null && Date.now() >= recoveryPollDeadline) {
+          setRecoveryPollDeadline(null);
+        }
         loadData();
-      }, 5000);
+      }, interval);
     } else {
       if (pollRef.current) {
         clearInterval(pollRef.current);
@@ -331,7 +368,7 @@ export default function NodeDetailPage() {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [node?.status, hasPendingTasks, postCompletionPolls, loadData]);
+  }, [node?.status, hasPendingTasks, postCompletionPolls, recoveryPollDeadline, loadData]);
 
   // Focus trap for node switcher overlay
   useEffect(() => {
@@ -702,6 +739,9 @@ export default function NodeDetailPage() {
           {node.agentType && node.agentType !== (blueprint?.agentType ?? "claude") && (
             <AgentBadge agentType={node.agentType} size="xs" />
           )}
+          {node.roles && node.roles.length > 0 && node.roles.map((r) => (
+            <RoleBadge key={r} roleId={r} size="sm" />
+          ))}
           {isRunning && (
             <AISparkle size="sm" className="text-accent-blue" />
           )}
@@ -804,6 +844,31 @@ export default function NodeDetailPage() {
                 </button>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Per-node role selector */}
+        {blueprint && (
+          <div className="mb-3">
+            <div className="flex items-center gap-2 mb-1">
+              <label className="text-xs text-text-muted font-medium uppercase tracking-wide">Roles</label>
+              {(!node.roles || node.roles.length === 0) && (
+                <span className="text-[10px] text-text-muted italic">inherited from blueprint</span>
+              )}
+            </div>
+            <RoleSelector
+              label={null}
+              value={node.roles && node.roles.length > 0 ? node.roles : (blueprint.enabledRoles ?? ["sde"])}
+              onChange={async (newRoles) => {
+                try {
+                  await updateMacroNode(blueprintId, node.id, { roles: newRoles });
+                  setNode((prev) => prev ? { ...prev, roles: newRoles } : prev);
+                } catch {
+                  // revert silently
+                }
+              }}
+              disabled={node.status === "running" || node.status === "done" || isRunning || isQueued}
+            />
           </div>
         )}
 
@@ -1075,7 +1140,12 @@ export default function NodeDetailPage() {
         node.error.includes("Execution interrupted by server restart") ? (
           <div className="text-sm text-accent-amber bg-accent-amber/10 rounded-lg p-3 mb-4 flex items-start gap-2">
             <span className="flex-shrink-0 mt-0.5">&#9888;</span>
-            <span><span className="font-medium">Warning:</span> Node execution was interrupted — the server restarted while this node was running. Auto-recovery will attempt to resume. You can also retry manually.</span>
+            <span>
+              <span className="font-medium">Warning:</span> Node execution was interrupted — the server restarted while this node was running.
+              {isRecoveryPolling
+                ? " Monitoring for backend recovery... This page will update automatically if the session completes."
+                : " Auto-recovery will attempt to resume. You can also retry manually."}
+            </span>
           </div>
         ) : (
           <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-3 mb-4">

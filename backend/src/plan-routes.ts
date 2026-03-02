@@ -210,8 +210,8 @@ planRouter.post("/api/blueprints", (req, res) => {
         return;
       }
     }
-    const { agentType } = req.body as { agentType?: string };
-    const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType);
+    const { agentType, enabledRoles, defaultRole } = req.body as { agentType?: string; enabledRoles?: string[]; defaultRole?: string };
+    const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType, enabledRoles, defaultRole);
     res.status(201).json(blueprint);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -1028,7 +1028,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
       res.status(404).json({ error: "Blueprint not found" });
       return;
     }
-    const { title, description, order, dependencies, parallelGroup, prompt, estimatedMinutes } = req.body as {
+    const { title, description, order, dependencies, parallelGroup, prompt, estimatedMinutes, roles } = req.body as {
       title?: string;
       description?: string;
       order?: number;
@@ -1036,6 +1036,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
       parallelGroup?: string;
       prompt?: string;
       estimatedMinutes?: number;
+      roles?: string[];
     };
     if (!title || typeof title !== "string" || title.trim().length === 0) {
       res.status(400).json({ error: "Missing or empty 'title'" });
@@ -1043,7 +1044,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
     }
     const maxOrder = blueprint.nodes.reduce((m, n) => Math.max(m, n.order), -1);
     const nodeOrder = order ?? maxOrder + 1;
-    const node = createMacroNode(req.params.blueprintId, {
+    let node = createMacroNode(req.params.blueprintId, {
       title: title.trim(),
       description,
       order: nodeOrder,
@@ -1052,6 +1053,11 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
       prompt,
       estimatedMinutes,
     });
+    // Set roles if provided (createMacroNode doesn't accept roles directly)
+    if (roles && Array.isArray(roles) && roles.length > 0) {
+      const updated = updateMacroNode(req.params.blueprintId, node.id, { roles });
+      if (updated) node = updated;
+    }
     res.status(201).json(node);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
