@@ -10,12 +10,15 @@ export function RoleSelector({
   onChange,
   disabled = false,
   label,
+  inherited = false,
 }: {
   value: string[];
   onChange: (roles: string[]) => void;
   disabled?: boolean;
   /** Custom label. Pass `null` to hide the label entirely. */
   label?: string | null;
+  /** When true, selected roles use muted styling to indicate they are inherited defaults, not explicit selections */
+  inherited?: boolean;
 }) {
   const [roles, setRoles] = useState<RoleInfo[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -61,11 +64,13 @@ export function RoleSelector({
               title={role.description}
               className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm font-medium transition-all active:scale-[0.97] ${
                 selected
-                  ? `${colors.bg} ${colors.text} ${colors.border}`
+                  ? inherited
+                    ? `bg-bg-tertiary ${colors.text} border-border-primary border-dashed opacity-60`
+                    : `${colors.bg} ${colors.text} ${colors.border}`
                   : "bg-bg-tertiary text-text-secondary border-border-primary hover:bg-bg-hover"
               } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
             >
-              <span className={`w-2 h-2 rounded-full ${selected ? colors.dot : "bg-text-muted"}`} />
+              <span className={`w-2 h-2 rounded-full ${selected ? (inherited ? "bg-text-muted" : colors.dot) : "bg-text-muted"}`} />
               {role.label}
             </button>
           );

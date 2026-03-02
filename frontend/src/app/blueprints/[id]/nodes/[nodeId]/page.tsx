@@ -739,9 +739,14 @@ export default function NodeDetailPage() {
           {node.agentType && node.agentType !== (blueprint?.agentType ?? "claude") && (
             <AgentBadge agentType={node.agentType} size="xs" />
           )}
-          {node.roles && node.roles.length > 0 && node.roles.map((r) => (
-            <RoleBadge key={r} roleId={r} size="sm" />
-          ))}
+          {node.roles && node.roles.length > 0
+            ? node.roles.map((r) => (
+                <RoleBadge key={r} roleId={r} size="sm" />
+              ))
+            : (blueprint.enabledRoles ?? [blueprint.defaultRole ?? "sde"]).map((r) => (
+                <RoleBadge key={r} roleId={r} size="sm" inherited />
+              ))
+          }
           {isRunning && (
             <AISparkle size="sm" className="text-accent-blue" />
           )}
@@ -859,6 +864,7 @@ export default function NodeDetailPage() {
             <RoleSelector
               label={null}
               value={node.roles && node.roles.length > 0 ? node.roles : (blueprint.enabledRoles ?? ["sde"])}
+              inherited={!node.roles || node.roles.length === 0}
               onChange={async (newRoles) => {
                 try {
                   await updateMacroNode(blueprintId, node.id, { roles: newRoles });

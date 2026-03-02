@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
+import { createContext, useContext, useState, useCallback, useRef, useEffect, useMemo } from "react";
 
 export type ToastType = "success" | "error" | "info";
 
@@ -48,11 +48,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setTimeout(() => removeToast(id), TOAST_DURATION);
   }, [removeToast]);
 
+  // Memoize context value to prevent unnecessary consumer re-renders.
+  // Without this, every toast state change creates a new {showToast} object reference,
+  // causing ALL useToast() consumers to re-render even though showToast is stable.
+  const contextValue = useMemo(() => ({ showToast }), [showToast]);
+
   return (
-    <ToastContext.Provider value={{ showToast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none max-w-sm">
+        <div className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none max-w-sm" data-testid="toast-container">
           {toasts.map((toast) => (
             <ToastItem
               key={toast.id}
@@ -100,6 +105,7 @@ function ToastItem({
       className={`relative pointer-events-auto border rounded-lg px-3 py-2 flex items-center gap-2 text-sm shadow-lg backdrop-blur-sm ${colorMap[toast.type]} ${isExiting ? "animate-toast-exit" : "animate-toast-enter"}`}
       role="status"
       aria-live="polite"
+      data-testid="toast-item"
     >
       <span className="font-medium text-base flex-shrink-0">{iconMap[toast.type]}</span>
       <span className="flex-1 min-w-0">{toast.message}</span>

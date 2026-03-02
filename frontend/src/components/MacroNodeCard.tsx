@@ -43,6 +43,8 @@ export function MacroNodeCard({
   broadcastOperation,
   hasSuggestions,
   blueprintBusy,
+  blueprintDefaultRole,
+  blueprintEnabledRoles,
 }: {
   node: MacroNode;
   pendingTasks?: PendingTask[];
@@ -59,6 +61,10 @@ export function MacroNodeCard({
   hasSuggestions?: boolean;
   /** Name of the active blueprint-wide operation (e.g. "Run All", "Generate"), or undefined if none */
   blueprintBusy?: string;
+  /** Blueprint's defaultRole for inherited role display (falls back to "sde") */
+  blueprintDefaultRole?: string;
+  /** Blueprint's enabledRoles for inherited role display */
+  blueprintEnabledRoles?: string[];
 }) {
   const { showToast } = useToast();
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -395,9 +401,14 @@ export function MacroNodeCard({
                   +ideas
                 </span>
               )}
-              {node.roles && node.roles.length > 0 && node.roles.map((r) => (
-                <RoleBadge key={r} roleId={r} size="xs" />
-              ))}
+              {node.roles && node.roles.length > 0
+                ? node.roles.map((r) => (
+                    <RoleBadge key={r} roleId={r} size="xs" />
+                  ))
+                : (blueprintEnabledRoles ?? [blueprintDefaultRole ?? "sde"]).map((r) => (
+                    <RoleBadge key={r} roleId={r} size="xs" inherited />
+                  ))
+              }
             </div>
             {!expanded && !isEditing && node.description && (
               <div className="mt-1">

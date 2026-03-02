@@ -1470,6 +1470,8 @@ export default function BlueprintDetailPage() {
                       broadcastOperation={broadcastOperation}
                       hasSuggestions={(node.suggestionCount ?? 0) > 0}
                       blueprintBusy={blueprintBusy}
+                      blueprintDefaultRole={blueprint.defaultRole}
+                      blueprintEnabledRoles={blueprint.enabledRoles}
                     />
                   </div>
                 );

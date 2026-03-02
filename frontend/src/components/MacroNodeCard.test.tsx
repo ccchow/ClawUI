@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MacroNodeCard } from "./MacroNodeCard";
-import type { MacroNode } from "@/lib/api";
+import { ToastProvider } from "./Toast";
+import type { MacroNode, PendingTask } from "@/lib/api";
 
 // Mock next/link
 vi.mock("next/link", () => ({
@@ -243,5 +244,186 @@ describe("MacroNodeCard", () => {
     const deleteBtn = screen.getByTitle("Delete node");
     fireEvent.click(deleteBtn);
     expect(screen.getByText("Are you sure? This cannot be undone.")).toBeInTheDocument();
+  });
+
+  // --- Inherited role badges ---
+
+  it("shows explicit role badges when node has roles", () => {
+    render(
+      <MacroNodeCard
+        node={makeMockNode({ roles: ["sde", "qa"] })}
+        index={0}
+        total={3}
+        blueprintId="bp-1"
+        blueprintDefaultRole="pm"
+      />,
+    );
+    expect(screen.getByText("SDE")).toBeInTheDocument();
+    expect(screen.getByText("QA")).toBeInTheDocument();
+    // Explicit roles should NOT have inherited styling
+    const sdeBadge = screen.getByText("SDE").closest("span")!;
+    expect(sdeBadge.className).not.toContain("border-dashed");
+    expect(sdeBadge.className).not.toContain("opacity-60");
+  });
+
+  it("shows inherited role badge from blueprintDefaultRole when node has no roles", () => {
+    render(
+      <MacroNodeCard
+        node={makeMockNode({ roles: [] })}
+        index={0}
+        total={3}
+        blueprintId="bp-1"
+        blueprintDefaultRole="qa"
+      />,
+    );
+    expect(screen.getByText("QA")).toBeInTheDocument();
+    const qaBadge = screen.getByText("QA").closest("span")!;
+    // Inherited styling
+    expect(qaBadge.className).toContain("border-dashed");
+    expect(qaBadge.className).toContain("opacity-60");
+  });
+
+  it("shows inherited 'sde' fallback badge when no roles and no blueprintDefaultRole", () => {
+    render(
+      <MacroNodeCard
+        node={makeMockNode({ roles: undefined })}
+        index={0}
+        total={3}
+        blueprintId="bp-1"
+      />,
+    );
+    expect(screen.getByText("SDE")).toBeInTheDocument();
+    const sdeBadge = screen.getByText("SDE").closest("span")!;
+    expect(sdeBadge.className).toContain("border-dashed");
+    expect(sdeBadge.className).toContain("opacity-60");
+  });
+
+  it("shows inherited badges from blueprintEnabledRoles when node has no roles", () => {
+    render(
+      <MacroNodeCard
+        node={makeMockNode({ roles: [] })}
+        index={0}
+        total={3}
+        blueprintId="bp-1"
+        blueprintEnabledRoles={["sde", "qa"]}
+        blueprintDefaultRole="sde"
+      />,
+    );
+    expect(screen.getByText("SDE")).toBeInTheDocument();
+    expect(screen.getByText("QA")).toBeInTheDocument();
+    // Both should be inherited
+    const sdeBadge = screen.getByText("SDE").closest("span")!;
+    const qaBadge = screen.getByText("QA").closest("span")!;
+    expect(sdeBadge.className).toContain("border-dashed");
+    expect(qaBadge.className).toContain("border-dashed");
+  });
+
+  // --- Toast transition detection ---
+
+  it("shows toast when reevaluateQueued transitions from true to false", () => {
+    const pendingWithReeval: PendingTask[] = [
+      { type: "reevaluate", nodeId: "node-1", blueprintId: "bp-1", queuedAt: "2025-01-01T00:00:00Z" },
+    ];
+    const noPending: PendingTask[] = [];
+
+    // Render with reevaluateQueued = true (pending task present)
+    const { rerender } = render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={pendingWithReeval}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    // No toast yet
+    expect(screen.queryByTestId("toast-item")).not.toBeInTheDocument();
+
+    // Re-render with reevaluateQueued = false (task completed)
+    rerender(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={noPending}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    // Toast should appear
+    expect(screen.getByTestId("toast-item")).toBeInTheDocument();
+    expect(screen.getByText("Re-evaluation complete for #1")).toBeInTheDocument();
+  });
+
+  it("shows toast when enrichQueued transitions from true to false", () => {
+    const pendingWithEnrich: PendingTask[] = [
+      { type: "enrich", nodeId: "node-1", blueprintId: "bp-1", queuedAt: "2025-01-01T00:00:00Z" },
+    ];
+    const noPending: PendingTask[] = [];
+
+    const { rerender } = render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={pendingWithEnrich}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    expect(screen.queryByTestId("toast-item")).not.toBeInTheDocument();
+
+    rerender(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={noPending}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    expect(screen.getByTestId("toast-item")).toBeInTheDocument();
+    expect(screen.getByText("Enrichment complete for #1")).toBeInTheDocument();
+  });
+
+  it("does not show toast when reevaluateQueued is never true", () => {
+    const noPending: PendingTask[] = [];
+
+    const { rerender } = render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={noPending}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    // Re-render with still no pending tasks
+    rerender(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          pendingTasks={noPending}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+        />
+      </ToastProvider>,
+    );
+
+    expect(screen.queryByTestId("toast-item")).not.toBeInTheDocument();
   });
 });
