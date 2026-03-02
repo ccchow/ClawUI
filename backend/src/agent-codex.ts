@@ -13,7 +13,7 @@
  *            turn_context
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,7 @@ import type { TimelineNode } from "./jsonl-parser.js";
 import type { FailureReason } from "./plan-db.js";
 import type { ContextPressure, SessionAnalysis } from "./jsonl-parser.js";
 import { readSessionHeader } from "./session-header.js";
+import { CODEX_PATH as CONFIG_CODEX_PATH } from "./config.js";
 
 const log = createLogger("agent-codex");
 
@@ -31,38 +32,8 @@ const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
 
 // ─── Binary resolution ──────────────────────────────────────
 
-/**
- * Resolve the path to the Codex CLI binary.
- * Priority: CODEX_PATH env → common install locations → PATH lookup via `which`.
- */
-function resolveCodexPath(): string {
-  if (process.env.CODEX_PATH) {
-    return process.env.CODEX_PATH;
-  }
-
-  const candidates = [
-    join(homedir(), ".local", "bin", "codex"),
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // `which` failed — codex not in PATH
-  }
-
-  return "codex";
-}
-
-/** Resolved path to Codex CLI binary. */
-const CODEX_PATH = resolveCodexPath();
+/** Resolved path to Codex CLI binary (from config.ts, with bare-command fallback). */
+const CODEX_PATH = CONFIG_CODEX_PATH ?? "codex";
 
 // ─── Session JSONL types ────────────────────────────────────
 
@@ -369,8 +340,12 @@ export class CodexAgentRuntime implements AgentRuntime {
 
   encodeProjectCwd(cwd: string): string {
     // Codex sessions are date-organized, not path-organized.
-    // Use same encoding as OpenClaw: strip leading /, replace / with -.
-    return cwd.replace(/\//g, "-").replace(/^-/, "");
+    // Cross-platform: handle both / and \ separators, plus drive letter colons.
+    return cwd
+      .replace(/:/g, "-")          // drive letter colon (C: → C-)
+      .replace(/[/\\]\./g, "/-")   // encode leading dots in path components
+      .replace(/[/\\]/g, "-")      // both / and \ separators
+      .replace(/^-/, "");           // strip leading dash
   }
 
   cleanEnv(): NodeJS.ProcessEnv {

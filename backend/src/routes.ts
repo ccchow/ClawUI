@@ -188,13 +188,13 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       const runtimes = getRegisteredRuntimes();
       const factory = runtimes.get(agentType) ?? runtimes.get("claude");
       if (!factory) {
-        res.status(500).json({ error: `No agent runtime available for type "${agentType}"` });
+        if (!res.writableEnded) res.status(500).json({ error: `No agent runtime available for type "${agentType}"` });
         return;
       }
       const runtime = factory();
 
       if (!runtime.capabilities.supportsResume) {
-        res.status(400).json({ error: `Agent type "${agentType}" does not support session resume` });
+        if (!res.writableEnded) res.status(400).json({ error: `Agent type "${agentType}" does not support session resume` });
         return;
       }
 
@@ -205,13 +205,20 @@ router.post("/api/sessions/:id/run", async (req, res) => {
       // Re-sync this session after running a prompt (new data in JSONL)
       syncSession(sessionId);
 
-      res.json({ output, suggestions });
+      // Guard: response may have been destroyed by socket timeout during the long CLI run
+      if (!res.writableEnded) {
+        res.json({ output, suggestions });
+      } else {
+        log.warn(`POST /api/sessions/${sessionId.slice(0, 8)}/run: response already closed (client timeout?), discarding output`);
+      }
     } finally {
       releaseSessionLock(sessionId);
     }
   } catch (err) {
     log.error(`POST /api/sessions/:id/run failed: ${String(err)}`);
-    res.status(500).json({ error: safeError(err) });
+    if (!res.writableEnded) {
+      res.status(500).json({ error: safeError(err) });
+    }
   }
 });
 

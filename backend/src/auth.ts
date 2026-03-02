@@ -2,21 +2,23 @@ import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Request, Response, NextFunction } from "express";
-import { CLAWUI_DB_DIR, CLAWUI_DEV } from "./config.js";
+import { CLAWUI_DB_DIR } from "./config.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("auth");
 
-const DEV_MODE = CLAWUI_DEV;
 const tokenDir = CLAWUI_DB_DIR;
 const tokenPath = join(tokenDir, "auth-token");
 
 function resolveToken(): string {
-  // In dev mode, reuse existing token file if present
-  if (DEV_MODE && existsSync(tokenPath)) {
+  // Always reuse existing token file if present. The token is persisted on disk
+  // and embedded in session JSONLs (via blueprint execution callback URLs).
+  // Rotating it on restart would invalidate all in-flight and historical tokens,
+  // causing auth failures when sessions are resumed or agents call back.
+  if (existsSync(tokenPath)) {
     const existing = readFileSync(tokenPath, "utf-8").trim();
     if (existing) {
-      log.info("Dev mode: reusing existing auth token");
+      log.info("Reusing existing auth token from disk");
       return existing;
     }
   }

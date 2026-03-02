@@ -17,7 +17,8 @@ interface Block {
 }
 
 function parseBlocks(text: string): Block[] {
-  const lines = text.split("\n");
+  // Normalize line endings: strip \r to prevent regex $ anchor mismatches
+  const lines = text.replace(/\r/g, "").split("\n");
   const blocks: Block[] = [];
   let i = 0;
 
@@ -109,6 +110,11 @@ function parseBlocks(text: string): Block[] {
     }
     if (paraLines.length > 0) {
       blocks.push({ type: "paragraph", content: paraLines.join("\n") });
+    } else {
+      // Safety: if no handler consumed this line (e.g., a line that looks like
+      // a heading/list start but failed the stricter outer regex), force advance
+      // to prevent an infinite loop.
+      i++;
     }
   }
 

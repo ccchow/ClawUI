@@ -8,6 +8,7 @@
 // Uses vi.resetModules + dynamic import for module-level code re-execution.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { join } from "node:path";
 
 // ─── Shared mock functions ───────────────────────────────────
 
@@ -43,6 +44,11 @@ vi.mock("../logger.js", () => ({
 const mockRegisterRuntime = vi.fn();
 vi.mock("../agent-runtime.js", () => ({
   registerRuntime: mockRegisterRuntime,
+}));
+
+// Mock config.js — path resolution is centralized there; agent file imports it.
+vi.mock("../config.js", () => ({
+  CODEX_PATH: "/mock/codex",
 }));
 
 // ─── Helper: dynamic import with module reset ─────────────────
@@ -521,6 +527,50 @@ describe("CodexAgentRuntime", () => {
       const runtime = new CodexAgentRuntime();
       expect(runtime.encodeProjectCwd("relative/path")).toBe("relative-path");
     });
+
+    // ─── Windows-specific path encoding ─────────────────────
+    // Mocked-platform test: these tests use string literals (not path.join), so
+    // they work identically on any OS. Validated against real Windows CI in
+    // windows-real-platform.test.ts. Last cross-validated: 2026-03-02
+    //
+    // Note: C:\ produces "C--" because colon→"-" and backslash→"-" are adjacent.
+    // This is consistent with the cross-platform encoding pattern in cli-utils.ts.
+    it("encodes Windows path with drive letter and backslashes", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\Users\\dev\\project")).toBe("C--Users-dev-project");
+    });
+
+    it("encodes UNC path (\\\\server\\share\\project)", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      // UNC \\server → strip leading dash leaves -server (only one dash stripped)
+      expect(runtime.encodeProjectCwd("\\\\server\\share\\project")).toBe("-server-share-project");
+    });
+
+    it("forward slash paths still work (regression)", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      expect(runtime.encodeProjectCwd("/Users/dev/project")).toBe("Users-dev-project");
+    });
+
+    it("encodes Windows path with deeply nested directories", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      expect(runtime.encodeProjectCwd("D:\\Work\\repos\\my-org\\my-project")).toBe("D--Work-repos-my-org-my-project");
+    });
+
+    it("handles mixed separator path (forward and back slashes)", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\Users/dev\\project")).toBe("C--Users-dev-project");
+    });
+
+    it("handles bare drive letter path", async () => {
+      const { CodexAgentRuntime } = await importCodex();
+      const runtime = new CodexAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\")).toBe("C--");
+    });
   });
 
   describe("cleanEnv", () => {
@@ -701,7 +751,7 @@ describe("CodexAgentRuntime", () => {
         return [];
       });
 
-      const sessionFilePath = `${sessionsDir}/2025/06/15/rollout-20250615-sess-abc.jsonl`;
+      const sessionFilePath = join(sessionsDir, "2025", "06", "15", "rollout-20250615-sess-abc.jsonl");
 
       mockStatSync.mockImplementation((path: string) => {
         if (path === sessionFilePath) {
@@ -738,7 +788,7 @@ describe("CodexAgentRuntime", () => {
         return [];
       });
 
-      const sessionFilePath = `${sessionsDir}/2025/06/15/rollout-20250615-sess-xyz.jsonl`;
+      const sessionFilePath = join(sessionsDir, "2025", "06", "15", "rollout-20250615-sess-xyz.jsonl");
 
       mockStatSync.mockImplementation((path: string) => {
         if (path === sessionFilePath) {
@@ -775,7 +825,7 @@ describe("CodexAgentRuntime", () => {
         return [];
       });
 
-      const sessionFilePath = `${sessionsDir}/2025/06/15/rollout-20250615-sess-old.jsonl`;
+      const sessionFilePath = join(sessionsDir, "2025", "06", "15", "rollout-20250615-sess-old.jsonl");
 
       mockStatSync.mockImplementation((path: string) => {
         if (path === sessionFilePath) {

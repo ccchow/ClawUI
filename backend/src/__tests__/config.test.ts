@@ -1,6 +1,6 @@
 // backend/src/__tests__/config.test.ts
 //
-// Tests for resolveClaudePath() and resolveExpectPath() which run at import time.
+// Tests for resolve*Path() functions which run at import time.
 // We must mock `process.platform`, `process.env`, `node:child_process`, `node:fs`,
 // and `./cli-utils.js` (to avoid circular imports), then use `vi.resetModules()` +
 // dynamic `await import()` for each test to re-trigger the module-level code.
@@ -42,10 +42,11 @@ describe("config.ts", () => {
   afterEach(() => {
     Object.defineProperty(process, "platform", { value: originalPlatform });
     // Restore only the env vars we may have changed
-    process.env.CLAUDE_PATH = originalEnv.CLAUDE_PATH;
-    process.env.EXPECT_PATH = originalEnv.EXPECT_PATH;
-    if (originalEnv.CLAUDE_PATH === undefined) delete process.env.CLAUDE_PATH;
-    if (originalEnv.EXPECT_PATH === undefined) delete process.env.EXPECT_PATH;
+    const envKeys = ["CLAUDE_PATH", "EXPECT_PATH", "OPENCLAW_PATH", "CODEX_PATH", "PI_PATH"];
+    for (const key of envKeys) {
+      if (originalEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
   });
 
   // ─── resolveClaudePath ──────────────────────────────────────
@@ -57,6 +58,10 @@ describe("config.ts", () => {
       expect(CLAUDE_PATH).toBe("/custom/claude");
     });
 
+    // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+    // All fs/child_process calls are mocked; tests verify branching logic only.
+    // Validated against real Windows CI in windows-real-platform.test.ts.
+    // Last cross-validated: 2026-03-02
     describe("Windows", () => {
       beforeEach(() => {
         Object.defineProperty(process, "platform", { value: "win32" });
@@ -84,11 +89,56 @@ describe("config.ts", () => {
         );
       });
 
+      it("finds claude.cmd in .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".npm-global") && String(p).endsWith("claude.cmd");
+        });
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toContain("claude.cmd");
+        expect(CLAUDE_PATH).toContain(".npm-global");
+      });
+
+      it("prefers AppData/npm over .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return (s.includes("AppData") && s.endsWith("claude.cmd")) ||
+                 (s.includes(".npm-global") && s.endsWith("claude.cmd"));
+        });
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toContain("AppData");
+      });
+
+      it("handles where.exe returning multiple lines (picks first)", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\first\\claude.exe\r\nC:\\second\\claude.exe\r\n");
+        const { CLAUDE_PATH } = await import("../config.js");
+        expect(CLAUDE_PATH).toBe("C:\\first\\claude.exe");
+      });
+
+      it("falls back to bare 'claude' when where.exe returns empty", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("  \r\n");
+        const { CLAUDE_PATH } = await import("../config.js");
+        // empty after trim → falsy → falls through to bare "claude"
+        expect(CLAUDE_PATH).toBe("claude");
+      });
+
       it("falls back to bare 'claude' when where.exe fails", async () => {
         mockExistsSync.mockReturnValue(false);
         mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
         const { CLAUDE_PATH } = await import("../config.js");
         expect(CLAUDE_PATH).toBe("claude");
+      });
+
+      it("passes windowsHide: true to where.exe", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\bin\\claude.exe\r\n");
+        await import("../config.js");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "where",
+          ["claude"],
+          expect.objectContaining({ windowsHide: true }),
+        );
       });
     });
 
@@ -169,6 +219,9 @@ describe("config.ts", () => {
   // ─── resolveExpectPath ──────────────────────────────────────
 
   describe("resolveExpectPath", () => {
+    // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+    // Validated against real Windows CI in windows-real-platform.test.ts.
+    // Last cross-validated: 2026-03-02
     describe("Windows", () => {
       beforeEach(() => {
         Object.defineProperty(process, "platform", { value: "win32" });
@@ -275,6 +328,396 @@ describe("config.ts", () => {
         });
         const { EXPECT_PATH } = await import("../config.js");
         expect(EXPECT_PATH).toBe("/usr/local/bin/expect");
+      });
+    });
+  });
+
+  // ─── resolveOpenClawPath ──────────────────────────────────
+
+  describe("resolveOpenClawPath", () => {
+    it("uses OPENCLAW_PATH env var when set", async () => {
+      process.env.CLAUDE_PATH = "claude"; // skip claude resolution
+      process.env.OPENCLAW_PATH = "/custom/openclaw";
+      const { OPENCLAW_PATH } = await import("../config.js");
+      expect(OPENCLAW_PATH).toBe("/custom/openclaw");
+    });
+
+    // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+    // Validated against real Windows CI in windows-real-platform.test.ts.
+    // Last cross-validated: 2026-03-02
+    describe("Windows", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "win32" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.OPENCLAW_PATH;
+      });
+
+      it("finds openclaw.cmd in AppData/npm", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes("AppData") && String(p).endsWith("openclaw.cmd");
+        });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toContain("openclaw.cmd");
+        expect(OPENCLAW_PATH).toContain("AppData");
+      });
+
+      it("finds openclaw.cmd in .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".npm-global") && String(p).endsWith("openclaw.cmd");
+        });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toContain("openclaw.cmd");
+        expect(OPENCLAW_PATH).toContain(".npm-global");
+      });
+
+      it("uses 'where' for PATH lookup on Windows", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\tools\\openclaw.exe\r\n");
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBe("C:\\tools\\openclaw.exe");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "where",
+          ["openclaw"],
+          expect.objectContaining({ encoding: "utf-8", timeout: 5000, windowsHide: true }),
+        );
+      });
+
+      it("returns null when where.exe fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBeNull();
+      });
+
+      it("handles where.exe returning multiple lines (picks first)", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\first\\openclaw.exe\r\nC:\\second\\openclaw.exe\r\n");
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBe("C:\\first\\openclaw.exe");
+      });
+
+      it("prefers AppData/npm over .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return (s.includes("AppData") && s.endsWith("openclaw.cmd")) ||
+                 (s.includes(".npm-global") && s.endsWith("openclaw.cmd"));
+        });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toContain("AppData");
+      });
+
+      it("returns null when where.exe returns empty output", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("  \r\n");
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBeNull();
+      });
+    });
+
+    describe("Unix", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.OPENCLAW_PATH;
+      });
+
+      it("finds ~/.local/bin/openclaw", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".local") && String(p).endsWith("openclaw");
+        });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toContain("openclaw");
+        expect(OPENCLAW_PATH).toContain(".local");
+      });
+
+      it("uses /usr/bin/which for PATH lookup on Unix", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("/opt/bin/openclaw\n");
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBe("/opt/bin/openclaw");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "/usr/bin/which",
+          ["openclaw"],
+          expect.objectContaining({ encoding: "utf-8" }),
+        );
+      });
+
+      it("returns null when which fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { OPENCLAW_PATH } = await import("../config.js");
+        expect(OPENCLAW_PATH).toBeNull();
+      });
+    });
+  });
+
+  // ─── resolveCodexPath ─────────────────────────────────────
+
+  describe("resolveCodexPath", () => {
+    it("uses CODEX_PATH env var when set", async () => {
+      process.env.CLAUDE_PATH = "claude";
+      process.env.CODEX_PATH = "/custom/codex";
+      const { CODEX_PATH } = await import("../config.js");
+      expect(CODEX_PATH).toBe("/custom/codex");
+    });
+
+    // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+    // Validated against real Windows CI in windows-real-platform.test.ts.
+    // Last cross-validated: 2026-03-02
+    describe("Windows", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "win32" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.CODEX_PATH;
+      });
+
+      it("finds codex.cmd in AppData/npm", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes("AppData") && String(p).endsWith("codex.cmd");
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toContain("codex.cmd");
+        expect(CODEX_PATH).toContain("AppData");
+      });
+
+      it("finds codex.cmd in .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".npm-global") && String(p).endsWith("codex.cmd");
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toContain("codex.cmd");
+        expect(CODEX_PATH).toContain(".npm-global");
+      });
+
+      it("uses 'where' for PATH lookup on Windows", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\tools\\codex.exe\r\n");
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBe("C:\\tools\\codex.exe");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "where",
+          ["codex"],
+          expect.objectContaining({ encoding: "utf-8", timeout: 5000, windowsHide: true }),
+        );
+      });
+
+      it("returns null when where.exe fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBeNull();
+      });
+
+      it("handles where.exe returning multiple lines (picks first)", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\first\\codex.exe\r\nC:\\second\\codex.exe\r\n");
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBe("C:\\first\\codex.exe");
+      });
+
+      it("prefers AppData/npm over .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return (s.includes("AppData") && s.endsWith("codex.cmd")) ||
+                 (s.includes(".npm-global") && s.endsWith("codex.cmd"));
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toContain("AppData");
+      });
+
+      it("returns null when where.exe returns empty output", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("  \r\n");
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBeNull();
+      });
+    });
+
+    describe("Unix", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.CODEX_PATH;
+      });
+
+      it("finds ~/.local/bin/codex", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".local") && String(p).endsWith("codex");
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toContain("codex");
+        expect(CODEX_PATH).toContain(".local");
+      });
+
+      it("finds /opt/homebrew/bin/codex", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/opt/homebrew/bin/codex";
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBe("/opt/homebrew/bin/codex");
+      });
+
+      it("finds /usr/local/bin/codex", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/usr/local/bin/codex";
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBe("/usr/local/bin/codex");
+      });
+
+      it("uses /usr/bin/which for PATH lookup on Unix", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("/opt/bin/codex\n");
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBe("/opt/bin/codex");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "/usr/bin/which",
+          ["codex"],
+          expect.objectContaining({ encoding: "utf-8" }),
+        );
+      });
+
+      it("returns null when which fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toBeNull();
+      });
+
+      it("prefers ~/.local/bin/codex over /opt/homebrew/bin/codex", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return (s.includes(".local") && s.endsWith("codex")) || s === "/opt/homebrew/bin/codex";
+        });
+        const { CODEX_PATH } = await import("../config.js");
+        expect(CODEX_PATH).toContain(".local");
+      });
+    });
+  });
+
+  // ─── resolvePiPath ────────────────────────────────────────
+
+  describe("resolvePiPath", () => {
+    it("uses PI_PATH env var when set", async () => {
+      process.env.CLAUDE_PATH = "claude";
+      process.env.PI_PATH = "/custom/pi-mono";
+      const { PI_PATH } = await import("../config.js");
+      expect(PI_PATH).toBe("/custom/pi-mono");
+    });
+
+    // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+    // Validated against real Windows CI in windows-real-platform.test.ts.
+    // Last cross-validated: 2026-03-02
+    describe("Windows", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "win32" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.PI_PATH;
+      });
+
+      it("finds pi-mono.cmd in AppData/npm", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes("AppData") && String(p).endsWith("pi-mono.cmd");
+        });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toContain("pi-mono.cmd");
+        expect(PI_PATH).toContain("AppData");
+      });
+
+      it("finds pi-mono.cmd in .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".npm-global") && String(p).endsWith("pi-mono.cmd");
+        });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toContain("pi-mono.cmd");
+        expect(PI_PATH).toContain(".npm-global");
+      });
+
+      it("uses 'where' for PATH lookup on Windows", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\tools\\pi-mono.exe\r\n");
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBe("C:\\tools\\pi-mono.exe");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "where",
+          ["pi-mono"],
+          expect.objectContaining({ encoding: "utf-8", timeout: 5000, windowsHide: true }),
+        );
+      });
+
+      it("returns null when where.exe fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBeNull();
+      });
+
+      it("handles where.exe returning multiple lines (picks first)", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("C:\\first\\pi-mono.exe\r\nC:\\second\\pi-mono.exe\r\n");
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBe("C:\\first\\pi-mono.exe");
+      });
+
+      it("prefers AppData/npm over .npm-global", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          const s = String(p);
+          return (s.includes("AppData") && s.endsWith("pi-mono.cmd")) ||
+                 (s.includes(".npm-global") && s.endsWith("pi-mono.cmd"));
+        });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toContain("AppData");
+      });
+
+      it("returns null when where.exe returns empty output", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("  \r\n");
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBeNull();
+      });
+    });
+
+    describe("Unix", () => {
+      beforeEach(() => {
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        process.env.CLAUDE_PATH = "claude";
+        delete process.env.PI_PATH;
+      });
+
+      it("finds ~/.local/bin/pi-mono", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p).includes(".local") && String(p).endsWith("pi-mono");
+        });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toContain("pi-mono");
+        expect(PI_PATH).toContain(".local");
+      });
+
+      it("finds /usr/local/bin/pi-mono", async () => {
+        mockExistsSync.mockImplementation((p: any) => {
+          return String(p) === "/usr/local/bin/pi-mono";
+        });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBe("/usr/local/bin/pi-mono");
+      });
+
+      it("uses /usr/bin/which for PATH lookup on Unix", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockReturnValue("/opt/bin/pi-mono\n");
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBe("/opt/bin/pi-mono");
+        expect(mockExecFileSync).toHaveBeenCalledWith(
+          "/usr/bin/which",
+          ["pi-mono"],
+          expect.objectContaining({ encoding: "utf-8" }),
+        );
+      });
+
+      it("returns null when which fails and no candidates found", async () => {
+        mockExistsSync.mockReturnValue(false);
+        mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+        const { PI_PATH } = await import("../config.js");
+        expect(PI_PATH).toBeNull();
       });
     });
   });

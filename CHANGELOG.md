@@ -5,6 +5,25 @@ All notable changes to ClawUI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Comprehensive Windows platform support** — All agent runtimes (Claude, OpenClaw, Pi Mono, Codex) now resolve binary paths with `.cmd` shim detection in `AppData/Roaming/npm/` and `.npm-global/`, `where.exe` PATH lookup, and drive-letter colon handling on Windows.
+- **Centralized agent binary resolution in `config.ts`** — `resolveClaudePath()`, `resolveOpenClawPath()`, `resolvePiPath()`, `resolveCodexPath()`, and `resolveExpectPath()` all use `process.platform === "win32"` branches with Windows-specific candidate paths. Agent files import from `config.ts` with bare-command fallback.
+- **Cross-platform `encodeProjectCwd`** — `cli-utils.ts` uses `/[/\\]/g` regex (not `/\//g`) and handles drive letter colons with `/:/g` for Windows backslash paths.
+- **Windows-compatible auth temp directory** — `auth.ts` uses `os.tmpdir()` instead of hardcoded `/tmp` for token file storage.
+- **Windows shell execution in `plan-executor.ts`** — Conditional `shell: true` on Windows for `execFile` calls in plan execution.
+- **CI matrix expansion** — `.github/workflows/ci.yml` updated to include Windows in the test matrix.
+- **New test files** — `windows-agent-smoke.test.ts` (25 tests for cross-platform agent binary resolution) and `windows-real-platform.test.ts` (22 tests for real Windows platform behavior validation).
+- **Expanded `config.test.ts` coverage** — 453+ lines added covering Windows `.cmd` shim resolution, `where.exe` fallback, Unix candidate paths, and edge cases for all resolve functions.
+
+### Fixed
+
+- **`MarkdownContent.tsx` rendering** — Fixed rendering issues in the markdown content component.
+- **`index.ts` Windows compatibility** — Server startup adjustments for Windows platform.
+- **`routes.ts` Windows path handling** — Route handlers updated for cross-platform path operations.
+
 ## [0.4.0] - 2026-03-01
 
 ### Added

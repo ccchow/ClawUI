@@ -8,11 +8,17 @@ import { homedir } from "node:os";
 
 /**
  * Build a clean environment for spawning Claude CLI subprocesses.
- * Strips CLAUDECODE to prevent "cannot be launched inside another Claude Code session".
+ * Strips Claude Code env vars that leak from the parent process and can
+ * confuse the spawned CLI (e.g., entrypoint detection, nested-session guard,
+ * experimental flags).
  */
 export function cleanEnvForClaude(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.CLAUDECODE;
+  // Remove all CLAUDE* env vars set by the parent Claude Code session
+  for (const key of Object.keys(env)) {
+    if (key === "CLAUDE_PATH") continue; // keep our own explicit config
+    if (key.startsWith("CLAUDE")) delete env[key];
+  }
   return env;
 }
 

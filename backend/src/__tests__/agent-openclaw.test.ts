@@ -7,7 +7,7 @@
 // Uses vi.mock for child_process, fs, crypto to avoid needing a real openclaw binary.
 // Uses vi.resetModules + dynamic import for module-level code re-execution.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ─── Shared mock functions ───────────────────────────────────
 
@@ -48,6 +48,16 @@ vi.mock("../logger.js", () => ({
 const mockRegisterRuntime = vi.fn();
 vi.mock("../agent-runtime.js", () => ({
   registerRuntime: mockRegisterRuntime,
+}));
+
+// Mock config.js — path resolution is centralized there; agent file imports it.
+// Use vi.hoisted so the mock value is accessible in the vi.mock factory.
+// Getter ensures the value is read dynamically at import time (not captured once).
+const { mockConfigOpenClawPath } = vi.hoisted(() => ({
+  mockConfigOpenClawPath: { value: null as string | null },
+}));
+vi.mock("../config.js", () => ({
+  get OPENCLAW_PATH() { return mockConfigOpenClawPath.value; },
 }));
 
 // ─── Helper: dynamic import with module reset ─────────────────
@@ -618,15 +628,11 @@ describe("OpenClawAgentRuntime", () => {
     mockStatSync.mockReset();
     mockRandomUUID.mockReturnValue("test-uuid-1234");
 
-    // Set OPENCLAW_PATH so module-level resolution doesn't fail
-    process.env.OPENCLAW_PATH = "/mock/openclaw";
+    // Set config mock so module-level OPENCLAW_PATH resolves
+    mockConfigOpenClawPath.value = "/mock/openclaw";
 
     const mod = await importOpenClaw();
     OpenClawAgentRuntime = mod.OpenClawAgentRuntime;
-  });
-
-  afterEach(() => {
-    delete process.env.OPENCLAW_PATH;
   });
 
   describe("type and capabilities", () => {
@@ -662,6 +668,43 @@ describe("OpenClawAgentRuntime", () => {
     it("handles paths without leading slash", () => {
       const runtime = new OpenClawAgentRuntime();
       expect(runtime.encodeProjectCwd("relative/path")).toBe("relative-path");
+    });
+
+    // ─── Windows-specific path encoding ─────────────────────
+    // Mocked-platform test: these tests use string literals (not path.join), so
+    // they work identically on any OS. Validated against real Windows CI in
+    // windows-real-platform.test.ts. Last cross-validated: 2026-03-02
+    //
+    // Note: C:\ produces "C--" because colon→"-" and backslash→"-" are adjacent.
+    it("encodes Windows path with drive letter and backslashes", () => {
+      const runtime = new OpenClawAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\Users\\dev\\project")).toBe("C--Users-dev-project");
+    });
+
+    it("encodes UNC path (\\\\server\\share\\project)", () => {
+      const runtime = new OpenClawAgentRuntime();
+      // UNC \\server → strip leading dash leaves -server (only one dash stripped)
+      expect(runtime.encodeProjectCwd("\\\\server\\share\\project")).toBe("-server-share-project");
+    });
+
+    it("encodes mixed separator path (C:\\Users/dev\\project)", () => {
+      const runtime = new OpenClawAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\Users/dev\\project")).toBe("C--Users-dev-project");
+    });
+
+    it("forward slash paths still work (regression)", () => {
+      const runtime = new OpenClawAgentRuntime();
+      expect(runtime.encodeProjectCwd("/home/user/code")).toBe("home-user-code");
+    });
+
+    it("handles bare drive letter path", () => {
+      const runtime = new OpenClawAgentRuntime();
+      expect(runtime.encodeProjectCwd("C:\\")).toBe("C--");
+    });
+
+    it("handles Windows path with deeply nested directories", () => {
+      const runtime = new OpenClawAgentRuntime();
+      expect(runtime.encodeProjectCwd("D:\\Work\\repos\\my-org\\my-project")).toBe("D--Work-repos-my-org-my-project");
     });
   });
 
@@ -1015,40 +1058,24 @@ describe("OpenClawAgentRuntime", () => {
 
 describe("self-registration", () => {
   it("registers openclaw runtime factory on module import", async () => {
-    mockExistsSync.mockReturnValue(false);
-    mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
-    process.env.OPENCLAW_PATH = "/mock/openclaw";
+    mockConfigOpenClawPath.value = "/mock/openclaw";
 
     await importOpenClaw();
 
     expect(mockRegisterRuntime).toHaveBeenCalledWith("openclaw", expect.any(Function));
-
-    delete process.env.OPENCLAW_PATH;
   });
 });
 
-// ─── resolveOpenClawPath (module-level) ─────────────────────
+// ─── OPENCLAW_PATH (from config.ts import) ─────────────────────
 
-describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
-  const originalOpenClawPath = process.env.OPENCLAW_PATH;
-
+describe("OPENCLAW_PATH (imported from config.ts)", () => {
   beforeEach(() => {
     vi.resetModules();
     mockExecFile.mockReset();
-    mockExecFileSync.mockReset();
-    mockExistsSync.mockReturnValue(false);
   });
 
-  afterEach(() => {
-    if (originalOpenClawPath === undefined) {
-      delete process.env.OPENCLAW_PATH;
-    } else {
-      process.env.OPENCLAW_PATH = originalOpenClawPath;
-    }
-  });
-
-  it("uses OPENCLAW_PATH env var when set", async () => {
-    process.env.OPENCLAW_PATH = "/custom/openclaw";
+  it("uses config.ts OPENCLAW_PATH when set", async () => {
+    mockConfigOpenClawPath.value = "/custom/openclaw";
 
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();
@@ -1062,62 +1089,8 @@ describe("resolveOpenClawPath (via module-level OPENCLAW_PATH)", () => {
     expect(mockExecFile.mock.calls[0][0]).toBe("/custom/openclaw");
   });
 
-  it("finds ~/.local/bin/openclaw when it exists", async () => {
-    delete process.env.OPENCLAW_PATH;
-    mockExistsSync.mockImplementation((p: unknown) => {
-      return String(p).includes(".local/bin/openclaw") || String(p).includes(".local\\bin\\openclaw");
-    });
-
-    const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
-    const runtime = new OpenClawAgentRuntime();
-
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
-      cb(null, '{"message":{"content":"ok"}}', "");
-      return { pid: 1 };
-    });
-
-    await runtime.runSession("test");
-    expect(mockExecFile.mock.calls[0][0]).toContain(".local");
-    expect(mockExecFile.mock.calls[0][0]).toContain("openclaw");
-  });
-
-  it("finds /usr/local/bin/openclaw", async () => {
-    delete process.env.OPENCLAW_PATH;
-    mockExistsSync.mockImplementation((p: unknown) => String(p) === "/usr/local/bin/openclaw");
-
-    const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
-    const runtime = new OpenClawAgentRuntime();
-
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
-      cb(null, '{"message":{"content":"ok"}}', "");
-      return { pid: 1 };
-    });
-
-    await runtime.runSession("test");
-    expect(mockExecFile.mock.calls[0][0]).toBe("/usr/local/bin/openclaw");
-  });
-
-  it("falls back to which when no candidates exist", async () => {
-    delete process.env.OPENCLAW_PATH;
-    mockExistsSync.mockReturnValue(false);
-    mockExecFileSync.mockReturnValue("/opt/bin/openclaw\n");
-
-    const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
-    const runtime = new OpenClawAgentRuntime();
-
-    mockExecFile.mockImplementation((_cmd: string, _args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
-      cb(null, '{"message":{"content":"ok"}}', "");
-      return { pid: 1 };
-    });
-
-    await runtime.runSession("test");
-    expect(mockExecFile.mock.calls[0][0]).toBe("/opt/bin/openclaw");
-  });
-
-  it("falls back to bare 'openclaw' when which fails", async () => {
-    delete process.env.OPENCLAW_PATH;
-    mockExistsSync.mockReturnValue(false);
-    mockExecFileSync.mockImplementation(() => { throw new Error("not found"); });
+  it("falls back to bare 'openclaw' when config.ts returns null", async () => {
+    mockConfigOpenClawPath.value = null;
 
     const { OpenClawAgentRuntime } = await import("../agent-openclaw.js");
     const runtime = new OpenClawAgentRuntime();

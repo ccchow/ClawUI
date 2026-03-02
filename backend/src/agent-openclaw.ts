@@ -12,7 +12,7 @@
  *   Message types: "message", "skill_call", "tool_call", "model_change", "thinking_level_change"
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
@@ -24,6 +24,7 @@ import type { TimelineNode } from "./jsonl-parser.js";
 import type { FailureReason } from "./plan-db.js";
 import type { ContextPressure, SessionAnalysis } from "./jsonl-parser.js";
 import { readSessionHeader } from "./session-header.js";
+import { OPENCLAW_PATH as CONFIG_OPENCLAW_PATH } from "./config.js";
 
 const log = createLogger("agent-openclaw");
 
@@ -31,40 +32,8 @@ const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
 
 // ─── Binary resolution ──────────────────────────────────────
 
-/**
- * Resolve the path to the OpenClaw CLI binary.
- * Priority: OPENCLAW_PATH env → common install locations → PATH lookup via `which`.
- */
-function resolveOpenClawPath(): string {
-  if (process.env.OPENCLAW_PATH) {
-    return process.env.OPENCLAW_PATH;
-  }
-
-  // Common install locations
-  const candidates = [
-    join(homedir(), ".local", "bin", "openclaw"),
-    "/usr/local/bin/openclaw",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  // PATH lookup via `which`
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["openclaw"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // `which` failed — openclaw not in PATH
-  }
-
-  // Last resort: bare command name (will fail at runtime if not in PATH)
-  return "openclaw";
-}
-
-/** Resolved path to OpenClaw CLI binary. */
-const OPENCLAW_PATH = resolveOpenClawPath();
+/** Resolved path to OpenClaw CLI binary (from config.ts, with bare-command fallback). */
+const OPENCLAW_PATH = CONFIG_OPENCLAW_PATH ?? "openclaw";
 
 // ─── Session JSONL types ────────────────────────────────────
 
@@ -365,8 +334,12 @@ export class OpenClawAgentRuntime implements AgentRuntime {
 
   encodeProjectCwd(cwd: string): string {
     // OpenClaw uses agent-name-based dirs, not path encoding.
-    // Return a sanitized version of the path for directory matching.
-    return cwd.replace(/\//g, "-").replace(/^-/, "");
+    // Cross-platform: handle both / and \ separators, plus drive letter colons.
+    return cwd
+      .replace(/:/g, "-")          // drive letter colon (C: → C-)
+      .replace(/[/\\]\./g, "/-")   // encode leading dots in path components
+      .replace(/[/\\]/g, "-")      // both / and \ separators
+      .replace(/^-/, "");          // strip leading dash
   }
 
   cleanEnv(): NodeJS.ProcessEnv {

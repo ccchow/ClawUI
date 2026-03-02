@@ -45,7 +45,15 @@ function spawnClaudeWindows(
       shell: useShell,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      // Detach so the CLI process survives backend restarts (tsx watch).
+      // On Unix, expect-spawned children are naturally orphaned to init;
+      // on Windows, children in the same process group are killed together.
+      detached: true,
     });
+
+    // Allow the backend to exit without waiting for this child.
+    // We still collect output via the piped stdio streams.
+    child.unref();
 
     const pid = child.pid;
     child.stdin.end();

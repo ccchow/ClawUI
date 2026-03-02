@@ -16,7 +16,7 @@
  *   usage: {input, output, totalTokens}
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, basename } from "node:path";
@@ -26,6 +26,7 @@ import { registerRuntime } from "./agent-runtime.js";
 import type { TimelineNode } from "./jsonl-parser.js";
 import type { FailureReason } from "./plan-db.js";
 import type { ContextPressure, SessionAnalysis } from "./jsonl-parser.js";
+import { PI_PATH as CONFIG_PI_PATH } from "./config.js";
 
 const log = createLogger("agent-pimono");
 
@@ -33,49 +34,8 @@ const EXEC_TIMEOUT = 30 * 60 * 1000; // 30 minutes per node
 
 // ─── Binary resolution ──────────────────────────────────────
 
-/**
- * Resolve the path to the Pi CLI binary.
- * Priority: PI_PATH env → common install locations → PATH lookup via `which` → npx fallback.
- */
-function resolvePiPath(): string {
-  if (process.env.PI_PATH) {
-    return process.env.PI_PATH;
-  }
-
-  // Common install locations
-  const candidates = [
-    join(homedir(), ".local", "bin", "pi"),
-    "/usr/local/bin/pi",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  // PATH lookup via `which`
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["pi"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch {
-    // `which` failed — pi not in PATH
-  }
-
-  // Check if npx can find it
-  try {
-    execFileSync("/usr/bin/which", ["npx"], { encoding: "utf-8" }).trim();
-    // npx is available — caller will use npx @mariozechner/pi-coding-agent
-    return "npx";
-  } catch {
-    // npx not found either
-  }
-
-  // Last resort: bare command name (will fail at runtime if not in PATH)
-  return "pi";
-}
-
-/** Resolved path to Pi CLI binary (or "npx" for npx-based invocation). */
-const PI_PATH = resolvePiPath();
+/** Resolved path to Pi CLI binary (from config.ts, with bare-command fallback). */
+const PI_PATH = CONFIG_PI_PATH ?? "pi";
 
 // ─── Session JSONL types ────────────────────────────────────
 
@@ -336,7 +296,11 @@ export class PiMonoAgentRuntime implements AgentRuntime {
 
   encodeProjectCwd(cwd: string): string {
     // Pi Mono encoding: /Users/foo/bar → --Users-foo-bar--
-    const encoded = cwd.replace(/\//g, "-");
+    // Cross-platform: handle both / and \ separators, plus drive letter colons.
+    const encoded = cwd
+      .replace(/:/g, "-")          // drive letter colon (C: → C-)
+      .replace(/[/\\]\./g, "/-")   // encode leading dots in path components
+      .replace(/[/\\]/g, "-");     // both / and \ separators
     return `-${encoded}-`;
   }
 

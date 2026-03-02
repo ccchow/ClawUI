@@ -41,7 +41,9 @@ jobs:
         run: npm run build
 
       - name: Run backend tests
-        run: cd backend && npx vitest run
+        run: npx vitest run
+        working-directory: backend
 
       - name: Run frontend tests
-        run: cd frontend && npx vitest run
+        run: npx vitest run
+        working-directory: frontend

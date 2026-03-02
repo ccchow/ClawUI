@@ -649,6 +649,11 @@ describe("summarize edge cases", () => {
 
 // ─── decodeProjectPath: platform-mocked tests ────────────────
 
+// Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+// Uses flexible assertions (allows undefined or valid path) because os.homedir()
+// and path.join() are native calls unaffected by platform mocking.
+// Validated against real Windows CI in windows-real-platform.test.ts.
+// Last cross-validated: 2026-03-02
 describe("decodeProjectPath (Windows)", () => {
   const originalPlatform = process.platform;
 
@@ -692,6 +697,10 @@ describe("decodeProjectPath (Windows)", () => {
   });
 });
 
+// Mocked-platform test: simulates Unix (darwin) on any OS by overriding process.platform.
+// Uses flexible assertions because the filesystem walk uses native path.join().
+// On Windows hosts, path.join() still produces backslashes even with mocked platform.
+// Last cross-validated: 2026-03-02
 describe("decodeProjectPath (Unix)", () => {
   const originalPlatform = process.platform;
 
@@ -736,6 +745,8 @@ describe("decodeProjectPath (Unix)", () => {
   });
 });
 
+// Mocked-platform test: simulates macOS on any OS by overriding process.platform.
+// Last cross-validated: 2026-03-02
 describe("decodeProjectPath (macOS)", () => {
   const originalPlatform = process.platform;
 

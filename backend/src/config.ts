@@ -133,17 +133,37 @@ function resolveOpenClawPath(): string | null {
   if (process.env.OPENCLAW_PATH) {
     return process.env.OPENCLAW_PATH;
   }
-  const candidates = [
-    join(homedir(), ".local", "bin", "openclaw"),
-    "/usr/local/bin/openclaw",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+
+  if (process.platform === "win32") {
+    const winCandidates = [
+      join(homedir(), "AppData", "Roaming", "npm", "openclaw.cmd"),
+      join(homedir(), ".npm-global", "openclaw.cmd"),
+    ];
+    for (const candidate of winCandidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("where", ["openclaw"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        windowsHide: true,
+      }).trim().split(/\r?\n/)[0];
+      if (resolved) return resolved;
+    } catch { /* where failed */ }
+  } else {
+    const candidates = [
+      join(homedir(), ".local", "bin", "openclaw"),
+      "/usr/local/bin/openclaw",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("/usr/bin/which", ["openclaw"], { encoding: "utf-8" }).trim();
+      if (resolved) return resolved;
+    } catch { /* not in PATH */ }
   }
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["openclaw"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch { /* not in PATH */ }
+
   return null;
 }
 
@@ -164,17 +184,37 @@ function resolvePiPath(): string | null {
   if (process.env.PI_PATH) {
     return process.env.PI_PATH;
   }
-  const candidates = [
-    join(homedir(), ".local", "bin", "pi-mono"),
-    "/usr/local/bin/pi-mono",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+
+  if (process.platform === "win32") {
+    const winCandidates = [
+      join(homedir(), "AppData", "Roaming", "npm", "pi-mono.cmd"),
+      join(homedir(), ".npm-global", "pi-mono.cmd"),
+    ];
+    for (const candidate of winCandidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("where", ["pi-mono"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        windowsHide: true,
+      }).trim().split(/\r?\n/)[0];
+      if (resolved) return resolved;
+    } catch { /* where failed */ }
+  } else {
+    const candidates = [
+      join(homedir(), ".local", "bin", "pi-mono"),
+      "/usr/local/bin/pi-mono",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("/usr/bin/which", ["pi-mono"], { encoding: "utf-8" }).trim();
+      if (resolved) return resolved;
+    } catch { /* not in PATH */ }
   }
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["pi-mono"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch { /* not in PATH */ }
+
   return null;
 }
 
@@ -188,18 +228,38 @@ function resolveCodexPath(): string | null {
   if (process.env.CODEX_PATH) {
     return process.env.CODEX_PATH;
   }
-  const candidates = [
-    join(homedir(), ".local", "bin", "codex"),
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex",
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
+
+  if (process.platform === "win32") {
+    const winCandidates = [
+      join(homedir(), "AppData", "Roaming", "npm", "codex.cmd"),
+      join(homedir(), ".npm-global", "codex.cmd"),
+    ];
+    for (const candidate of winCandidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("where", ["codex"], {
+        encoding: "utf-8",
+        timeout: 5000,
+        windowsHide: true,
+      }).trim().split(/\r?\n/)[0];
+      if (resolved) return resolved;
+    } catch { /* where failed */ }
+  } else {
+    const candidates = [
+      join(homedir(), ".local", "bin", "codex"),
+      "/opt/homebrew/bin/codex",
+      "/usr/local/bin/codex",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    try {
+      const resolved = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf-8" }).trim();
+      if (resolved) return resolved;
+    } catch { /* not in PATH */ }
   }
-  try {
-    const resolved = execFileSync("/usr/bin/which", ["codex"], { encoding: "utf-8" }).trim();
-    if (resolved) return resolved;
-  } catch { /* not in PATH */ }
+
   return null;
 }
 

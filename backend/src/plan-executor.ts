@@ -18,6 +18,7 @@ import {
   createRelatedSession,
   completeRelatedSession,
   getInsightsForBlueprint,
+  getExecutionsForNode,
 } from "./plan-db.js";
 import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
@@ -948,19 +949,30 @@ export async function evaluateNodeCompletion(
   const node = blueprint.nodes.find(n => n.id === nodeId);
   if (!node || node.status !== "done") return null;
 
-  // Get the latest output artifact
+  // Get the latest output artifact — fall back to execution summary if artifact
+  // generation failed (e.g., spawn failure on Windows). Evaluation should still
+  // run so the node gets properly assessed.
   const artifacts = getArtifactsForNode(nodeId, "output");
-  if (artifacts.length === 0) {
-    log.debug(`Skipping evaluation for node ${nodeId}: no output artifacts`);
-    return null;
+  let evaluationContent: string;
+  if (artifacts.length > 0) {
+    evaluationContent = artifacts[artifacts.length - 1].content;
+  } else {
+    // Fallback: use the latest execution's output summary
+    const execs = getExecutionsForNode(nodeId);
+    const doneExec = [...execs].reverse().find(e => e.status === "done");
+    if (!doneExec?.outputSummary) {
+      log.debug(`Skipping evaluation for node ${nodeId}: no output artifacts and no execution summary`);
+      return null;
+    }
+    log.info(`Evaluation for node ${nodeId.slice(0, 8)}: no output artifacts, falling back to execution summary`);
+    evaluationContent = doneExec.outputSummary;
   }
-  const latestArtifact = artifacts[artifacts.length - 1];
 
   // Find downstream dependents
   const dependents = blueprint.nodes.filter(n => n.dependencies.includes(nodeId));
 
   // Build evaluation prompt (includes callback URL — Claude calls endpoint directly)
-  const prompt = buildEvaluationPrompt(blueprint, node, latestArtifact.content, dependents, blueprintId, nodeId);
+  const prompt = buildEvaluationPrompt(blueprint, node, evaluationContent, dependents, blueprintId, nodeId);
 
   // Add pending task so frontend knows evaluation is in progress and starts polling
   addPendingTask(blueprintId, { type: "evaluate", nodeId, queuedAt: new Date().toISOString() });

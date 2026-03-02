@@ -53,6 +53,10 @@ describe("cli-utils", () => {
     });
   });
 
+  // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+  // Uses mocked execFileSync for tasklist; does not invoke real tasklist binary.
+  // Validated against real Windows CI in windows-real-platform.test.ts.
+  // Last cross-validated: 2026-03-02
   describe("isProcessAlive (Windows)", () => {
     beforeEach(() => {
       Object.defineProperty(process, "platform", { value: "win32" });
@@ -150,6 +154,10 @@ describe("cli-utils", () => {
 
   // ─── resolveClaudeCliJs: platform-specific tests ─────────────
 
+  // Mocked-platform test: simulates Windows on any OS by overriding process.platform.
+  // Uses mocked existsSync/readFileSync to simulate .cmd shim parsing.
+  // Validated against real Windows CI in windows-real-platform.test.ts.
+  // Last cross-validated: 2026-03-02
   describe("resolveClaudeCliJs (Windows)", () => {
     beforeEach(() => {
       Object.defineProperty(process, "platform", { value: "win32" });

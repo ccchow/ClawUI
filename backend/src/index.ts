@@ -26,7 +26,8 @@ function cliConcurrencyGuard(req: Request, res: Response, next: NextFunction): v
     return;
   }
   inFlightCliRequests++;
-  res.on("finish", () => { inFlightCliRequests--; });
+  // Use "close" only — it always fires (after "finish" if the response completes,
+  // or alone if the socket is destroyed early). Listening to both caused double-decrement.
   res.on("close", () => { inFlightCliRequests--; });
   next();
 }
@@ -134,9 +135,14 @@ app.use((err: Error & { type?: string; status?: number; body?: string }, req: ex
   next(err);
 });
 
-// Increase timeout for long-running Claude CLI calls
-app.use((_req, res, next) => {
-  res.setTimeout(180_000); // 3 minutes
+// Increase timeout for long-running Claude CLI calls.
+// CLI-spawning endpoints (session run, blueprint execution) can take up to 30 minutes.
+// Non-CLI endpoints use a shorter 3-minute timeout.
+app.use((req, res, next) => {
+  const isCliEndpoint =
+    (req.method === "POST" && /\/api\/sessions\/[^/]+\/run$/.test(req.path)) ||
+    (req.method === "POST" && /\/api\/blueprints\/[^/]+\/nodes\/[^/]+\/(run|resume)$/.test(req.path));
+  res.setTimeout(isCliEndpoint ? 35 * 60 * 1000 : 180_000); // 35min for CLI, 3min otherwise
   next();
 });
 
