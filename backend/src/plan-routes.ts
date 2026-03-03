@@ -75,6 +75,25 @@ function safeError(err: unknown): string {
 }
 
 /**
+ * If all nodes in a blueprint are terminal (done/skipped), transition the
+ * blueprint status to "done".  Called after node status updates from API
+ * endpoints (batch update, single-node update) so the blueprint doesn't
+ * stay stuck in "running" when the last node(s) are set to done/skipped
+ * outside the executeAllNodes loop (e.g. via reevaluate or coordinate).
+ */
+function maybeFinalizeBlueprint(blueprintId: string): void {
+  const bp = getBlueprint(blueprintId);
+  if (!bp || bp.status !== "running") return;
+  const allTerminal = bp.nodes.length > 0 && bp.nodes.every(
+    (n) => n.status === "done" || n.status === "skipped",
+  );
+  if (allTerminal) {
+    updateBlueprint(blueprintId, { status: "done" });
+    log.info(`Blueprint ${blueprintId.slice(0, 8)} auto-finalized — all nodes done/skipped`);
+  }
+}
+
+/**
  * Run an agent interactive call with background session detection polling.
  * Creates the related session record with completed_at = NULL as soon as
  * the session file appears (enabling frontend live polling), then marks it
@@ -849,6 +868,11 @@ planRouter.put("/api/blueprints/:blueprintId/nodes/batch", (req, res) => {
       }
     }
 
+    // If any status was updated, check if blueprint should be finalized
+    if (results.some((r) => r.updated)) {
+      maybeFinalizeBlueprint(req.params.blueprintId);
+    }
+
     res.json({ updated: results.filter((r) => r.updated).length, total: updates.length, results });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -1072,6 +1096,10 @@ planRouter.put("/api/blueprints/:blueprintId/nodes/:nodeId", (req, res) => {
     if (!node) {
       res.status(404).json({ error: "Node not found" });
       return;
+    }
+    // Check if blueprint should be finalized after status change
+    if (patch.status) {
+      maybeFinalizeBlueprint(req.params.blueprintId);
     }
     res.json(node);
   } catch (err) {
