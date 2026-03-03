@@ -1,7 +1,7 @@
 <p align="center">
   <img src="docs/images/ClawUI.png" alt="ClawUI Logo" width="240"><br>
   <strong>ClawUI</strong><br>
-  A Claude Code Orchestrator with User/Agent Interface<br><br>
+  A Multi-Agent Orchestrator with User/Agent Interface<br><br>
   <a href="https://github.com/ccchow/ClawUI/actions/workflows/ci.yml"><img src="https://github.com/ccchow/ClawUI/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.npmjs.com/package/@clawui/cli"><img src="https://img.shields.io/npm/v/@clawui/cli.svg" alt="npm version"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg" alt="Node.js >= 20">
@@ -67,8 +67,8 @@ Every Claude Code interaction is captured as a rich, interactive timeline with s
 ### Prerequisites
 
 * **Node.js 20+** and **npm 10+**
-* **Claude Code CLI** installed globally
-* **macOS or Linux** (requires `/usr/bin/expect` for TTY wrapping)
+* **Claude Code CLI** installed globally (or another supported agent — see [Multi-Agent Support](#-multi-agent-support))
+* **macOS, Linux, or Windows** — `expect` is only required for the Claude Code runtime on macOS/Linux (TTY wrapping). Other agent runtimes (Codex, OpenClaw, Pi) work on all platforms without `expect`. On Windows, Claude Code uses direct `CLAUDE_CLI_JS` node invocation instead.
 
 ### Option A: Install via npm (recommended)
 
@@ -217,6 +217,20 @@ A well-configured environment = higher-quality nodes + fewer retries = significa
 
 </details>
 
+<details>
+<summary><b>Blueprint Insights</b></summary>
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/blueprints/:id/insights` | List insights for a blueprint |
+| POST | `/api/blueprints/:id/nodes/:nodeId/insights-callback` | Agent-generated insight callback |
+| POST | `/api/blueprints/:id/insights/:insightId/mark-read` | Mark insight as read |
+| POST | `/api/blueprints/:id/insights/mark-all-read` | Mark all insights as read |
+| POST | `/api/blueprints/:id/insights/:insightId/dismiss` | Dismiss an insight |
+| GET | `/api/insights/unread-count` | Global unread insight count |
+
+</details>
+
 ## Security
 
 * **Localhost-only** — Both backend (:3001) and frontend (:3000) bind to `127.0.0.1`. Remote access via [Tailscale](https://tailscale.com/): `tailscale serve --bg 3000`.
@@ -240,11 +254,51 @@ AGENT_TYPE=openclaw npm run dev
 
 All blueprint operations (generation, execution, evaluation, enrichment) route through the selected agent runtime.
 
+**Agent-specific environment variables:**
+
+| Variable | Description |
+|---|---|
+| `OPENCLAW_PATH` | Custom path to the OpenClaw CLI binary (auto-detected if not set) |
+| `CODEX_PATH` | Custom path to the Codex CLI binary (auto-detected if not set) |
+| `PI_PATH` | Custom path to the Pi Mono CLI binary (auto-detected if not set) |
+| `OPENCLAW_PROFILE` | OpenClaw Docker instance profile name — adds `--profile <name>` to CLI invocations and scans `~/.openclaw/openclaw-<name>/agents/` for Docker sessions |
+
+## 🎭 Role System
+
+Blueprints support a **multi-role mechanism** that tailors execution prompts and evaluation criteria per node:
+
+| Role | Color | Focus |
+|---|---|---|
+| **SDE** (Software Developer) | Blue | Implementation, code quality, architecture |
+| **QA** (Quality Assurance) | Green | Testing, validation, edge cases |
+| **PM** (Product Manager) | Purple | Requirements, acceptance criteria, user stories |
+
+* **Blueprint-level defaults** — Set `enabledRoles` and `defaultRole` on a blueprint. All nodes inherit the default unless overridden.
+* **Node-level override** — Assign specific roles to individual nodes (e.g., a testing node gets QA, a spec node gets PM).
+* **Role-aware prompt assembly** — Each role contributes specialized system instructions, execution context, and artifact format expectations.
+* **UI components** — `RoleBadge` displays the role with its color; `RoleSelector` lets you pick roles during node editing.
+
+## 🔍 Blueprint Insights
+
+The **insight system** provides automated intelligence about blueprint execution:
+
+* **Automatic generation** — Insights are generated during node execution when the agent detects cross-cutting concerns, dependency issues, or optimization opportunities.
+* **Severity levels** — `info` (blue), `warning` (amber), `critical` (red) — each with distinct visual treatment.
+* **NavBar badge** — An unread count dot appears on the Blueprints nav link when new insights arrive.
+* **Actions** — Mark insights as read or dismiss them. Optimistic UI updates keep the experience snappy.
+* **Plan Coordinator** — Reads unread insights and can suggest blueprint graph changes (adding nodes, rewiring dependencies) based on the intelligence gathered.
+
+## 🪟 Windows Support
+
+ClawUI runs on Windows with a few platform-specific notes:
+
+* **No `expect` requirement** — Windows uses direct node invocation for Claude Code and `execFile` for other agent runtimes. No TTY wrapping needed.
+* **CRLF line endings** — `.gitattributes` enforces `eol=lf` for all source files. Windows tools may write CRLF, causing `git add` to fail. Convert with `sed -i 's/\r$//'` before staging.
+* **Drive letter handling** — Path encoding handles Windows drive letter colons (`C:`) correctly across all agent runtimes.
+* **CI coverage** — The CI pipeline runs on both Ubuntu and Windows (Node.js 20 + 22).
+
 ## 🔮 Coming Soon
 
-- **OpenClaw/Pi Support** — Open protocol for agent orchestration UIs to work with any coding agent backend.
-- **Codex CLI Support**
-- **Windows Support**
 - **Parallel node execution** — Run independent nodes concurrently
 - **Blueprint templates** — Reusable task graph patterns
 
