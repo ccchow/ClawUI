@@ -50,7 +50,12 @@ export function RoleSelector({
 
   return (
     <div>
-      {label !== null && <label className="block text-sm text-text-secondary mb-1">{label ?? "Roles"}</label>}
+      {label !== null && (
+        <div className="mb-1">
+          <label className="block text-sm text-text-secondary">{label ?? "Roles"}</label>
+          <span className="block text-xs text-text-muted">Default roles for plan generation and discussions. All roles can be assigned to any node.</span>
+        </div>
+      )}
       <div className="flex gap-2 flex-wrap">
         {roles.map((role) => {
           const colors = ROLE_COLORS[role.id] ?? ROLE_FALLBACK_COLORS;

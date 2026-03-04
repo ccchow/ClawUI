@@ -128,7 +128,7 @@ describe("NewBlueprintPage", () => {
         description: "Some description",
         projectCwd: "/home/user/project",
         agentType: "claude",
-        enabledRoles: ["sde"],
+        enabledRoles: ["sde", "qa", "pm", "uxd"],
         defaultRole: "sde",
       });
     });
@@ -226,7 +226,7 @@ describe("NewBlueprintPage", () => {
         description: undefined,
         projectCwd: undefined,
         agentType: "claude",
-        enabledRoles: ["sde"],
+        enabledRoles: ["sde", "qa", "pm", "uxd"],
         defaultRole: "sde",
       });
     });

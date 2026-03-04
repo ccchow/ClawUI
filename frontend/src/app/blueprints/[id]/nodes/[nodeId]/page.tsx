@@ -1,23 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  type Blueprint,
   type MacroNode,
-  type NodeExecution,
-  type PendingTask,
-  type TimelineNode,
-  type RelatedSession,
-  type NodeSuggestion,
-  getBlueprint,
-  getNodeExecutions,
-  getQueueStatus,
-  getLastSessionMessage,
-  getRelatedSessions,
-  getActiveRelatedSession,
-  getSuggestionsForNode,
   createMacroNode,
   runNode,
   updateMacroNode,
@@ -31,6 +18,7 @@ import {
   smartPickDependencies,
   markSuggestionUsed,
 } from "@/lib/api";
+import { useNodeDetailQueries } from "@/lib/useNodeDetailQueries";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
@@ -62,11 +50,6 @@ export default function NodeDetailPage() {
   const blueprintId = params.id as string;
   const nodeId = params.nodeId as string;
 
-  const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
-  const [node, setNode] = useState<MacroNode | null>(null);
-  const [executions, setExecutions] = useState<NodeExecution[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [depsExpanded, setDepsExpanded] = useState(false);
@@ -76,7 +59,6 @@ export default function NodeDetailPage() {
   const [saving, setSaving] = useState(false);
   const [enriching, setEnriching] = useState(false);
   const [reevaluating, setReevaluating] = useState(false);
-  const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
   const [recovered, setRecovered] = useState(false);
   const [resumingExecId, setResumingExecId] = useState<string | null>(null);
   const [skipping, setSkipping] = useState(false);
@@ -94,24 +76,38 @@ export default function NodeDetailPage() {
   const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
   const [inputArtifactsCollapsed, setInputArtifactsCollapsed] = useState(false);
   const [outputArtifactsCollapsed, setOutputArtifactsCollapsed] = useState(false);
-  const [lastMessage, setLastMessage] = useState<TimelineNode | null>(null);
-  const [activeRelatedSession, setActiveRelatedSession] = useState<RelatedSession | null>(null);
-  const [relatedLastMessage, setRelatedLastMessage] = useState<TimelineNode | null>(null);
-  const [relatedSessions, setRelatedSessions] = useState<RelatedSession[]>([]);
   const [relatedExpanded, setRelatedExpanded] = useState(false);
-  const [suggestions, setSuggestions] = useState<NodeSuggestion[]>([]);
   const [creatingSuggestionId, setCreatingSuggestionId] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const recoveryAttempted = useRef(false);
   const prevStatusRef = useRef<string | null>(null);
   const [postCompletionPolls, setPostCompletionPolls] = useState(0);
   const [recoveryPollDeadline, setRecoveryPollDeadline] = useState<number | null>(null); // epoch ms
   const { showToast } = useToast();
 
+  // TanStack Query: bundles all data fetching with dynamic polling
+  const {
+    blueprint,
+    node,
+    executions,
+    pendingTasks,
+    relatedSessions,
+    suggestions,
+    lastMessage,
+    activeRelatedSession,
+    relatedLastMessage,
+    loading,
+    error,
+    invalidateAll,
+    setNode,
+  } = useNodeDetailQueries(blueprintId, nodeId, {
+    postCompletionPolling: postCompletionPolls > 0,
+    recoveryPolling: recoveryPollDeadline !== null && Date.now() < recoveryPollDeadline,
+  });
+
   // Cross-tab sync: when another tab fires an operation on this blueprint,
   // immediately fetch fresh data so polling activates.
   const broadcastOperation = useBlueprintBroadcast(blueprintId, () => {
-    loadData();
+    invalidateAll();
   });
 
   // A suggestion is "used" if marked in DB (s.used) or if a matching node already exists
@@ -145,70 +141,6 @@ export default function NodeDetailPage() {
     return `/blueprints/${blueprintId}`;
   }, [blueprintId]);
 
-  const loadData = useCallback(async () => {
-    try {
-      const [bp, execs, queueInfo, related, sugs] = await Promise.all([
-        getBlueprint(blueprintId),
-        getNodeExecutions(blueprintId, nodeId),
-        getQueueStatus(blueprintId),
-        getRelatedSessions(blueprintId, nodeId),
-        getSuggestionsForNode(blueprintId, nodeId),
-      ]);
-      setBlueprint(bp);
-      const found = bp.nodes.find((n) => n.id === nodeId) ?? null;
-      setNode(found);
-      setExecutions(execs);
-      setPendingTasks(queueInfo.pendingTasks);
-      setRelatedSessions(related);
-      setSuggestions(sugs);
-
-      // Fetch last session message for running executions
-      const runningExec = execs.find(
-        (e) => e.status === "running" && e.sessionId
-      );
-      if (runningExec?.sessionId) {
-        getLastSessionMessage(runningExec.sessionId)
-          .then(setLastMessage)
-          .catch(() => { /* silent — session may not have messages yet */ });
-      } else {
-        setLastMessage(null);
-      }
-
-      // Fetch active related session for in-flight operations (enrich, reevaluate, split, smart_deps, evaluate)
-      const hasRelatedOps = queueInfo.pendingTasks.some(
-        (t) => t.nodeId === nodeId && (t.type === "enrich" || t.type === "reevaluate" || t.type === "split" || t.type === "smart_deps" || t.type === "evaluate")
-      );
-      if (hasRelatedOps) {
-        getActiveRelatedSession(blueprintId, nodeId)
-          .then((rs) => {
-            setActiveRelatedSession(rs);
-            if (rs?.sessionId) {
-              getLastSessionMessage(rs.sessionId)
-                .then(setRelatedLastMessage)
-                .catch(() => { /* silent */ });
-            } else {
-              setRelatedLastMessage(null);
-            }
-          })
-          .catch(() => { /* silent */ });
-      } else {
-        setActiveRelatedSession(null);
-        setRelatedLastMessage(null);
-      }
-
-      return found;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      return null;
-    } finally {
-      setLoading(false);
-    }
-  }, [blueprintId, nodeId]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
   // Auto-recover lost sessions for nodes failed by server restart
   useEffect(() => {
     if (recoveryAttempted.current || !node || !executions.length) return;
@@ -223,12 +155,12 @@ export default function NodeDetailPage() {
         .then((result) => {
           if (result.recovered) {
             setRecovered(true);
-            loadData(); // Reload to show the recovered session links
+            invalidateAll();
           }
         })
         .catch(() => { /* silent — recovery is best-effort */ });
     }
-  }, [node, executions, blueprintId, nodeId, loadData]);
+  }, [node, executions, blueprintId, nodeId, invalidateAll]);
 
   // Check for pending tasks on this node
   const reevaluateQueued = pendingTasks.some(
@@ -303,6 +235,9 @@ export default function NodeDetailPage() {
     const prev = prevStatusRef.current;
     const curr = node?.status ?? null;
     if (prev && (prev === "running" || prev === "queued") && curr && curr !== "running" && curr !== "queued") {
+      if (curr === "done") {
+        showToast(`Execution complete for #${node?.seq ?? ""}`);
+      }
       setPostCompletionPolls(4); // 4 more cycles × 5s = 20s buffer for artifacts/evaluation
       // If node failed due to server restart, start extended recovery polling (5 min)
       if (curr === "failed" && node?.error?.includes("server restart")) {
@@ -310,7 +245,7 @@ export default function NodeDetailPage() {
       }
     }
     prevStatusRef.current = curr;
-  }, [node?.status, node?.error]);
+  }, [node?.status, node?.error, node?.seq, showToast]);
 
   // Also detect server-restart failure on initial page load (when we didn't witness the transition)
   useEffect(() => {
@@ -334,41 +269,26 @@ export default function NodeDetailPage() {
   // Navigate to blueprint page when split completes (node becomes skipped)
   useEffect(() => {
     if (splitting && node?.status === "skipped") {
+      showToast("Split complete — check blueprint for new sub-tasks");
       router.push(blueprintBackHref);
     }
-  }, [splitting, node?.status, router, blueprintBackHref]);
+  }, [splitting, node?.status, router, blueprintBackHref, showToast]);
 
-  // Auto-poll when node is running, queued, has pending tasks, post-completion countdown active,
-  // or server-restart recovery is being monitored by the backend
+  // Decrement post-completion poll counter and expire recovery deadline via timer
+  // (TanStack Query handles the actual polling via refetchInterval)
   const isRecoveryPolling = recoveryPollDeadline !== null && Date.now() < recoveryPollDeadline;
   useEffect(() => {
-    const activeRecoveryPoll = recoveryPollDeadline !== null && Date.now() < recoveryPollDeadline;
-    const shouldPoll = node?.status === "running" || node?.status === "queued" || hasPendingTasks || postCompletionPolls > 0 || activeRecoveryPoll;
-    if (shouldPoll) {
-      // Use slower interval (10s) for recovery polling, normal (5s) otherwise
-      const interval = activeRecoveryPoll && !hasPendingTasks && node?.status !== "running" && node?.status !== "queued" && postCompletionPolls <= 0
-        ? 10000
-        : 5000;
-      pollRef.current = setInterval(() => {
-        if (postCompletionPolls > 0) {
-          setPostCompletionPolls((c) => c - 1);
-        }
-        // Expire recovery polling when deadline passes
-        if (recoveryPollDeadline !== null && Date.now() >= recoveryPollDeadline) {
-          setRecoveryPollDeadline(null);
-        }
-        loadData();
-      }, interval);
-    } else {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+    if (postCompletionPolls <= 0 && !isRecoveryPolling) return;
+    const interval = setInterval(() => {
+      if (postCompletionPolls > 0) {
+        setPostCompletionPolls((c) => c - 1);
       }
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [node?.status, hasPendingTasks, postCompletionPolls, recoveryPollDeadline, loadData]);
+      if (recoveryPollDeadline !== null && Date.now() >= recoveryPollDeadline) {
+        setRecoveryPollDeadline(null);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [postCompletionPolls, recoveryPollDeadline, isRecoveryPolling]);
 
   // Focus trap for node switcher overlay
   useEffect(() => {
@@ -422,15 +342,25 @@ export default function NodeDetailPage() {
   const prevNode = currentNodeIdx > 0 ? sortedNodes[currentNodeIdx - 1] : null;
   const nextNode = currentNodeIdx < sortedNodes.length - 1 ? sortedNodes[currentNodeIdx + 1] : null;
 
-  // Keyboard shortcuts: left/right arrow for prev/next node, Escape to close switcher
+  // Keyboard shortcuts: navigation + gesture shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape: cascade through dismissals
       if (e.key === "Escape") {
+        if (showSplitConfirm) { setShowSplitConfirm(false); return; }
+        if (showDeleteConfirm) { setShowDeleteConfirm(false); return; }
+        if (showUnqueueConfirm) { setShowUnqueueConfirm(false); return; }
+        if (editing) { setEditing(false); return; }
         setShowNodeSwitcher(false);
         return;
       }
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target as HTMLElement).isContentEditable) return;
+      // Ignore when Cmd/Ctrl is held — those are browser shortcuts (e.g. Cmd+R = refresh)
+      if (e.metaKey || e.ctrlKey) return;
+      // Disable gesture shortcuts when node is running/queued
+      const nodeRunningOrQueued = node?.status === "running" || node?.status === "queued";
+      const nodeCanRun = node?.status === "pending" || node?.status === "failed";
       if (e.key === "ArrowLeft" && prevNode) {
         e.preventDefault();
         setShowNodeSwitcher(false);
@@ -439,11 +369,32 @@ export default function NodeDetailPage() {
         e.preventDefault();
         setShowNodeSwitcher(false);
         router.push(`/blueprints/${blueprintId}/nodes/${nextNode.id}`);
+      } else if (e.key === "r" && !nodeRunningOrQueued && nodeCanRun) {
+        e.preventDefault();
+        handleRun();
+      } else if (e.key === "e" && !e.shiftKey && !nodeRunningOrQueued) {
+        e.preventDefault();
+        if (editing) {
+          setEditing(false);
+        } else if (node) {
+          setEditTitle(node.title);
+          setEditDesc(node.description || "");
+          setEditing(true);
+        }
+      } else if (e.key === "E" && e.shiftKey && editing && !nodeRunningOrQueued) {
+        e.preventDefault();
+        handleEnrich();
+      } else if (e.key === "R" && e.shiftKey && !nodeRunningOrQueued) {
+        e.preventDefault();
+        handleReevaluate();
+      } else if (e.key === "d" && !nodeRunningOrQueued) {
+        e.preventDefault();
+        setDepsExpanded(v => !v);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [blueprintId, prevNode, nextNode, router]);
+  }, [blueprintId, prevNode, nextNode, router, showSplitConfirm, showDeleteConfirm, showUnqueueConfirm, editing, node]);
 
   const handleRun = async () => {
     if (running) return;
@@ -454,7 +405,7 @@ export default function NodeDetailPage() {
       broadcastOperation("run", nodeId);
       // Fire-and-forget resolved — keep running=true as optimistic state.
       // loadData triggers poll; useEffect clears running once status transitions.
-      loadData();
+      invalidateAll();
     } catch (err) {
       setWarning(err instanceof Error ? err.message : String(err));
       setRunning(false);
@@ -475,7 +426,7 @@ export default function NodeDetailPage() {
       // takes over the loading state. enriching is cleared in the useEffect above.
       if ("status" in result) {
         broadcastOperation("enrich", node?.id);
-        loadData();
+        invalidateAll();
         // Don't setEnriching(false) — enrichQueued will take over
       } else {
         setEditTitle(result.title);
@@ -486,7 +437,7 @@ export default function NodeDetailPage() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setWarning(err instanceof Error ? err.message : String(err));
       setEnriching(false);
     }
   };
@@ -498,9 +449,9 @@ export default function NodeDetailPage() {
       await reevaluateNode(blueprintId, nodeId);
       broadcastOperation("reevaluate", nodeId);
       // Fire-and-forget: result applied in background, polling will detect changes
-      loadData();
+      invalidateAll();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setWarning(err instanceof Error ? err.message : String(err));
     } finally {
       setReevaluating(false);
     }
@@ -921,7 +872,7 @@ export default function NodeDetailPage() {
                     setUnqueuing(true);
                     try {
                       await unqueueNode(blueprintId, nodeId);
-                      loadData();
+                      invalidateAll();
                     } catch (err) {
                       setWarning(err instanceof Error ? err.message : String(err));
                     } finally {
@@ -976,7 +927,7 @@ export default function NodeDetailPage() {
               onClick={async () => {
                 try {
                   await updateMacroNode(blueprintId, nodeId, { status: "done" });
-                  loadData();
+                  invalidateAll();
                 } catch (err) {
                   setWarning(err instanceof Error ? err.message : String(err));
                 }
@@ -998,7 +949,7 @@ export default function NodeDetailPage() {
                 const newStatus = node.status === "skipped" ? "pending" : "skipped";
                 try {
                   await updateMacroNode(blueprintId, nodeId, { status: newStatus });
-                  loadData();
+                  invalidateAll();
                 } catch (err) {
                   setWarning(err instanceof Error ? err.message : String(err));
                 } finally {
@@ -1072,8 +1023,8 @@ export default function NodeDetailPage() {
           </p>
         )}
         {showSplitConfirm && (
-          <div className="mt-3 p-3 rounded-lg bg-accent-purple/10 border border-accent-purple/30 animate-fade-in">
-            <p className="text-sm text-accent-purple mb-2">Split into sub-tasks? The original node will be marked as skipped.</p>
+          <div className="mt-3 p-3 rounded-lg bg-accent-amber/10 border border-accent-amber/30 animate-fade-in">
+            <p className="text-sm text-accent-amber mb-2">Split into sub-tasks? The original node will be marked as skipped.</p>
             <div className="flex gap-2">
               <button
                 onClick={async () => {
@@ -1082,7 +1033,7 @@ export default function NodeDetailPage() {
                   try {
                     await splitNode(blueprintId, nodeId);
                     broadcastOperation("split", nodeId);
-                    loadData(); // Refresh pending tasks to activate polling
+                    invalidateAll(); // Refresh pending tasks to activate polling
                   } catch (err) {
                     setWarning(err instanceof Error ? err.message : String(err));
                     setSplitting(false);
@@ -1090,7 +1041,7 @@ export default function NodeDetailPage() {
                 }}
                 disabled={splitting}
                 title={splitting ? "AI is decomposing this node..." : undefined}
-                className="px-3 py-1 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50"
+                className="px-3 py-1 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 transition-colors disabled:opacity-50"
               >
                 {splitting ? "Splitting..." : "Yes, Split"}
               </button>
@@ -1188,13 +1139,13 @@ export default function NodeDetailPage() {
                       try {
                         await smartPickDependencies(blueprintId, node.id);
                         broadcastOperation("smart_deps", node.id);
-                        loadData(); // Refresh pending tasks to activate polling
+                        invalidateAll(); // Refresh pending tasks to activate polling
                       } catch {
                         setSmartDepsOptimistic(false);
                       }
                     }}
                     disabled={smartDepsLoading}
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-accent-purple/20 text-accent-purple text-[10px] font-medium hover:bg-accent-purple/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-accent-purple/20 text-accent-purple text-xs font-medium hover:bg-accent-purple/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     title={smartDepsLoading ? "AI is analyzing nodes to pick dependencies..." : "AI analyzes node titles and descriptions to auto-select 0–3 logical dependencies"}
                     aria-label={smartDepsLoading ? "AI picking dependencies" : "AI-pick dependencies"}
                   >
@@ -1226,15 +1177,6 @@ export default function NodeDetailPage() {
                             : [...node.dependencies, n.id];
                           try {
                             const updated = await updateMacroNode(blueprintId, node.id, { dependencies: newDeps });
-                            setBlueprint((prev) => {
-                              if (!prev) return prev;
-                              return {
-                                ...prev,
-                                nodes: prev.nodes.map((nd) =>
-                                  nd.id === node.id ? updated : nd
-                                ),
-                              };
-                            });
                             setNode(updated);
                           } catch { /* ignore */ }
                         }}
@@ -1464,7 +1406,7 @@ export default function NodeDetailPage() {
                             onClick={() => {
                               setResumingExecId(exec.id);
                               resumeNodeSession(blueprintId, nodeId, exec.id)
-                                .then(() => { broadcastOperation("resume", nodeId); loadData(); })
+                                .then(() => { broadcastOperation("resume", nodeId); invalidateAll(); })
                                 .catch((err) => {
                                   setWarning(err instanceof Error ? err.message : String(err));
                                   setResumingExecId(null);
@@ -1773,7 +1715,7 @@ export default function NodeDetailPage() {
                           dependencies: [nodeId],
                         });
                         await markSuggestionUsed(blueprintId, nodeId, s.id);
-                        loadData();
+                        invalidateAll();
                       } catch {
                         /* silent */
                       } finally {

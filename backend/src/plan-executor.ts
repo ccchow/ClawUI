@@ -29,16 +29,14 @@ import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
 import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
 import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
 import "./agent-codex.js"; // Side-effect: registers CodexAgentRuntime
-import "./roles/role-sde.js"; // Side-effect: registers SDE role
-import "./roles/role-qa.js"; // Side-effect: registers QA role
-import "./roles/role-pm.js"; // Side-effect: registers PM role
+import "./roles/load-all-roles.js"; // Side-effect: auto-discovers and registers all roles
 import { getRole } from "./roles/role-registry.js";
 import type { RoleDefinition } from "./roles/role-registry.js";
 
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene";
   nodeId?: string;
   blueprintId: string;
   queuedAt: string;

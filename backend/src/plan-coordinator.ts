@@ -13,10 +13,8 @@ import "./agent-pimono.js";
 import "./agent-openclaw.js";
 import "./agent-codex.js";
 
-// Side-effect imports: ensure all roles are registered
-import "./roles/role-sde.js";
-import "./roles/role-qa.js";
-import "./roles/role-pm.js";
+// Side-effect: auto-discovers and registers all roles
+import "./roles/load-all-roles.js";
 
 const log = createLogger("plan-coordinator");
 

@@ -40,6 +40,57 @@ function makeRole(overrides: Partial<RoleDefinition> = {}): RoleDefinition {
   };
 }
 
+/**
+ * Expected shape for assertRoleRegistration.
+ * `promptContains` maps RolePrompts keys to substrings that must appear in each field.
+ */
+interface RoleExpectedShape {
+  label: string;
+  builtin: boolean;
+  artifactTypes: string[];
+  blockerTypes?: string[];
+  workVerb: string;
+  promptContains: Partial<Record<keyof RolePrompts, string>>;
+  toolHintsContain?: string;
+}
+
+/**
+ * Shared helper that validates a role was registered correctly via side-effect import.
+ * Asserts: existence, id, label, builtin, artifactTypes, blockerTypes (if provided),
+ * workVerb, prompt substring matches, and toolHints substring.
+ *
+ * Usage: await import("../roles/role-foo.js"); assertRoleRegistration("foo", { ... });
+ */
+function assertRoleRegistration(
+  roleId: string,
+  expected: RoleExpectedShape
+): void {
+  const role = getRole(roleId);
+  expect(role).toBeDefined();
+  expect(role!.id).toBe(roleId);
+  expect(role!.label).toBe(expected.label);
+  expect(role!.builtin).toBe(expected.builtin);
+  expect(role!.artifactTypes).toEqual(expected.artifactTypes);
+
+  if (expected.blockerTypes) {
+    expect(role!.blockerTypes).toEqual(expected.blockerTypes);
+  }
+
+  expect(role!.prompts.workVerb).toBe(expected.workVerb);
+
+  // Validate prompt field substrings
+  for (const [key, substring] of Object.entries(expected.promptContains)) {
+    expect(
+      role!.prompts[key as keyof RolePrompts],
+      `prompts.${key} should contain "${substring}"`
+    ).toContain(substring);
+  }
+
+  if (expected.toolHintsContain) {
+    expect(role!.toolHints).toContain(expected.toolHintsContain);
+  }
+}
+
 describe("role-registry", () => {
   beforeEach(() => {
     clearRoles();
@@ -133,6 +184,35 @@ describe("role-registry", () => {
   });
 });
 
+describe("role-sde (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers SDE role with correct fields after import", async () => {
+    await import("../roles/role-sde.js");
+
+    assertRoleRegistration("sde", {
+      label: "Software Engineer",
+      builtin: true,
+      artifactTypes: ["file_diff", "test_report"],
+      workVerb: "implement",
+      promptContains: {
+        persona: "software engineer",
+        executionGuidance: "Complete this step thoroughly",
+        artifactFormat: "What was done:",
+        evaluationExamples: "NEEDS_REFINEMENT",
+        decompositionHeuristic: "5-15 min",
+        decompositionExample: "Backend API",
+        dependencyConsiderations: "Code dependencies",
+        verificationSteps: "typecheck",
+        reevaluationVerification: "Read the relevant source files",
+      },
+      toolHintsContain: "MCP tools",
+    });
+  });
+});
+
 describe("role-qa (side-effect registration)", () => {
   beforeEach(() => {
     clearRoles();
@@ -141,31 +221,30 @@ describe("role-qa (side-effect registration)", () => {
   it("registers QA role with correct fields after import", async () => {
     await import("../roles/role-qa.js");
 
-    const qa = getRole("qa");
-    expect(qa).toBeDefined();
-    expect(qa!.id).toBe("qa");
-    expect(qa!.label).toBe("QA Engineer");
-    expect(qa!.builtin).toBe(true);
-    expect(qa!.artifactTypes).toEqual(["test_plan", "bug_report"]);
-    expect(qa!.blockerTypes).toEqual([
-      "missing_test_data",
-      "environment_issue",
-      "flaky_dependency",
-      "access_issue",
-    ]);
-    expect(qa!.prompts.workVerb).toBe("test and validate");
-
-    // Verify key prompt strings are non-empty and role-appropriate
-    expect(qa!.prompts.persona).toContain("QA engineer");
-    expect(qa!.prompts.executionGuidance).toContain("test cases");
-    expect(qa!.prompts.artifactFormat).toContain("Test cases");
-    expect(qa!.prompts.evaluationExamples).toContain("test coverage");
-    expect(qa!.prompts.decompositionHeuristic).toContain("test scope");
-    expect(qa!.prompts.specificityGuidance).toContain("test file paths");
-    expect(qa!.prompts.dependencyConsiderations).toContain("Test dependencies");
-    expect(qa!.prompts.verificationSteps).toContain("test suite");
-    expect(qa!.prompts.reevaluationVerification).toContain("test files");
-    expect(qa!.toolHints).toContain("Playwright");
+    assertRoleRegistration("qa", {
+      label: "QA Engineer",
+      builtin: true,
+      artifactTypes: ["test_plan", "bug_report"],
+      blockerTypes: [
+        "missing_test_data",
+        "environment_issue",
+        "flaky_dependency",
+        "access_issue",
+      ],
+      workVerb: "test and validate",
+      promptContains: {
+        persona: "QA engineer",
+        executionGuidance: "test cases",
+        artifactFormat: "Test cases",
+        evaluationExamples: "test coverage",
+        decompositionHeuristic: "test scope",
+        specificityGuidance: "test file paths",
+        dependencyConsiderations: "Test dependencies",
+        verificationSteps: "test suite",
+        reevaluationVerification: "test files",
+      },
+      toolHintsContain: "Playwright",
+    });
   });
 });
 
@@ -177,60 +256,97 @@ describe("role-pm (side-effect registration)", () => {
   it("registers PM role with correct fields after import", async () => {
     await import("../roles/role-pm.js");
 
-    const pm = getRole("pm");
-    expect(pm).toBeDefined();
-    expect(pm!.id).toBe("pm");
-    expect(pm!.label).toBe("Product Manager");
-    expect(pm!.builtin).toBe(true);
-    expect(pm!.artifactTypes).toEqual(["requirement_doc", "acceptance_criteria"]);
-    expect(pm!.blockerTypes).toEqual([
-      "missing_stakeholder_input",
-      "unclear_business_rule",
-      "scope_ambiguity",
-    ]);
-    expect(pm!.prompts.workVerb).toBe("define and clarify requirements");
-
-    // Verify key prompt strings are non-empty and role-appropriate
-    expect(pm!.prompts.persona).toContain("product manager");
-    expect(pm!.prompts.executionGuidance).toContain("requirements");
-    expect(pm!.prompts.artifactFormat).toContain("Requirements defined");
-    expect(pm!.prompts.evaluationExamples).toContain("acceptance criteria");
-    expect(pm!.prompts.decompositionHeuristic).toContain("user journey");
-    expect(pm!.prompts.specificityGuidance).toContain("user personas");
-    expect(pm!.prompts.dependencyConsiderations).toContain("Requirement dependencies");
-    expect(pm!.prompts.verificationSteps).toContain("stakeholder");
-    expect(pm!.prompts.reevaluationVerification).toContain("requirement documents");
-    expect(pm!.toolHints).toContain("Linear");
+    assertRoleRegistration("pm", {
+      label: "Product Manager",
+      builtin: true,
+      artifactTypes: ["requirement_doc", "acceptance_criteria"],
+      blockerTypes: [
+        "missing_stakeholder_input",
+        "unclear_business_rule",
+        "scope_ambiguity",
+      ],
+      workVerb: "define and clarify requirements",
+      promptContains: {
+        persona: "product manager",
+        executionGuidance: "requirements",
+        artifactFormat: "Requirements defined",
+        evaluationExamples: "acceptance criteria",
+        decompositionHeuristic: "user journey",
+        specificityGuidance: "user personas",
+        dependencyConsiderations: "Requirement dependencies",
+        verificationSteps: "stakeholder",
+        reevaluationVerification: "requirement documents",
+      },
+      toolHintsContain: "Linear",
+    });
   });
 });
 
-describe("role-sde (side-effect registration)", () => {
+describe("role-uxd (side-effect registration)", () => {
   beforeEach(() => {
     clearRoles();
   });
 
-  it("registers SDE role with correct fields after import", async () => {
-    // Side-effect import triggers registration
-    await import("../roles/role-sde.js");
+  it("registers UXD role with correct fields after import", async () => {
+    await import("../roles/role-uxd.js");
 
-    const sde = getRole("sde");
-    expect(sde).toBeDefined();
-    expect(sde!.id).toBe("sde");
-    expect(sde!.label).toBe("Software Engineer");
-    expect(sde!.builtin).toBe(true);
-    expect(sde!.artifactTypes).toEqual(["file_diff", "test_report"]);
-    expect(sde!.prompts.workVerb).toBe("implement");
+    assertRoleRegistration("uxd", {
+      label: "UX Designer",
+      builtin: true,
+      artifactTypes: ["design_spec", "component_audit"],
+      blockerTypes: [
+        "missing_design_system_token",
+        "accessibility_violation",
+        "inconsistent_pattern",
+      ],
+      workVerb: "design and specify",
+      promptContains: {
+        persona: "UI/UX designer",
+        executionGuidance: "DO NOT write implementation code",
+        artifactFormat: "Components specified",
+        evaluationExamples: "responsive breakpoints",
+        decompositionHeuristic: "component",
+        specificityGuidance: "accent-blue",
+        dependencyConsiderations: "Audit dependencies",
+        verificationSteps: "WCAG AA",
+        reevaluationVerification: "FRONTEND-PATTERNS.md",
+      },
+      toolHintsContain: "FRONTEND-PATTERNS.md",
+    });
+  });
+});
 
-    // Verify key prompt strings are non-empty
-    expect(sde!.prompts.persona).toContain("software engineer");
-    expect(sde!.prompts.executionGuidance).toContain("Complete this step thoroughly");
-    expect(sde!.prompts.artifactFormat).toContain("What was done:");
-    expect(sde!.prompts.evaluationExamples).toContain("NEEDS_REFINEMENT");
-    expect(sde!.prompts.decompositionHeuristic).toContain("5-15 min");
-    expect(sde!.prompts.decompositionExample).toContain("Backend API");
-    expect(sde!.prompts.dependencyConsiderations).toContain("Code dependencies");
-    expect(sde!.prompts.verificationSteps).toContain("typecheck");
-    expect(sde!.prompts.reevaluationVerification).toContain("Read the relevant source files");
-    expect(sde!.toolHints).toContain("MCP tools");
+describe("role-sa (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers SA role with correct fields after import", async () => {
+    await import("../roles/role-sa.js");
+
+    assertRoleRegistration("sa", {
+      label: "Software Architect",
+      builtin: true,
+      artifactTypes: ["architecture_doc", "feasibility_report"],
+      blockerTypes: [
+        "missing_context",
+        "unclear_requirement",
+        "technical_constraint",
+        "scale_uncertainty",
+      ],
+      workVerb: "design and analyze",
+      promptContains: {
+        persona: "software architect",
+        executionGuidance: "refactoring",
+        artifactFormat: "Key decisions",
+        evaluationExamples: "migration path",
+        decompositionHeuristic: "architectural concern",
+        specificityGuidance: "module paths",
+        dependencyConsiderations: "Analysis dependencies",
+        verificationSteps: "backward-compatible",
+        reevaluationVerification: "module structures",
+      },
+      toolHintsContain: "Serena",
+    });
   });
 });

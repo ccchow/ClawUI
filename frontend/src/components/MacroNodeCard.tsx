@@ -43,6 +43,7 @@ export function MacroNodeCard({
   broadcastOperation,
   hasSuggestions,
   blueprintBusy,
+  hasRunningNodes,
   blueprintDefaultRole,
   blueprintEnabledRoles,
 }: {
@@ -59,8 +60,10 @@ export function MacroNodeCard({
   depLanes?: DepRowLayout;
   broadcastOperation?: (type: BroadcastOpType, nodeId?: string) => void;
   hasSuggestions?: boolean;
-  /** Name of the active blueprint-wide operation (e.g. "Run All", "Generate"), or undefined if none */
+  /** Name of the active blueprint-level operation (e.g. "Generate", "Convene"), or undefined if none. Does NOT include "Run All" — individual node runs can queue freely. */
   blueprintBusy?: string;
+  /** True when other nodes in the blueprint are running/queued (informational, not blocking) */
+  hasRunningNodes?: boolean;
   /** Blueprint's defaultRole for inherited role display (falls back to "sde") */
   blueprintDefaultRole?: string;
   /** Blueprint's enabledRoles for inherited role display */
@@ -176,6 +179,16 @@ export function MacroNodeCard({
       setRunning(false);
     }
   }, [running, node.status]);
+
+  // Toast when node execution completes (status transitions from running to done)
+  const prevNodeStatusRef = useRef(node.status);
+  useEffect(() => {
+    const prevStatus = prevNodeStatusRef.current;
+    prevNodeStatusRef.current = node.status;
+    if (prevStatus === "running" && node.status === "done") {
+      showToast(`Execution complete for #${node.seq}`);
+    }
+  }, [node.status, node.seq, showToast]);
 
   // Clear optimistic resume flag once node status transitions away from failed
   useEffect(() => {
@@ -489,15 +502,18 @@ export function MacroNodeCard({
                 disabled={reevaluating || reevaluateQueued || !!blueprintBusy}
                 title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : blueprintBusy ? busyTip : "AI reads your codebase and updates this node's title, description, and status"}
                 aria-label={reevaluateQueued ? "Re-evaluation queued" : reevaluating ? "Re-evaluating node" : "Re-evaluate node with AI"}
-                className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 hidden sm:block"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-50 hidden sm:inline-flex"
               >
                 {reevaluating || reevaluateQueued ? (
-                  <AISparkle size="sm" />
+                  <><AISparkle size="xs" /> Re-eval</>
                 ) : (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
-                    <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
-                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
-                  </svg>
+                  <>
+                    <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
+                      <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
+                    </svg>
+                    Re-eval
+                  </>
                 )}
               </button>
             )}
@@ -596,7 +612,7 @@ export function MacroNodeCard({
                   onClick={handleRun}
                   disabled={running || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
                   aria-label={running ? "AI is running this node" : "Run node"}
-                  title={running ? "AI is executing this node in an agent session..." : blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot run while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot run while AI re-evaluation is in progress" : "Execute this node using the selected agent"}
+                  title={running ? "AI is executing this node in an agent session..." : blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot run while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot run while AI re-evaluation is in progress" : hasRunningNodes ? "Queues for execution after current node finishes" : "Execute this node using the selected agent"}
                   className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
                 >
                   {running ? (

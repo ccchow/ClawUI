@@ -15,6 +15,38 @@ export type FailureReason = "timeout" | "context_exhausted" | "output_token_limi
 export type ReportedStatus = "done" | "failed" | "blocked" | null;
 export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps" | "coordinate";
 export type InsightSeverity = "info" | "warning" | "critical";
+export type ConveneSessionStatus = "active" | "synthesizing" | "completed" | "cancelled" | "failed";
+
+export interface ConveneSession {
+  id: string;
+  blueprintId: string;
+  topic: string;
+  contextNodeIds: string[] | null;
+  participatingRoles: string[];
+  maxRounds: number;
+  status: ConveneSessionStatus;
+  synthesisResult: BatchCreateNode[] | null;
+  messageCount: number;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface ConveneMessage {
+  id: string;
+  sessionId: string;
+  roleId: string;
+  round: number;
+  content: string;
+  messageType: "contribution" | "synthesis";
+  createdAt: string;
+}
+
+export interface BatchCreateNode {
+  title: string;
+  description: string;
+  dependencies?: (string | number)[];
+  roles?: string[];
+}
 
 // Layer 1: Blueprint (was "Plan")
 export interface Blueprint {
@@ -28,6 +60,7 @@ export interface Blueprint {
   agentType?: string;
   enabledRoles?: string[];
   defaultRole?: string;
+  conveneSessionCount?: number;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -427,6 +460,37 @@ export function initPlanTables(): void {
     `);
   }
 
+  // Incremental migration: create convene_sessions table if not exists
+  const conveneTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='convene_sessions'").all();
+  if (conveneTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS convene_sessions (
+        id                  TEXT PRIMARY KEY,
+        blueprint_id        TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        topic               TEXT NOT NULL,
+        context_node_ids    TEXT,
+        participating_roles TEXT NOT NULL,
+        max_rounds          INTEGER NOT NULL DEFAULT 3,
+        status              TEXT NOT NULL DEFAULT 'active',
+        synthesis_result    TEXT,
+        created_at          TEXT NOT NULL,
+        completed_at        TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_convene_sessions_blueprint ON convene_sessions(blueprint_id);
+
+      CREATE TABLE IF NOT EXISTS convene_messages (
+        id            TEXT PRIMARY KEY,
+        session_id    TEXT NOT NULL REFERENCES convene_sessions(id) ON DELETE CASCADE,
+        role_id       TEXT NOT NULL,
+        round         INTEGER NOT NULL,
+        content       TEXT NOT NULL,
+        message_type  TEXT NOT NULL DEFAULT 'contribution',
+        created_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_convene_messages_session ON convene_messages(session_id);
+    `);
+  }
+
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
       "plan_schema",
@@ -587,7 +651,7 @@ function rowToMacroNode(
   };
 }
 
-function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
+function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = [], conveneSessionCount?: number): Blueprint {
   let enabledRoles: string[] | undefined;
   if (row.enabled_roles) {
     try {
@@ -607,6 +671,7 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = []): Blueprint {
     ...(row.agent_type ? { agentType: row.agent_type } : {}),
     ...(enabledRoles ? { enabledRoles } : {}),
     ...(row.default_role ? { defaultRole: row.default_role } : {}),
+    ...(conveneSessionCount != null && conveneSessionCount > 0 ? { conveneSessionCount } : {}),
     nodes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -743,7 +808,7 @@ export function createBlueprint(
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
-  const rolesJson = JSON.stringify(enabledRoles ?? ["sde"]);
+  const rolesJson = JSON.stringify(enabledRoles ?? ["sde", "qa", "pm", "uxd"]);
   const role = defaultRole ?? "sde";
 
   db.prepare(`
@@ -758,7 +823,7 @@ export function createBlueprint(
     status: "draft",
     ...(projectCwd ? { projectCwd } : {}),
     ...(agentType ? { agentType } : {}),
-    enabledRoles: enabledRoles ?? ["sde"],
+    enabledRoles: enabledRoles ?? ["sde", "qa", "pm", "uxd"],
     defaultRole: role,
     nodes: [],
     createdAt: now,
@@ -770,7 +835,8 @@ export function getBlueprint(id: string): Blueprint | null {
   const db = getDb();
   const row = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
   if (!row) return null;
-  return rowToBlueprint(row, getNodesForBlueprint(id));
+  const conveneCount = getConveneSessionCount(id);
+  return rowToBlueprint(row, getNodesForBlueprint(id), conveneCount);
 }
 
 export function listBlueprints(filters?: { status?: string; projectCwd?: string; includeArchived?: boolean; search?: string; limit?: number; offset?: number }): Blueprint[] {
@@ -809,7 +875,20 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string;
     .prepare(sql)
     .all(...params) as BlueprintRow[];
 
-  return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id)));
+  // Batch-load convene session counts to avoid N+1
+  const bpIds = rows.map((r) => r.id);
+  const conveneCountMap = new Map<string, number>();
+  if (bpIds.length > 0) {
+    const ph = bpIds.map(() => "?").join(",");
+    const counts = db.prepare(
+      `SELECT blueprint_id, COUNT(*) as cnt FROM convene_sessions WHERE blueprint_id IN (${ph}) AND status != 'cancelled' GROUP BY blueprint_id`,
+    ).all(...bpIds) as { blueprint_id: string; cnt: number }[];
+    for (const { blueprint_id, cnt } of counts) {
+      conveneCountMap.set(blueprint_id, cnt);
+    }
+  }
+
+  return rows.map((row) => rowToBlueprint(row, getNodesForBlueprint(row.id), conveneCountMap.get(row.id)));
 }
 
 export function listArchivedBlueprints(): Blueprint[] {
@@ -967,6 +1046,9 @@ export function createMacroNode(
   });
   insertTransaction();
 
+  // Compute input artifacts from dependencies (not hardcoded empty)
+  const { input: inputArtifacts } = getArtifactsForNodeInternal(id);
+
   return {
     id,
     blueprintId,
@@ -980,7 +1062,7 @@ export function createMacroNode(
     ...(data.prompt ? { prompt: data.prompt } : {}),
     ...(data.estimatedMinutes != null ? { estimatedMinutes: data.estimatedMinutes } : {}),
     ...(data.agentType ? { agentType: data.agentType } : {}),
-    inputArtifacts: [],
+    inputArtifacts,
     outputArtifacts: [],
     executions: [],
     createdAt: now,
@@ -1706,5 +1788,160 @@ export function getTotalUnreadInsightCount(): number {
   const row = db.prepare(
     "SELECT COUNT(*) as cnt FROM blueprint_insights WHERE read = 0 AND dismissed = 0",
   ).get() as { cnt: number };
+  return row.cnt;
+}
+
+// ─── Convene Sessions CRUD ────────────────────────────────────
+
+interface ConveneSessionRow {
+  id: string;
+  blueprint_id: string;
+  topic: string;
+  context_node_ids: string | null;
+  participating_roles: string;
+  max_rounds: number;
+  status: string;
+  synthesis_result: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+interface ConveneMessageRow {
+  id: string;
+  session_id: string;
+  role_id: string;
+  round: number;
+  content: string;
+  message_type: string;
+  created_at: string;
+}
+
+function rowToConveneSession(row: ConveneSessionRow, messageCount = 0): ConveneSession {
+  let contextNodeIds: string[] | null = null;
+  if (row.context_node_ids) {
+    try { contextNodeIds = JSON.parse(row.context_node_ids); } catch { /* ignore */ }
+  }
+  let synthesisResult: BatchCreateNode[] | null = null;
+  if (row.synthesis_result) {
+    try { synthesisResult = JSON.parse(row.synthesis_result); } catch { /* ignore */ }
+  }
+  return {
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    topic: row.topic,
+    contextNodeIds,
+    participatingRoles: JSON.parse(row.participating_roles),
+    maxRounds: row.max_rounds,
+    status: row.status as ConveneSessionStatus,
+    synthesisResult,
+    messageCount,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function rowToConveneMessage(row: ConveneMessageRow): ConveneMessage {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    roleId: row.role_id,
+    round: row.round,
+    content: row.content,
+    messageType: row.message_type as "contribution" | "synthesis",
+    createdAt: row.created_at,
+  };
+}
+
+export function createConveneSession(
+  blueprintId: string,
+  topic: string,
+  participatingRoles: string[],
+  contextNodeIds?: string[],
+  maxRounds = 3,
+): ConveneSession {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO convene_sessions (id, blueprint_id, topic, context_node_ids, participating_roles, max_rounds, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+  `).run(id, blueprintId, topic, contextNodeIds ? JSON.stringify(contextNodeIds) : null, JSON.stringify(participatingRoles), maxRounds, now);
+  return {
+    id,
+    blueprintId,
+    topic,
+    contextNodeIds: contextNodeIds ?? null,
+    participatingRoles,
+    maxRounds,
+    status: "active",
+    synthesisResult: null,
+    messageCount: 0,
+    createdAt: now,
+    completedAt: null,
+  };
+}
+
+export function getConveneSession(sessionId: string): ConveneSession | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM convene_sessions WHERE id = ?").get(sessionId) as ConveneSessionRow | undefined;
+  if (!row) return null;
+  const msgCount = db.prepare("SELECT COUNT(*) as cnt FROM convene_messages WHERE session_id = ?").get(sessionId) as { cnt: number };
+  return rowToConveneSession(row, msgCount.cnt);
+}
+
+export function getConveneSessions(blueprintId: string): ConveneSession[] {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT cs.*, COUNT(cm.id) as msg_count FROM convene_sessions cs LEFT JOIN convene_messages cm ON cm.session_id = cs.id WHERE cs.blueprint_id = ? GROUP BY cs.id ORDER BY cs.created_at DESC",
+  ).all(blueprintId) as (ConveneSessionRow & { msg_count: number })[];
+  return rows.map((row) => rowToConveneSession(row, row.msg_count));
+}
+
+export function getConveneMessages(sessionId: string): ConveneMessage[] {
+  const db = getDb();
+  const rows = db.prepare(
+    "SELECT * FROM convene_messages WHERE session_id = ? ORDER BY round ASC, created_at ASC",
+  ).all(sessionId) as ConveneMessageRow[];
+  return rows.map(rowToConveneMessage);
+}
+
+export function createConveneMessage(
+  sessionId: string,
+  roleId: string,
+  round: number,
+  content: string,
+  messageType: "contribution" | "synthesis" = "contribution",
+): ConveneMessage {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO convene_messages (id, session_id, role_id, round, content, message_type, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, sessionId, roleId, round, content, messageType, now);
+  return { id, sessionId, roleId, round, content, messageType, createdAt: now };
+}
+
+export function updateConveneSessionStatus(
+  sessionId: string,
+  status: ConveneSessionStatus,
+  synthesisResult?: BatchCreateNode[] | null,
+): void {
+  const db = getDb();
+  const completedAt = (status === "completed" || status === "cancelled" || status === "failed") ? new Date().toISOString() : null;
+  if (synthesisResult !== undefined) {
+    db.prepare("UPDATE convene_sessions SET status = ?, synthesis_result = ?, completed_at = ? WHERE id = ?")
+      .run(status, synthesisResult ? JSON.stringify(synthesisResult) : null, completedAt, sessionId);
+  } else {
+    db.prepare("UPDATE convene_sessions SET status = ?, completed_at = ? WHERE id = ?")
+      .run(status, completedAt, sessionId);
+  }
+}
+
+export function getConveneSessionCount(blueprintId: string): number {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT COUNT(*) as cnt FROM convene_sessions WHERE blueprint_id = ? AND status != 'cancelled'",
+  ).get(blueprintId) as { cnt: number };
   return row.cnt;
 }

@@ -1,5 +1,6 @@
 import React from "react";
 import { render, type RenderOptions } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "@/components/Toast";
 import type {
   Blueprint,
@@ -14,7 +15,14 @@ import { vi } from "vitest";
 // --- Providers wrapper ---
 
 function AllProviders({ children }: { children: React.ReactNode }) {
-  return <ToastProvider>{children}</ToastProvider>;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+  });
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
+  );
 }
 
 export function renderWithProviders(
@@ -174,5 +182,12 @@ export function mockAllApiDefaults() {
 
     // Upload
     uploadImage: vi.fn(() => Promise.resolve({ url: "/uploads/test.png" })),
+
+    // Convene
+    startConveneSession: vi.fn(() => Promise.resolve({ status: "queued", sessionId: "cs-1" })),
+    getConveneSessions: vi.fn(() => Promise.resolve([])),
+    getConveneSessionDetail: vi.fn(() => Promise.resolve({ id: "cs-1", messages: [] })),
+    approveConveneSession: vi.fn(() => Promise.resolve({ status: "ok", createdNodeIds: [] })),
+    cancelConveneSession: vi.fn(() => Promise.resolve({ status: "ok" })),
   };
 }

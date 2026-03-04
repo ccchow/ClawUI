@@ -30,7 +30,7 @@ vi.mock("../plan-db.js", () => ({
       description: description ?? "",
       status: "draft",
       ...(projectCwd ? { projectCwd } : {}),
-      enabledRoles: enabledRoles ?? ["sde"],
+      enabledRoles: enabledRoles ?? ["sde", "qa", "pm", "uxd"],
       defaultRole: defaultRole ?? "sde",
       nodes: [],
       createdAt: "2024-01-01T00:00:00Z",
@@ -248,6 +248,35 @@ vi.mock("../plan-db.js", () => ({
   })),
   markAllInsightsRead: vi.fn(),
   dismissInsight: vi.fn(),
+  getTotalUnreadInsightCount: vi.fn(() => 0),
+  createConveneSession: vi.fn(
+    (blueprintId: string, topic: string, roleIds: string[], _contextNodeIds?: string[], maxRounds?: number) => ({
+      id: "convene-1",
+      blueprintId,
+      topic,
+      roleIds,
+      maxRounds: maxRounds ?? 3,
+      status: "active",
+      synthesisResult: null,
+      messageCount: 0,
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:00Z",
+    })
+  ),
+  getConveneSession: vi.fn(() => null),
+  getConveneSessions: vi.fn(() => []),
+  getConveneMessages: vi.fn(() => []),
+  createConveneMessage: vi.fn((_sessionId: string, roleId: string, round: number, content: string, messageType?: string) => ({
+    id: "msg-new",
+    sessionId: _sessionId,
+    roleId,
+    round,
+    content,
+    messageType: messageType ?? "contribution",
+    createdAt: "2024-01-01T00:00:00Z",
+  })),
+  updateConveneSessionStatus: vi.fn(),
+  getConveneSessionCount: vi.fn(() => 0),
 }));
 
 vi.mock("../plan-executor.js", () => ({
@@ -295,15 +324,23 @@ vi.mock("../plan-coordinator.js", () => ({
   coordinateBlueprint: vi.fn(async () => {}),
 }));
 
+vi.mock("../plan-convene.js", () => ({
+  executeConveneSession: vi.fn(async () => {}),
+}));
+
 vi.mock("../roles/role-registry.js", () => ({
+  registerRole: vi.fn(),
   getRole: vi.fn(() => undefined),
-  getAllRoles: vi.fn(() => []),
+  getAllRoles: vi.fn(() => [
+    { id: "sde", label: "SDE", description: "Software Development Engineer", builtin: true, artifactTypes: [], blockerTypes: [] },
+    { id: "qa", label: "QA", description: "Quality Assurance", builtin: true, artifactTypes: [], blockerTypes: [] },
+    { id: "pm", label: "PM", description: "Product Manager", builtin: true, artifactTypes: [], blockerTypes: [] },
+    { id: "uxd", label: "UXD", description: "UX Designer", builtin: true, artifactTypes: [], blockerTypes: [] },
+  ]),
   getBuiltinRoles: vi.fn(() => []),
 }));
 
-vi.mock("../roles/role-sde.js", () => ({}));
-vi.mock("../roles/role-qa.js", () => ({}));
-vi.mock("../roles/role-pm.js", () => ({}));
+vi.mock("../roles/load-all-roles.js", () => ({}));
 
 vi.mock("../db.js", () => ({
   syncSession: vi.fn(),
@@ -342,6 +379,12 @@ import {
   markInsightRead,
   markAllInsightsRead,
   dismissInsight,
+  createConveneSession,
+  getConveneSession,
+  getConveneSessions,
+  getConveneMessages,
+  createConveneMessage,
+  updateConveneSessionStatus,
 } from "../plan-db.js";
 import {
   applyGraphMutations,
@@ -418,7 +461,7 @@ describe("plan-routes", () => {
         .post("/api/blueprints")
         .send({ title: "Default Roles", projectCwd: "/test" });
       expect(res.status).toBe(201);
-      expect(res.body.enabledRoles).toEqual(["sde"]);
+      expect(res.body.enabledRoles).toEqual(["sde", "qa", "pm", "uxd"]);
       expect(res.body.defaultRole).toBe("sde");
     });
   });
@@ -1697,6 +1740,520 @@ describe("plan-routes", () => {
     it("returns 404 for missing blueprint", async () => {
       const res = await request(app)
         .post("/api/blueprints/missing/insights/insight-1/dismiss");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Convene endpoints ───────────────────────────────────
+
+  describe("POST /api/blueprints/:id/convene", () => {
+    it("starts a convene session", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        status: "draft",
+        enabledRoles: ["sde", "qa"],
+        nodes: [{ id: "node-1", blueprintId: "bp-1", order: 0, seq: 1, title: "Step 1", description: "", status: "pending", dependencies: [] }],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Discuss architecture", roleIds: ["sde", "qa"] });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("queued");
+      expect(res.body.sessionId).toBe("convene-1");
+      expect(createConveneSession).toHaveBeenCalledWith("bp-1", "Discuss architecture", ["sde", "qa"], undefined, 3);
+      expect(enqueueBlueprintTask).toHaveBeenCalled();
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/convene")
+        .send({ topic: "Test", roleIds: ["sde", "qa"] });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 400 for missing topic", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ roleIds: ["sde", "qa"] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Missing or empty 'topic'");
+    });
+
+    it("returns 400 for empty topic", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "   ", roleIds: ["sde", "qa"] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Missing or empty 'topic'");
+    });
+
+    it("returns 400 for insufficient roles", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "x", roleIds: ["sde"] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("roleIds must be an array with at least 2 roles");
+    });
+
+    it("returns 400 for unknown role IDs", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Test", roleIds: ["sde", "nonexistent"] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Unknown role IDs");
+      expect(res.body.error).toContain("nonexistent");
+    });
+
+    it("allows valid registered roles even if not in enabledRoles", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Test", roleIds: ["sde", "pm"] });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("queued");
+    });
+
+    it("returns 400 for invalid context nodes", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"],
+        nodes: [{ id: "node-1", blueprintId: "bp-1", order: 0, seq: 1, title: "Step 1", description: "", status: "pending", dependencies: [] }],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Test", roleIds: ["sde", "qa"], contextNodeIds: ["nonexistent"] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("Context nodes not found");
+    });
+
+    it("clamps maxRounds to 5", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"], nodes: [],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Test", roleIds: ["sde", "qa"], maxRounds: 10 });
+      expect(createConveneSession).toHaveBeenCalledWith("bp-1", "Test", ["sde", "qa"], undefined, 5);
+    });
+
+    it("passes contextNodeIds when valid", async () => {
+      const mockGetBlueprint = getBlueprint as ReturnType<typeof vi.fn>;
+      mockGetBlueprint.mockReturnValueOnce({
+        id: "bp-1", title: "Test", status: "draft", enabledRoles: ["sde", "qa"],
+        nodes: [{ id: "node-1", blueprintId: "bp-1", order: 0, seq: 1, title: "Step 1", description: "", status: "pending", dependencies: [] }],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      await request(app)
+        .post("/api/blueprints/bp-1/convene")
+        .send({ topic: "Test", roleIds: ["sde", "qa"], contextNodeIds: ["node-1"] });
+      expect(createConveneSession).toHaveBeenCalledWith("bp-1", "Test", ["sde", "qa"], ["node-1"], 3);
+    });
+  });
+
+  describe("GET /api/blueprints/:id/convene-sessions", () => {
+    it("lists convene sessions for a blueprint", async () => {
+      const mockGetConveneSessions = getConveneSessions as ReturnType<typeof vi.fn>;
+      mockGetConveneSessions.mockReturnValueOnce([
+        { id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "active", messageCount: 2, createdAt: "2024-01-01" },
+      ]);
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions");
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].id).toBe("cs-1");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).get("/api/blueprints/missing/convene-sessions");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /api/blueprints/:id/convene-sessions/:sessionId", () => {
+    it("returns session with messages", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      const mockGetConveneMessages = getConveneMessages as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "active",
+        synthesisResult: null, messageCount: 1, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      mockGetConveneMessages.mockReturnValueOnce([
+        { id: "msg-1", sessionId: "cs-1", role: "sde", round: 1, content: "Hello", createdAt: "2024-01-01" },
+      ]);
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-1");
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe("cs-1");
+      expect(res.body.messages).toHaveLength(1);
+      expect(res.body.messages[0].role).toBe("sde");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).get("/api/blueprints/missing/convene-sessions/cs-1");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing session", async () => {
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-unknown");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 when session belongs to different blueprint", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-other", topic: "X", roleIds: ["sde", "qa"], status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-1");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/convene-sessions/:sessionId/approve", () => {
+    it("approves synthesis and creates nodes", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "synthesizing",
+        synthesisResult: [
+          { title: "New Task 1", description: "Do thing 1" },
+          { title: "New Task 2", description: "Do thing 2" },
+        ],
+        messageCount: 4, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/approve");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("completed");
+      expect(res.body.createdNodeIds).toHaveLength(2);
+      expect(createMacroNode).toHaveBeenCalledTimes(2);
+      expect(updateConveneSessionStatus).toHaveBeenCalledWith("cs-1", "completed");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/convene-sessions/cs-1/approve");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing session", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-unknown/approve");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 400 when session status is not synthesizing", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "active",
+        synthesisResult: null, messageCount: 2, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/approve");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("must be 'synthesizing' to approve");
+    });
+
+    it("returns 400 when synthesis result is empty", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "synthesizing",
+        synthesisResult: [], messageCount: 4, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/approve");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("No synthesis result to approve");
+    });
+  });
+
+  describe("POST /api/blueprints/:id/convene-sessions/:sessionId/cancel", () => {
+    it("cancels an active convene session", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "active",
+        synthesisResult: null, messageCount: 2, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/cancel");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("cancelled");
+      expect(updateConveneSessionStatus).toHaveBeenCalledWith("cs-1", "cancelled");
+      expect(removePendingTask).toHaveBeenCalledWith("bp-1", undefined, "convene");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).post("/api/blueprints/missing/convene-sessions/cs-1/cancel");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing session", async () => {
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-unknown/cancel");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 400 when session is already completed", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "completed",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/cancel");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("already completed");
+    });
+
+    it("returns 400 when session is already cancelled", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", roleIds: ["sde", "qa"], status: "cancelled",
+        synthesisResult: null, messageCount: 2, createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      });
+      const res = await request(app).post("/api/blueprints/bp-1/convene-sessions/cs-1/cancel");
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("already cancelled");
+    });
+  });
+
+  describe("GET /api/blueprints/:id/convene-sessions/:sessionId/panel", () => {
+    it("returns empty panel text when no messages", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      const mockGetConveneMessages = getConveneMessages as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01",
+      });
+      mockGetConveneMessages.mockReturnValueOnce([]);
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-1/panel");
+      expect(res.status).toBe(200);
+      expect(res.type).toMatch(/text\/plain/);
+      expect(res.text).toContain("No contributions yet");
+    });
+
+    it("returns formatted panel with messages grouped by round", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      const mockGetConveneMessages = getConveneMessages as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 3, createdAt: "2024-01-01",
+      });
+      mockGetConveneMessages.mockReturnValueOnce([
+        { id: "m1", sessionId: "cs-1", roleId: "sde", round: 1, content: "SDE says hello", messageType: "contribution", createdAt: "2024-01-01T00:00:00Z" },
+        { id: "m2", sessionId: "cs-1", roleId: "qa", round: 1, content: "QA agrees", messageType: "contribution", createdAt: "2024-01-01T00:01:00Z" },
+        { id: "m3", sessionId: "cs-1", roleId: "sde", round: 2, content: "SDE round 2", messageType: "contribution", createdAt: "2024-01-01T00:02:00Z" },
+      ]);
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-1/panel");
+      expect(res.status).toBe(200);
+      expect(res.type).toMatch(/text\/plain/);
+      expect(res.text).toContain("## Round 1");
+      expect(res.text).toContain("### SDE\nSDE says hello");
+      expect(res.text).toContain("### QA\nQA agrees");
+      expect(res.text).toContain("## Round 2");
+      expect(res.text).toContain("### SDE\nSDE round 2");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app).get("/api/blueprints/missing/convene-sessions/cs-1/panel");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 when session belongs to different blueprint", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-other", topic: "X", status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01",
+      });
+      const res = await request(app).get("/api/blueprints/bp-1/convene-sessions/cs-1/panel");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/convene-sessions/:sessionId/contribute", () => {
+    it("creates a message and returns success", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 2, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/contribute")
+        .send({ roleId: "sde", round: 1, content: "My contribution" });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true });
+      expect(createConveneMessage).toHaveBeenCalledWith("cs-1", "sde", 1, "My contribution");
+    });
+
+    it("returns 400 for missing roleId", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/contribute")
+        .send({ round: 1, content: "My contribution" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("roleId");
+    });
+
+    it("returns 400 for missing round", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/contribute")
+        .send({ roleId: "sde", content: "My contribution" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("round");
+    });
+
+    it("returns 400 for missing/empty content", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 0, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/contribute")
+        .send({ roleId: "sde", round: 1, content: "" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("content");
+    });
+
+    it("returns 400 when session is not active", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "completed",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/contribute")
+        .send({ roleId: "sde", round: 1, content: "My contribution" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("must be 'active' to contribute");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/convene-sessions/cs-1/contribute")
+        .send({ roleId: "sde", round: 1, content: "My contribution" });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing session", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-unknown/contribute")
+        .send({ roleId: "sde", round: 1, content: "My contribution" });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/convene-sessions/:sessionId/propose-nodes", () => {
+    it("stores nodes and returns success with count", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "synthesizing",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01",
+      });
+      const nodes = [
+        { title: "Task A", description: "Do A", roles: ["sde"] },
+        { title: "Task B", description: "Do B" },
+      ];
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/propose-nodes")
+        .send({ nodes });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true, count: 2 });
+      expect(updateConveneSessionStatus).toHaveBeenCalledWith("cs-1", "synthesizing", nodes);
+    });
+
+    it("returns 400 for empty nodes array", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "synthesizing",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/propose-nodes")
+        .send({ nodes: [] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("nodes");
+    });
+
+    it("returns 400 for missing nodes field", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "synthesizing",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/propose-nodes")
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("nodes");
+    });
+
+    it("returns 400 for node with missing title", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "synthesizing",
+        synthesisResult: null, messageCount: 4, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/propose-nodes")
+        .send({ nodes: [{ description: "No title here" }] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("title");
+    });
+
+    it("returns 400 when session status is not synthesizing", async () => {
+      const mockGetConveneSession = getConveneSession as ReturnType<typeof vi.fn>;
+      mockGetConveneSession.mockReturnValueOnce({
+        id: "cs-1", blueprintId: "bp-1", topic: "Design", status: "active",
+        synthesisResult: null, messageCount: 2, createdAt: "2024-01-01",
+      });
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-1/propose-nodes")
+        .send({ nodes: [{ title: "Task", description: "Desc" }] });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("must be 'synthesizing'");
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/missing/convene-sessions/cs-1/propose-nodes")
+        .send({ nodes: [{ title: "Task", description: "Desc" }] });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing session", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/convene-sessions/cs-unknown/propose-nodes")
+        .send({ nodes: [{ title: "Task", description: "Desc" }] });
       expect(res.status).toBe(404);
     });
   });

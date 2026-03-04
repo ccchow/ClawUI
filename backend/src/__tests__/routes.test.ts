@@ -89,6 +89,7 @@ vi.mock("../agent-openclaw.js", () => ({}));
 vi.mock("../agent-codex.js", () => ({}));
 
 vi.mock("../roles/role-registry.js", () => ({
+  registerRole: vi.fn(),
   getAllRoles: vi.fn(() => [
     {
       id: "sde",
@@ -125,9 +126,7 @@ vi.mock("../roles/role-registry.js", () => ({
   }),
 }));
 
-vi.mock("../roles/role-sde.js", () => ({}));
-vi.mock("../roles/role-qa.js", () => ({}));
-vi.mock("../roles/role-pm.js", () => ({}));
+vi.mock("../roles/load-all-roles.js", () => ({}));
 
 import router from "../routes.js";
 import {

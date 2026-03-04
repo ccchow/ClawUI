@@ -306,6 +306,7 @@ export interface Blueprint {
   agentType?: AgentType;
   enabledRoles?: string[];
   defaultRole?: string;
+  conveneSessionCount?: number;
   nodes: MacroNode[];
   createdAt: string;
   updatedAt: string;
@@ -593,7 +594,7 @@ export function runAllNodes(
 // --- Queue Status API ---
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene";
   nodeId?: string;
   blueprintId: string;
   queuedAt: string;
@@ -763,6 +764,85 @@ export function coordinateBlueprint(blueprintId: string): Promise<{ status: stri
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/coordinate`, {
     method: "POST",
   });
+}
+
+// ─── Convene Sessions ─────────────────────────────────────────
+
+export type ConveneSessionStatus = "active" | "synthesizing" | "completed" | "cancelled" | "failed";
+
+export interface ConveneSession {
+  id: string;
+  blueprintId: string;
+  topic: string;
+  contextNodeIds: string[] | null;
+  participatingRoles: string[];
+  maxRounds: number;
+  status: ConveneSessionStatus;
+  synthesisResult: BatchCreateNode[] | null;
+  messageCount: number;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface ConveneMessage {
+  id: string;
+  sessionId: string;
+  roleId: string;
+  round: number;
+  content: string;
+  messageType: "contribution" | "synthesis";
+  createdAt: string;
+}
+
+export interface BatchCreateNode {
+  title: string;
+  description: string;
+  dependencies?: (string | number)[];
+  roles?: string[];
+}
+
+export function startConveneSession(
+  blueprintId: string,
+  data: { topic: string; roleIds: string[]; contextNodeIds?: string[]; maxRounds?: number },
+): Promise<{ status: string; sessionId: string }> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/convene`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function getConveneSessions(blueprintId: string): Promise<ConveneSession[]> {
+  return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/convene-sessions`);
+}
+
+export function getConveneSessionDetail(
+  blueprintId: string,
+  sessionId: string,
+): Promise<ConveneSession & { messages: ConveneMessage[] }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/convene-sessions/${encodeURIComponent(sessionId)}`,
+  );
+}
+
+export function approveConveneSession(
+  blueprintId: string,
+  sessionId: string,
+): Promise<{ status: string; createdNodeIds: string[] }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/convene-sessions/${encodeURIComponent(sessionId)}/approve`,
+    { method: "POST" },
+  );
+}
+
+export function cancelConveneSession(
+  blueprintId: string,
+  sessionId: string,
+): Promise<{ status: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/convene-sessions/${encodeURIComponent(sessionId)}/cancel`,
+    { method: "POST" },
+  );
 }
 
 // ─── Image upload ─────────────────────────────────────────────

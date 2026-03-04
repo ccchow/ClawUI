@@ -19,10 +19,8 @@ import { createLogger } from "./logger.js";
 import { CLAWUI_DEV } from "./config.js";
 import { getNodeInfoForSessions } from "./plan-db.js";
 import { getAllRoles, getRole } from "./roles/role-registry.js";
-// Side-effect imports: ensure all roles are registered before getAllRoles()/getRole() is called
-import "./roles/role-sde.js";
-import "./roles/role-qa.js";
-import "./roles/role-pm.js";
+// Side-effect: auto-discovers and registers all roles before getAllRoles()/getRole()
+import "./roles/load-all-roles.js";
 
 const log = createLogger("routes");
 

@@ -1,22 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
-  getTimeline,
   updateSessionMeta,
-  getSessionMeta,
-  getSessionStatus,
   runPrompt,
-  getSessionExecution,
-  getBlueprint,
   type AgentType,
   type TimelineNode,
   type Suggestion,
   type SessionMeta,
-  type Blueprint,
-  type MacroNode,
 } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/format-time";
 import { Timeline } from "@/components/Timeline";
@@ -25,10 +18,8 @@ import { SuggestionButtons } from "@/components/SuggestionButtons";
 import { PromptInput } from "@/components/PromptInput";
 import { saveSuggestions, loadSuggestions } from "@/lib/suggestions-store";
 import { useSessionBroadcast } from "@/lib/useSessionBroadcast";
+import { useSessionDetailQueries } from "@/lib/useSessionDetailQueries";
 import { AgentBadge } from "@/components/AgentSelector";
-
-const POLL_INTERVAL = 5_000;
-const POLL_INTERVAL_RUNNING = 2_000;
 
 function SessionInfoHeader({
   sessionId,
@@ -177,143 +168,59 @@ function SessionInfoHeader({
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
 
-  const [nodes, setNodes] = useState<TimelineNode[]>([]);
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
-  const [remoteRunning, setRemoteRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastRefresh, setLastRefresh] = useState<number>(0);
-  const [refreshLabel, setRefreshLabel] = useState("just now");
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  // Fingerprint for poll dedup: detects both count changes and content replacement (synthetic → real nodes)
-  const pollFingerprintRef = useRef("");
+  const [refreshLabel, setRefreshLabel] = useState("just now");
 
-  // Refs for live-polling during a run (allows fetchNodes to read without re-creation)
-  const runningRef = useRef(false);
+  // Run overlay: synthetic nodes shown during active local runs
+  const [runOverlay, setRunOverlay] = useState<TimelineNode[] | null>(null);
   const thinkingNodeRef = useRef<TimelineNode | null>(null);
   const preRunNodeCountRef = useRef(0);
 
+  // ── TanStack Query ────────────────────────────────────────────
+  const {
+    nodes: rawNodes,
+    sessionMeta: metaData,
+    blueprintContext,
+    remoteRunning,
+    loading,
+    error: queryError,
+    dataUpdatedAt,
+    setMeta,
+    setStatus,
+    invalidateTimeline,
+  } = useSessionDetailQueries(id, autoRefresh, running);
+
   // Cross-tab broadcast: notify other tabs when this tab starts/stops a run
   const broadcastRunState = useSessionBroadcast(id, (isRunning) => {
-    setRemoteRunning(isRunning);
+    setStatus({ running: isRunning });
   });
 
-  // Combined disabled state: local run OR remote run detected
   const isDisabled = running || remoteRunning;
 
-  // Session enrichment meta + agent type
-  const [sessionMeta, setSessionMeta] = useState<{
-    alias?: string;
-    tags?: string[];
-    notes?: string;
-    starred?: boolean;
-    archived?: boolean;
-    agentType?: AgentType;
-  }>({});
+  // Non-null meta for display
+  const sessionMeta = metaData ?? {} as { alias?: string; tags?: string[]; notes?: string; starred?: boolean; archived?: boolean; agentType?: AgentType };
 
-  // Blueprint context (if this session was created by a plan execution)
-  const [blueprintContext, setBlueprintContext] = useState<{
-    blueprint: Blueprint;
-    node: MacroNode;
-    nodeIndex: number;
-  } | null>(null);
+  // During a run, update overlay when server returns new content
+  useEffect(() => {
+    if (!running || !thinkingNodeRef.current) return;
+    if (rawNodes.length > preRunNodeCountRef.current) {
+      setRunOverlay([...rawNodes, thinkingNodeRef.current]);
+    }
+  }, [rawNodes, running]);
 
-  // Used for polling and manual refresh only (not initial load)
-  const fetchNodes = useCallback(
-    async () => {
-      try {
-        const n = await getTimeline(id);
-        const last = n[n.length - 1];
-
-        if (runningRef.current && thinkingNodeRef.current) {
-          // During a run: only update display once server has new content beyond pre-run state.
-          // This ensures the optimistic user message stays visible until the real node appears.
-          if (n.length > preRunNodeCountRef.current) {
-            const fp = `${n.length}-${last?.id ?? ""}-running`;
-            if (fp !== pollFingerprintRef.current) {
-              setNodes([...n, thinkingNodeRef.current]);
-              pollFingerprintRef.current = fp;
-            }
-          }
-          // If no new content yet, keep optimistic state unchanged
-        } else {
-          // Normal polling: replace nodes if fingerprint changed
-          const fp = `${n.length}-${last?.id ?? ""}`;
-          if (fp !== pollFingerprintRef.current) {
-            setNodes(n);
-            pollFingerprintRef.current = fp;
-          }
-        }
-        setLastRefresh(Date.now());
-      } catch {
-        // Silently ignore poll errors
-      }
-    },
-    [id]
+  // Display nodes: overlay during runs, raw query data otherwise
+  const nodes = useMemo(
+    () => runOverlay ?? rawNodes,
+    [runOverlay, rawNodes],
   );
 
-  // Consolidated initial load: fetch nodes + meta + blueprint context together
+  // Restore suggestions from cookie on mount
   useEffect(() => {
-    let cancelled = false;
-    pollFingerprintRef.current = "";
-    setLoading(true);
-
-    async function loadAll() {
-      // Fire all fetches in parallel
-      const [nodesResult, metaResult, bpResult, statusResult] = await Promise.allSettled([
-        getTimeline(id),
-        getSessionMeta(id),
-        getSessionExecution(id).then(async (execution) => {
-          if (!execution) return null;
-          const bp = await getBlueprint(execution.blueprintId);
-          const node = bp.nodes.find((n) => n.id === execution.nodeId);
-          if (!node) return null;
-          const nodeIndex = bp.nodes.findIndex((n) => n.id === execution.nodeId);
-          return { blueprint: bp, node, nodeIndex };
-        }),
-        getSessionStatus(id),
-      ]);
-
-      if (cancelled) return;
-
-      // Batch all state updates together
-      if (nodesResult.status === "fulfilled") {
-        const initNodes = nodesResult.value;
-        const last = initNodes[initNodes.length - 1];
-        setNodes(initNodes);
-        pollFingerprintRef.current = `${initNodes.length}-${last?.id ?? ""}`;
-        setLastRefresh(Date.now());
-      } else {
-        setError(
-          nodesResult.reason instanceof Error
-            ? nodesResult.reason.message
-            : String(nodesResult.reason)
-        );
-      }
-
-      if (metaResult.status === "fulfilled" && metaResult.value) {
-        setSessionMeta(metaResult.value);
-      }
-
-      if (bpResult.status === "fulfilled" && bpResult.value) {
-        setBlueprintContext(bpResult.value);
-      }
-
-      // Check if session is already running (e.g. from another tab or blueprint execution)
-      if (statusResult.status === "fulfilled" && statusResult.value?.running) {
-        setRemoteRunning(true);
-      }
-
-      // Restore suggestions from cookie
-      const saved = loadSuggestions(id);
-      if (saved.length > 0) setSuggestions(saved);
-
-      setLoading(false);
-    }
-
-    loadAll();
-    return () => { cancelled = true; };
+    const saved = loadSuggestions(id);
+    if (saved.length > 0) setSuggestions(saved);
   }, [id]);
 
   // Persist suggestions to cookie whenever they change
@@ -323,52 +230,22 @@ export default function SessionPage() {
     }
   }, [id, suggestions]);
 
-  // Auto-refresh poll (faster 2s interval during active runs for live streaming)
+  // Update the "Xm ago" label from query's dataUpdatedAt
   useEffect(() => {
-    if (!autoRefresh || loading) return;
-
-    const interval = setInterval(() => {
-      if (!document.hidden) {
-        fetchNodes();
-      }
-    }, (running || remoteRunning) ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
-
-    return () => clearInterval(interval);
-  }, [autoRefresh, loading, running, remoteRunning, fetchNodes]);
-
-  // Poll backend session status to detect remote runs (other tabs, blueprint execution)
-  useEffect(() => {
-    if (loading || running) return; // Skip when locally running — we know the state
-
-    const interval = setInterval(async () => {
-      if (document.hidden) return;
-      try {
-        const status = await getSessionStatus(id);
-        setRemoteRunning(status.running);
-      } catch {
-        // Ignore status poll errors
-      }
-    }, remoteRunning ? POLL_INTERVAL_RUNNING : POLL_INTERVAL);
-
-    return () => clearInterval(interval);
-  }, [id, loading, running, remoteRunning]);
-
-  // Update the "Xm ago" label every second
-  useEffect(() => {
-    if (!lastRefresh) return;
+    if (!dataUpdatedAt) return;
+    setRefreshLabel(formatTimeAgo(dataUpdatedAt));
     const tick = setInterval(() => {
-      setRefreshLabel(formatTimeAgo(lastRefresh));
+      setRefreshLabel(formatTimeAgo(dataUpdatedAt));
     }, 1_000);
     return () => clearInterval(tick);
-  }, [lastRefresh]);
+  }, [dataUpdatedAt]);
 
   const handleMetaChange = (patch: Partial<SessionMeta>) => {
-    setSessionMeta((prev) => ({ ...prev, ...patch }));
+    setMeta((prev) => ({ ...(prev ?? {}), ...patch }));
   };
 
   const handleRun = async (prompt: string) => {
     setRunning(true);
-    runningRef.current = true;
     setError(null);
     setSuggestions([]);
     broadcastRunState("start");
@@ -386,85 +263,54 @@ export default function SessionPage() {
     };
 
     // Store refs for live-polling during the run
-    preRunNodeCountRef.current = nodes.length;
+    preRunNodeCountRef.current = rawNodes.length;
     thinkingNodeRef.current = thinkingNode;
 
-    // Optimistic UI: immediately show user message + thinking indicator
-    setNodes((prev) => {
-      const updated = [
-        ...prev,
-        {
-          id: userNodeId,
-          type: "user" as const,
-          timestamp: now,
-          title: prompt.slice(0, 120),
-          content: prompt,
-        },
-        thinkingNode,
-      ];
-      pollFingerprintRef.current = `${updated.length}-${thinkingNodeId}`;
-      return updated;
-    });
+    // Optimistic overlay: immediately show user message + thinking indicator
+    setRunOverlay([
+      ...rawNodes,
+      {
+        id: userNodeId,
+        type: "user" as const,
+        timestamp: now,
+        title: prompt.slice(0, 120),
+        content: prompt,
+      },
+      thinkingNode,
+    ]);
 
-    const startTime = Date.now();
     try {
       const data = await runPrompt(id, prompt);
 
-      // Backend synced the JSONL after run — fetch real parsed timeline
-      const realNodes = await getTimeline(id);
-      const lastReal = realNodes[realNodes.length - 1];
-      setNodes(realNodes);
-      pollFingerprintRef.current = `${realNodes.length}-${lastReal?.id ?? ""}`;
-      setLastRefresh(Date.now());
+      // Wait for fresh data before clearing overlay to avoid flash
+      await invalidateTimeline();
       setSuggestions(data.suggestions || []);
     } catch (e) {
-      const elapsed = Date.now() - startTime;
-      console.error("[ClawUI] Run failed:", { elapsed: `${elapsed}ms`, error: e });
+      console.error("[ClawUI] Run failed:", e);
 
       // Handle 409 Conflict — session is already running in another tab
       const is409 = e instanceof Error && e.message.includes("409");
       if (is409) {
-        setRemoteRunning(true);
+        setStatus({ running: true });
         setError("Session is running in another tab");
-        // Remove optimistic nodes since the run didn't actually start
-        setNodes((prev) => prev.filter((n) => n.id !== userNodeId && n.id !== thinkingNodeId));
-        pollFingerprintRef.current = "";
-        setRunning(false);
-        runningRef.current = false;
-        thinkingNodeRef.current = null;
-        broadcastRunState("stop");
-        return;
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
       }
-      // Replace thinking node with error
-      setNodes((prev) =>
-        prev.map((n) =>
-          n.id === thinkingNodeId
-            ? {
-                id: `error-${Date.now()}`,
-                type: "error" as const,
-                timestamp: new Date().toISOString(),
-                title: "❌ Failed",
-                content: e instanceof Error ? e.message : String(e),
-              }
-            : n
-        )
-      );
-      setError(e instanceof Error ? e.message : String(e));
-      // Reset fingerprint so next poll replaces synthetic nodes with real data
-      pollFingerprintRef.current = "";
     } finally {
       setRunning(false);
-      runningRef.current = false;
       thinkingNodeRef.current = null;
+      setRunOverlay(null);
       broadcastRunState("stop");
     }
   };
 
-  if (error && nodes.length === 0) {
+  const displayError = error || queryError;
+
+  if (displayError && nodes.length === 0 && !loading) {
     return (
       <div className="text-center py-20">
         <p className="text-accent-red text-lg mb-2">Failed to load session</p>
-        <p className="text-text-muted text-sm">{error}</p>
+        <p className="text-text-muted text-sm">{displayError}</p>
         <Link href="/sessions" className="text-accent-blue text-sm mt-4 inline-block hover:underline">
           Back to sessions
         </Link>
@@ -562,7 +408,7 @@ export default function SessionPage() {
             />
             <span className="text-xs text-text-muted">{refreshLabel}</span>
             <button
-              onClick={() => fetchNodes()}
+              onClick={() => invalidateTimeline()}
               title="Refresh now"
               className="text-xs text-text-muted hover:text-text-primary transition-all active:scale-[0.9] px-1.5 py-1 rounded hover:bg-bg-tertiary"
             >

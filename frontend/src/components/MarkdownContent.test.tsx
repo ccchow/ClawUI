@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MarkdownContent } from "./MarkdownContent";
+
+vi.mock("next-themes", () => ({
+  useTheme: () => ({ resolvedTheme: "dark" }),
+}));
 
 describe("MarkdownContent", () => {
   it("renders plain text as paragraph", () => {
@@ -9,21 +13,27 @@ describe("MarkdownContent", () => {
   });
 
   it("renders h1 heading", () => {
-    const { container } = render(<MarkdownContent content="# Hello Heading" />);
+    const { container } = render(
+      <MarkdownContent content="# Hello Heading" />
+    );
     const h1 = container.querySelector("h1");
     expect(h1).toBeInTheDocument();
     expect(h1?.textContent).toBe("Hello Heading");
   });
 
   it("renders h2 heading", () => {
-    const { container } = render(<MarkdownContent content="## Sub Heading" />);
+    const { container } = render(
+      <MarkdownContent content="## Sub Heading" />
+    );
     const h2 = container.querySelector("h2");
     expect(h2).toBeInTheDocument();
     expect(h2?.textContent).toBe("Sub Heading");
   });
 
   it("renders h3 heading", () => {
-    const { container } = render(<MarkdownContent content="### Third Level" />);
+    const { container } = render(
+      <MarkdownContent content="### Third Level" />
+    );
     const h3 = container.querySelector("h3");
     expect(h3).toBeInTheDocument();
     expect(h3?.textContent).toBe("Third Level");
@@ -50,13 +60,17 @@ describe("MarkdownContent", () => {
   });
 
   it("renders inline code", () => {
-    render(<MarkdownContent content="Use `console.log` for debugging" />);
+    render(
+      <MarkdownContent content="Use `console.log` for debugging" />
+    );
     const code = screen.getByText("console.log");
     expect(code.tagName).toBe("CODE");
   });
 
   it("renders links with safe href", () => {
-    render(<MarkdownContent content="Visit [Google](https://google.com)" />);
+    render(
+      <MarkdownContent content="Visit [Google](https://google.com)" />
+    );
     const link = screen.getByText("Google") as HTMLAnchorElement;
     expect(link.tagName).toBe("A");
     expect(link.href).toBe("https://google.com/");
@@ -65,17 +79,20 @@ describe("MarkdownContent", () => {
   });
 
   it("sanitizes unsafe link URLs", () => {
-    render(<MarkdownContent content="Click [here](javascript:alert(1))" />);
+    render(
+      <MarkdownContent content="Click [here](javascript:alert(1))" />
+    );
     const link = screen.getByText("here") as HTMLAnchorElement;
     expect(link.href).toContain("#");
     expect(link.href).not.toContain("javascript");
   });
 
-  it("renders code blocks", () => {
+  it("renders code blocks with language label", () => {
     const content = ["```js", "const x = 1;", "```"].join("\n");
     render(<MarkdownContent content={content} />);
-    expect(screen.getByText("const x = 1;")).toBeInTheDocument();
     expect(screen.getByText("js")).toBeInTheDocument();
+    // Code content is rendered in syntax-highlighted spans
+    expect(screen.getByText(/const/)).toBeInTheDocument();
   });
 
   it("renders unordered lists", () => {
@@ -100,7 +117,6 @@ describe("MarkdownContent", () => {
 
   it("handles empty content", () => {
     const { container } = render(<MarkdownContent content="" />);
-    // Empty content returns null — no wrapper div
     expect(container.firstChild).toBeNull();
   });
 
@@ -121,14 +137,16 @@ describe("MarkdownContent", () => {
   });
 
   it("renders blockquotes", () => {
-    const { container } = render(<MarkdownContent content="> This is a quote" />);
+    const { container } = render(
+      <MarkdownContent content="> This is a quote" />
+    );
     const bq = container.querySelector("blockquote");
     expect(bq).toBeInTheDocument();
-    expect(bq?.textContent).toBe("This is a quote");
+    expect(bq?.textContent).toContain("This is a quote");
   });
 
   it("renders horizontal rules", () => {
-    const content = ["Above", "---", "Below"].join("\n");
+    const content = ["Above", "", "---", "", "Below"].join("\n");
     const { container } = render(<MarkdownContent content={content} />);
     expect(container.querySelector("hr")).toBeInTheDocument();
   });
@@ -144,7 +162,8 @@ describe("MarkdownContent", () => {
       <MarkdownContent content="Hello" maxHeight="200px" />
     );
     const wrapper = container.firstChild as HTMLElement;
-    const innerDiv = wrapper.firstChild as HTMLElement;
+    // The inner div with maxHeight is the second child (after copy button or first child)
+    const innerDiv = wrapper.querySelector(".markdown-content") as HTMLElement;
     expect(innerDiv.style.maxHeight).toBe("200px");
   });
 
@@ -153,7 +172,7 @@ describe("MarkdownContent", () => {
       <MarkdownContent content="Hello" maxHeight="none" />
     );
     const wrapper = container.firstChild as HTMLElement;
-    const innerDiv = wrapper.firstChild as HTMLElement;
+    const innerDiv = wrapper.querySelector(".markdown-content") as HTMLElement;
     expect(innerDiv.style.maxHeight).toBe("");
   });
 
@@ -161,5 +180,82 @@ describe("MarkdownContent", () => {
     const content = ["```", "code", "```"].join("\n");
     render(<MarkdownContent content={content} />);
     expect(screen.getByLabelText("Copy to clipboard")).toBeInTheDocument();
+  });
+
+  // New tests for GFM features
+
+  it("renders GFM tables", () => {
+    const content = [
+      "| Header 1 | Header 2 |",
+      "| -------- | -------- |",
+      "| Cell 1   | Cell 2   |",
+      "| Cell 3   | Cell 4   |",
+    ].join("\n");
+    const { container } = render(<MarkdownContent content={content} />);
+    expect(container.querySelector("table")).toBeInTheDocument();
+    expect(container.querySelectorAll("th")).toHaveLength(2);
+    expect(container.querySelectorAll("td")).toHaveLength(4);
+    expect(screen.getByText("Header 1")).toBeInTheDocument();
+    expect(screen.getByText("Cell 1")).toBeInTheDocument();
+  });
+
+  it("renders GFM task lists", () => {
+    const content = [
+      "- [x] Completed task",
+      "- [ ] Pending task",
+    ].join("\n");
+    const { container } = render(<MarkdownContent content={content} />);
+    const checkboxes = container.querySelectorAll("input[type='checkbox']");
+    expect(checkboxes).toHaveLength(2);
+    expect((checkboxes[0] as HTMLInputElement).checked).toBe(true);
+    expect((checkboxes[1] as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("renders images with alt text", () => {
+    render(
+      <MarkdownContent content="![Alt text](https://example.com/image.png)" />
+    );
+    const img = screen.getByAltText("Alt text") as HTMLImageElement;
+    expect(img).toBeInTheDocument();
+    expect(img.src).toBe("https://example.com/image.png");
+  });
+
+  it("resolves /api/ image URLs", () => {
+    render(
+      <MarkdownContent content="![Screenshot](/api/uploads/test.png)" />
+    );
+    const img = screen.getByAltText("Screenshot") as HTMLImageElement;
+    expect(img.src).toContain("3001/api/uploads/test.png");
+  });
+
+  it("renders copy-all button for long content", () => {
+    const longContent =
+      "This is a longer piece of content that exceeds fifty characters total for the copy-all threshold.";
+    render(<MarkdownContent content={longContent} />);
+    expect(screen.getByTitle("Copy all content")).toBeInTheDocument();
+  });
+
+  it("does not render copy-all button for short content", () => {
+    render(<MarkdownContent content="Short" />);
+    expect(screen.queryByTitle("Copy all content")).not.toBeInTheDocument();
+  });
+
+  it("handles whitespace-only content gracefully", () => {
+    const { container } = render(
+      <MarkdownContent content="" />
+    );
+    expect(container.firstChild).toBeNull();
+
+    // Whitespace with newlines — component returns null for trimmed-empty content
+    const { container: c2 } = render(
+      <MarkdownContent content="   " />
+    );
+    expect(c2.firstChild).toBeNull();
+  });
+
+  it("renders nested inline formatting", () => {
+    render(<MarkdownContent content="This is **bold and *italic*** text" />);
+    const bold = screen.getByText(/bold and/);
+    expect(bold.closest("strong")).toBeInTheDocument();
   });
 });

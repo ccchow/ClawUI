@@ -1,24 +1,37 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { screen, fireEvent, waitFor } from "@testing-library/react";
 import BlueprintsPage from "./page";
-import { makeMockBlueprint } from "@/test-utils";
+import { makeMockBlueprint, renderWithProviders } from "@/test-utils";
 import type { Blueprint } from "@/lib/api";
 
 // --- Mocks ---
 
-// vi.hoisted runs before vi.mock hoisting, making these available in the factory
 const apiMocks = vi.hoisted(() => ({
-  listBlueprints: vi.fn((): Promise<Blueprint[]> => Promise.resolve([])),
   archiveBlueprint: vi.fn((): Promise<Blueprint> => Promise.resolve({} as Blueprint)),
   unarchiveBlueprint: vi.fn((): Promise<Blueprint> => Promise.resolve({} as Blueprint)),
   starBlueprint: vi.fn((): Promise<Blueprint> => Promise.resolve({} as Blueprint)),
   unstarBlueprint: vi.fn((): Promise<Blueprint> => Promise.resolve({} as Blueprint)),
 }));
 
-vi.mock("@/lib/api", async () => {
-  const actual = await vi.importActual<object>("@/lib/api");
-  return { ...actual, ...apiMocks };
-});
+const hookState = vi.hoisted(() => ({
+  blueprints: [] as Blueprint[],
+  loading: false,
+  error: null as string | null,
+  setBlueprints: vi.fn(),
+  invalidateList: vi.fn(),
+  prefetchBlueprintDetail: vi.fn(),
+  queryClient: {} as unknown,
+}));
+
+// Mock the api module — only the functions directly imported by the page component
+vi.mock("@/lib/api", () => ({
+  ...apiMocks,
+}));
+
+// Mock the custom hook to avoid importing @tanstack/react-query in the worker
+vi.mock("@/lib/useBlueprintListQuery", () => ({
+  useBlueprintListQuery: vi.fn(() => hookState),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: vi.fn(() => ({ push: vi.fn(), back: vi.fn() })),
@@ -27,8 +40,8 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("next/link", () => ({
-  default: ({ href, children, className }: { href: string; children: React.ReactNode; className?: string }) => (
-    <a href={href} className={className}>{children}</a>
+  default: ({ href, children, className, onMouseEnter, onFocus }: { href: string; children: React.ReactNode; className?: string; onMouseEnter?: () => void; onFocus?: () => void }) => (
+    <a href={href} className={className} onMouseEnter={onMouseEnter} onFocus={onFocus}>{children}</a>
   ),
 }));
 
@@ -50,19 +63,29 @@ function makeBlueprints(): Blueprint[] {
   ];
 }
 
+function setupHook(overrides: Partial<typeof hookState> = {}) {
+  hookState.blueprints = overrides.blueprints ?? [];
+  hookState.loading = overrides.loading ?? false;
+  hookState.error = overrides.error ?? null;
+  hookState.setBlueprints = overrides.setBlueprints ?? vi.fn();
+  hookState.invalidateList = overrides.invalidateList ?? vi.fn();
+  hookState.prefetchBlueprintDetail = overrides.prefetchBlueprintDetail ?? vi.fn();
+}
+
 // --- Tests ---
 
 describe("BlueprintsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setupHook();
     // Stub sessionStorage
     vi.stubGlobal("sessionStorage", { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() });
   });
 
   it("renders blueprint cards from listBlueprints response", async () => {
-    apiMocks.listBlueprints.mockResolvedValue(makeBlueprints());
+    setupHook({ blueprints: makeBlueprints() });
 
-    render(<BlueprintsPage />);
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Auth System")).toBeInTheDocument();
@@ -70,8 +93,8 @@ describe("BlueprintsPage", () => {
   });
 
   it("shows 'New Blueprint' link", async () => {
-    apiMocks.listBlueprints.mockResolvedValue(makeBlueprints());
-    render(<BlueprintsPage />);
+    setupHook({ blueprints: makeBlueprints() });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Auth System")).toBeInTheDocument();
@@ -82,8 +105,8 @@ describe("BlueprintsPage", () => {
   });
 
   it("filters by status when clicking status chips", async () => {
-    apiMocks.listBlueprints.mockResolvedValue(makeBlueprints());
-    render(<BlueprintsPage />);
+    setupHook({ blueprints: makeBlueprints() });
+    renderWithProviders(<BlueprintsPage />);
 
     // Wait for initial render with default "Approved" filter
     await waitFor(() => {
@@ -105,8 +128,8 @@ describe("BlueprintsPage", () => {
   });
 
   it("filters to show only draft blueprints", async () => {
-    apiMocks.listBlueprints.mockResolvedValue(makeBlueprints());
-    render(<BlueprintsPage />);
+    setupHook({ blueprints: makeBlueprints() });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Auth System")).toBeInTheDocument();
@@ -123,12 +146,14 @@ describe("BlueprintsPage", () => {
   });
 
   it("calls archiveBlueprint when archive button is clicked", async () => {
-    apiMocks.listBlueprints.mockResolvedValue([
-      makeMockBlueprint({ id: "bp-1", title: "My BP", status: "approved" }),
-    ]);
+    const setBlueprints = vi.fn();
+    setupHook({
+      blueprints: [makeMockBlueprint({ id: "bp-1", title: "My BP", status: "approved" })],
+      setBlueprints,
+    });
     apiMocks.archiveBlueprint.mockResolvedValue(makeMockBlueprint({ id: "bp-1", archivedAt: "2025-01-01" }));
 
-    render(<BlueprintsPage />);
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("My BP")).toBeInTheDocument();
@@ -143,14 +168,16 @@ describe("BlueprintsPage", () => {
   });
 
   it("calls unarchiveBlueprint when unarchive button is clicked", async () => {
-    apiMocks.listBlueprints.mockResolvedValue([
-      makeMockBlueprint({ id: "bp-archived", title: "Archived BP", status: "done", archivedAt: "2025-01-01" }),
-    ]);
+    const setBlueprints = vi.fn();
+    setupHook({
+      blueprints: [makeMockBlueprint({ id: "bp-archived", title: "Archived BP", status: "done", archivedAt: "2025-01-01" })],
+      setBlueprints,
+    });
     apiMocks.unarchiveBlueprint.mockResolvedValue(
       makeMockBlueprint({ id: "bp-archived", title: "Archived BP", archivedAt: undefined }),
     );
 
-    render(<BlueprintsPage />);
+    renderWithProviders(<BlueprintsPage />);
 
     // Toggle "Show archived"
     await waitFor(() => {
@@ -175,8 +202,8 @@ describe("BlueprintsPage", () => {
   });
 
   it("shows empty state when no blueprints exist", async () => {
-    apiMocks.listBlueprints.mockResolvedValue([]);
-    render(<BlueprintsPage />);
+    setupHook({ blueprints: [] });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("No blueprints yet.")).toBeInTheDocument();
@@ -184,8 +211,8 @@ describe("BlueprintsPage", () => {
   });
 
   it("shows error message when API fails", async () => {
-    apiMocks.listBlueprints.mockRejectedValue(new Error("Network error"));
-    render(<BlueprintsPage />);
+    setupHook({ error: "Network error" });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText(/Failed to load blueprints/)).toBeInTheDocument();
@@ -194,13 +221,15 @@ describe("BlueprintsPage", () => {
   });
 
   it("shows node count for each blueprint", async () => {
-    apiMocks.listBlueprints.mockResolvedValue([
-      makeMockBlueprint({ id: "bp-1", title: "Multi Node BP", status: "approved", nodes: [
-        { id: "n1", blueprintId: "bp-1", order: 0, seq: 1, title: "N1", description: "", status: "pending", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [], createdAt: "", updatedAt: "" },
-        { id: "n2", blueprintId: "bp-1", order: 1, seq: 2, title: "N2", description: "", status: "pending", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [], createdAt: "", updatedAt: "" },
-      ] }),
-    ]);
-    render(<BlueprintsPage />);
+    setupHook({
+      blueprints: [
+        makeMockBlueprint({ id: "bp-1", title: "Multi Node BP", status: "approved", nodes: [
+          { id: "n1", blueprintId: "bp-1", order: 0, seq: 1, title: "N1", description: "", status: "pending", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [], createdAt: "", updatedAt: "" },
+          { id: "n2", blueprintId: "bp-1", order: 1, seq: 2, title: "N2", description: "", status: "pending", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [], createdAt: "", updatedAt: "" },
+        ] }),
+      ],
+    });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("2 nodes")).toBeInTheDocument();
@@ -208,13 +237,39 @@ describe("BlueprintsPage", () => {
   });
 
   it("shows project CWD when provided", async () => {
-    apiMocks.listBlueprints.mockResolvedValue([
-      makeMockBlueprint({ id: "bp-1", title: "CWD BP", status: "approved", projectCwd: "/path/to/project" }),
-    ]);
-    render(<BlueprintsPage />);
+    setupHook({
+      blueprints: [makeMockBlueprint({ id: "bp-1", title: "CWD BP", status: "approved", projectCwd: "/path/to/project" })],
+    });
+    renderWithProviders(<BlueprintsPage />);
 
     await waitFor(() => {
       expect(screen.getByText("/path/to/project")).toBeInTheDocument();
     });
+  });
+
+  it("triggers prefetch on link hover", async () => {
+    const prefetchFn = vi.fn();
+    setupHook({
+      blueprints: [makeMockBlueprint({ id: "bp-prefetch", title: "Prefetch BP", status: "approved" })],
+      prefetchBlueprintDetail: prefetchFn,
+    });
+
+    renderWithProviders(<BlueprintsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Prefetch BP")).toBeInTheDocument();
+    });
+
+    // Hover over the blueprint link to trigger prefetch
+    const link = screen.getByText("Prefetch BP").closest("a")!;
+    fireEvent.mouseEnter(link);
+
+    expect(prefetchFn).toHaveBeenCalledWith("bp-prefetch");
+  });
+
+  it("shows loading skeleton when loading", () => {
+    setupHook({ loading: true });
+    renderWithProviders(<BlueprintsPage />);
+    expect(screen.getByTestId("skeleton-loader")).toBeInTheDocument();
   });
 });

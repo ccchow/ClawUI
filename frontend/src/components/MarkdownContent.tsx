@@ -1,125 +1,12 @@
 "use client";
 
-import React, { useState, useCallback, useMemo } from "react";
-
-/**
- * Lightweight markdown renderer — no external deps.
- * Handles: code blocks, inline code, headings, bold, italic, links, lists.
- */
-
-interface Block {
-  type: "code" | "heading" | "list" | "paragraph" | "blockquote" | "hr";
-  content: string;
-  lang?: string;
-  level?: number; // heading level 1-6
-  ordered?: boolean;
-  items?: string[];
-}
-
-function parseBlocks(text: string): Block[] {
-  // Normalize line endings: strip \r to prevent regex $ anchor mismatches
-  const lines = text.replace(/\r/g, "").split("\n");
-  const blocks: Block[] = [];
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Code block: ```lang ... ```
-    if (line.trimStart().startsWith("```")) {
-      const lang = line.trimStart().slice(3).trim();
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++; // skip closing ```
-      blocks.push({ type: "code", content: codeLines.join("\n"), lang });
-      continue;
-    }
-
-    // Heading: # ... through ######
-    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (headingMatch) {
-      blocks.push({
-        type: "heading",
-        level: headingMatch[1].length,
-        content: headingMatch[2],
-      });
-      i++;
-      continue;
-    }
-
-    // List: collect consecutive list items
-    const ulMatch = line.match(/^(\s*)[*\-+]\s+(.*)$/);
-    const olMatch = line.match(/^(\s*)\d+[.)]\s+(.*)$/);
-    if (ulMatch || olMatch) {
-      const ordered = !!olMatch;
-      const items: string[] = [];
-      while (i < lines.length) {
-        const lm = ordered
-          ? lines[i].match(/^(\s*)\d+[.)]\s+(.*)$/)
-          : lines[i].match(/^(\s*)[*\-+]\s+(.*)$/);
-        if (!lm) break;
-        items.push(lm[2]);
-        i++;
-      }
-      blocks.push({ type: "list", content: "", ordered, items });
-      continue;
-    }
-
-    // Horizontal rule: ---, ***, ___
-    if (/^[-*_]{3,}\s*$/.test(line.trim())) {
-      blocks.push({ type: "hr", content: "" });
-      i++;
-      continue;
-    }
-
-    // Blockquote: > lines
-    if (line.match(/^>\s?/)) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && lines[i].match(/^>\s?/)) {
-        quoteLines.push(lines[i].replace(/^>\s?/, ""));
-        i++;
-      }
-      blocks.push({ type: "blockquote", content: quoteLines.join("\n") });
-      continue;
-    }
-
-    // Blank line — skip
-    if (line.trim() === "") {
-      i++;
-      continue;
-    }
-
-    // Paragraph: collect consecutive non-special lines
-    const paraLines: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !lines[i].trimStart().startsWith("```") &&
-      !lines[i].match(/^#{1,6}\s+/) &&
-      !lines[i].match(/^(\s*)[*\-+]\s+/) &&
-      !lines[i].match(/^(\s*)\d+[.)]\s+/) &&
-      !lines[i].match(/^>\s?/) &&
-      !/^[-*_]{3,}\s*$/.test(lines[i].trim())
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    if (paraLines.length > 0) {
-      blocks.push({ type: "paragraph", content: paraLines.join("\n") });
-    } else {
-      // Safety: if no handler consumed this line (e.g., a line that looks like
-      // a heading/list start but failed the stricter outer regex), force advance
-      // to prevent an infinite loop.
-      i++;
-    }
-  }
-
-  return blocks;
-}
+import React, { useState, useCallback } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark, oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { useTheme } from "next-themes";
+import type { Components } from "react-markdown";
 
 /** Resolve image URLs: relative /api/ paths get the API base prepended */
 function resolveImageUrl(src: string): string {
@@ -132,143 +19,304 @@ function resolveImageUrl(src: string): string {
   return src;
 }
 
-/** Parse inline markdown: bold, italic, inline code, images, links */
-function renderInline(text: string): React.ReactNode[] {
-  const nodes: React.ReactNode[] = [];
-  // Order: code, images (before links to avoid conflict), bold, strikethrough, italic, links
-  const pattern =
-    /(`[^`]+`)|(\*\*[^*]+\*\*)|(!\[[^\]]*\]\([^)]+\))|(~~[^~]+~~)|(\*[^*]+\*)|(\[[^\]]+\]\([^)]+\))/g;
-
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-
-  while ((match = pattern.exec(text)) !== null) {
-    // Text before match
-    if (match.index > lastIndex) {
-      nodes.push(text.slice(lastIndex, match.index));
-    }
-
-    const m = match[0];
-
-    if (match[1]) {
-      // Inline code
-      nodes.push(
-        <code
-          key={key++}
-          className="px-1.5 py-0.5 rounded bg-bg-tertiary text-accent-blue text-[13px] font-mono"
-        >
-          {m.slice(1, -1)}
-        </code>
-      );
-    } else if (match[2]) {
-      // Bold
-      nodes.push(
-        <strong key={key++} className="font-semibold text-text-primary">
-          {m.slice(2, -2)}
-        </strong>
-      );
-    } else if (match[3]) {
-      // Image: ![alt](url)
-      const imgMatch = m.match(/!\[([^\]]*)\]\(([^)]+)\)/);
-      if (imgMatch) {
-        const alt = imgMatch[1];
-        const src = resolveImageUrl(imgMatch[2]);
-        nodes.push(
-          <img
-            key={key++}
-            src={src}
-            alt={alt}
-            className="max-w-full rounded-lg border border-border-primary my-1 max-h-[400px] object-contain"
-          />
-        );
-      }
-    } else if (match[4]) {
-      // Strikethrough
-      nodes.push(
-        <del key={key++} className="text-text-muted line-through">
-          {m.slice(2, -2)}
-        </del>
-      );
-    } else if (match[5]) {
-      // Italic
-      nodes.push(
-        <em key={key++} className="italic text-text-secondary">
-          {m.slice(1, -1)}
-        </em>
-      );
-    } else if (match[6]) {
-      // Link: [text](url)
-      const linkMatch = m.match(/\[([^\]]+)\]\(([^)]+)\)/);
-      if (linkMatch) {
-        const url = linkMatch[2];
-        const isSafe = /^(https?:\/\/|\/|#|mailto:)/i.test(url);
-        nodes.push(
-          <a
-            key={key++}
-            href={isSafe ? url : "#"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-accent-blue hover:underline"
-          >
-            {linkMatch[1]}
-          </a>
-        );
-      }
-    }
-
-    lastIndex = match.index + m.length;
-  }
-
-  // Remaining text
-  if (lastIndex < text.length) {
-    nodes.push(text.slice(lastIndex));
-  }
-
-  return nodes;
-}
-
-function CodeBlock({ content, lang }: { content: string; lang?: string }) {
+function CopyButton({
+  text,
+  title,
+  ariaLabel,
+  className = "",
+}: {
+  text: string;
+  title: string;
+  ariaLabel?: string;
+  className?: string;
+}) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(content).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }).catch(() => { /* clipboard not available */ });
-  }, [content]);
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        /* clipboard not available */
+      });
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      title={title}
+      aria-label={copied ? "Copied" : (ariaLabel ?? title)}
+      className={`opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1.5 sm:p-1 rounded hover:bg-bg-hover ${className}`}
+    >
+      {copied ? (
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="text-accent-green"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="text-text-muted"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+function CodeBlock({
+  children,
+  className: codeClassName,
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const { resolvedTheme } = useTheme();
+  const match = /language-(\w+)/.exec(codeClassName || "");
+  const lang = match ? match[1] : undefined;
+  const code = String(children).replace(/\n$/, "");
 
   return (
     <div className="relative group">
-      <div className="absolute top-1.5 right-2 flex items-center gap-2">
+      <div className="absolute top-1.5 right-2 flex items-center gap-2 z-10">
         {lang && (
           <span className="text-[10px] text-text-muted uppercase tracking-wide">
             {lang}
           </span>
         )}
-        <button
-          onClick={handleCopy}
-          title="Copy to clipboard"
-          aria-label={copied ? "Copied" : "Copy to clipboard"}
-          className="opacity-70 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity p-1.5 sm:p-1 rounded hover:bg-bg-hover"
-        >
-          {copied ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent-green">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-          )}
-        </button>
+        <CopyButton text={code} title="Copy to clipboard" />
       </div>
-      <pre className="rounded-lg bg-bg-tertiary border border-border-primary p-3 pr-10 sm:pr-20 overflow-x-auto text-[13px] leading-relaxed font-mono text-text-secondary">
-        {content}
-      </pre>
+      <SyntaxHighlighter
+        style={resolvedTheme === "dark" ? oneDark : oneLight}
+        language={lang}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          borderRadius: "0.5rem",
+          padding: "0.75rem",
+          paddingRight: "5rem",
+          fontSize: "13px",
+          lineHeight: "1.625",
+          background: "rgb(var(--bg-tertiary))",
+          border: "1px solid rgb(var(--border-primary))",
+        }}
+        codeTagProps={{
+          style: {
+            fontFamily: '"SF Mono", "Fira Code", "Cascadia Code", monospace',
+          },
+        }}
+      >
+        {code}
+      </SyntaxHighlighter>
     </div>
   );
+}
+
+function useMarkdownComponents(): Components {
+  return {
+    // Fenced code blocks: <pre> extracts the code child and renders CodeBlock
+    pre({ children }) {
+      const child = React.Children.toArray(children)[0];
+      if (React.isValidElement(child)) {
+        const props = child.props as {
+          className?: string;
+          children?: React.ReactNode;
+        };
+        return (
+          <CodeBlock className={props.className}>{props.children}</CodeBlock>
+        );
+      }
+      return <pre>{children}</pre>;
+    },
+
+    // Inline code only — fenced blocks are handled by pre() above
+    code({ children }) {
+      return (
+        <code className="px-1.5 py-0.5 rounded bg-bg-tertiary text-accent-blue text-[13px] font-mono">
+          {children}
+        </code>
+      );
+    },
+
+    // Headings
+    h1({ children }) {
+      return <h1 className="text-lg font-bold">{children}</h1>;
+    },
+    h2({ children }) {
+      return <h2 className="text-base font-bold">{children}</h2>;
+    },
+    h3({ children }) {
+      return <h3 className="text-sm font-semibold">{children}</h3>;
+    },
+    h4({ children }) {
+      return (
+        <h4 className="text-sm font-medium text-text-secondary">{children}</h4>
+      );
+    },
+    h5({ children }) {
+      return (
+        <h5 className="text-sm font-medium text-text-secondary">{children}</h5>
+      );
+    },
+    h6({ children }) {
+      return (
+        <h6 className="text-sm font-medium text-text-secondary">{children}</h6>
+      );
+    },
+
+    // Paragraphs
+    p({ children }) {
+      return (
+        <p className="text-text-secondary whitespace-pre-wrap break-words">
+          {children}
+        </p>
+      );
+    },
+
+    // Lists
+    ul({ children }) {
+      return (
+        <ul className="space-y-1 pl-5 list-disc text-text-secondary marker:text-text-muted">
+          {children}
+        </ul>
+      );
+    },
+    ol({ children }) {
+      return (
+        <ol className="space-y-1 pl-5 list-decimal text-text-secondary marker:text-text-muted">
+          {children}
+        </ol>
+      );
+    },
+
+    // Blockquote
+    blockquote({ children }) {
+      return (
+        <blockquote className="border-l-2 border-accent-blue/40 pl-3 text-text-secondary italic">
+          {children}
+        </blockquote>
+      );
+    },
+
+    // Horizontal rule
+    hr() {
+      return <hr className="border-border-primary" />;
+    },
+
+    // Links — sanitize unsafe URLs
+    a({ href, children }) {
+      const isSafe = href
+        ? /^(https?:\/\/|\/|#|mailto:)/i.test(href)
+        : false;
+      return (
+        <a
+          href={isSafe ? href : "#"}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent-blue hover:underline"
+        >
+          {children}
+        </a>
+      );
+    },
+
+    // Images — resolve /api/ paths
+    img({ src, alt }) {
+      return (
+        <img
+          src={src ? resolveImageUrl(src) : undefined}
+          alt={alt || ""}
+          className="max-w-full rounded-lg border border-border-primary my-1 max-h-[400px] object-contain"
+        />
+      );
+    },
+
+    // Inline formatting
+    strong({ children }) {
+      return (
+        <strong className="font-semibold text-text-primary">{children}</strong>
+      );
+    },
+    em({ children }) {
+      return <em className="italic text-text-secondary">{children}</em>;
+    },
+    del({ children }) {
+      return (
+        <del className="text-text-muted line-through">{children}</del>
+      );
+    },
+
+    // GFM tables
+    table({ children }) {
+      return (
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">{children}</table>
+        </div>
+      );
+    },
+    thead({ children }) {
+      return (
+        <thead className="bg-bg-tertiary text-text-primary">{children}</thead>
+      );
+    },
+    th({ children }) {
+      return (
+        <th className="border border-border-primary px-3 py-1.5 text-left text-xs font-semibold uppercase tracking-wide">
+          {children}
+        </th>
+      );
+    },
+    td({ children }) {
+      return (
+        <td className="border border-border-primary px-3 py-1.5 text-text-secondary">
+          {children}
+        </td>
+      );
+    },
+
+    // GFM task list items
+    li({ children, ...props }) {
+      const isTask = (props as Record<string, unknown>).className === "task-list-item";
+      if (isTask) {
+        return <li className="list-none -ml-5">{children}</li>;
+      }
+      return <li>{children}</li>;
+    },
+
+    // GFM task list checkbox
+    input({ checked, ...rest }) {
+      return (
+        <input
+          type="checkbox"
+          checked={checked}
+          readOnly
+          className="mr-1.5 accent-accent-blue"
+          {...rest}
+        />
+      );
+    },
+  };
 }
 
 export function MarkdownContent({
@@ -281,16 +329,21 @@ export function MarkdownContent({
   className?: string;
 }) {
   const [copiedAll, setCopiedAll] = useState(false);
-  const blocks = useMemo(() => parseBlocks(content), [content]);
+  const components = useMarkdownComponents();
 
   const handleCopyAll = useCallback(() => {
-    navigator.clipboard.writeText(content).then(() => {
-      setCopiedAll(true);
-      setTimeout(() => setCopiedAll(false), 2000);
-    }).catch(() => { /* clipboard not available */ });
+    navigator.clipboard
+      .writeText(content)
+      .then(() => {
+        setCopiedAll(true);
+        setTimeout(() => setCopiedAll(false), 2000);
+      })
+      .catch(() => {
+        /* clipboard not available */
+      });
   }, [content]);
 
-  if (blocks.length === 0) return null;
+  if (!content.trim()) return null;
 
   const heightStyle = maxHeight === "none" ? undefined : { maxHeight };
   const showCopyAll = content.length >= 50;
@@ -305,11 +358,31 @@ export function MarkdownContent({
           className="absolute top-1 right-1 z-10 opacity-70 sm:opacity-0 sm:group-hover/md:opacity-100 transition-opacity p-1.5 sm:p-1 rounded hover:bg-bg-hover"
         >
           {copiedAll ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent-green">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-accent-green"
+            >
               <polyline points="20 6 9 17 4 12" />
             </svg>
           ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-muted">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="text-text-muted"
+            >
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
             </svg>
@@ -317,69 +390,12 @@ export function MarkdownContent({
         </button>
       )}
       <div
-        className={`space-y-3 text-sm text-text-primary leading-relaxed ${maxHeight !== "none" ? "overflow-y-auto" : ""} ${className}`}
+        className={`markdown-content space-y-3 text-sm text-text-primary leading-relaxed ${maxHeight !== "none" ? "overflow-y-auto" : ""} ${className}`}
         style={heightStyle}
       >
-      {blocks.map((block, i) => {
-        switch (block.type) {
-          case "code":
-            return <CodeBlock key={i} content={block.content} lang={block.lang} />;
-
-          case "heading": {
-            const Tag = `h${block.level}` as keyof React.JSX.IntrinsicElements;
-            const sizeClass =
-              block.level === 1
-                ? "text-lg font-bold"
-                : block.level === 2
-                  ? "text-base font-bold"
-                  : block.level === 3
-                    ? "text-sm font-semibold"
-                    : "text-sm font-medium text-text-secondary";
-            return (
-              <Tag key={i} className={sizeClass}>
-                {renderInline(block.content)}
-              </Tag>
-            );
-          }
-
-          case "list": {
-            const ListTag = block.ordered ? "ol" : "ul";
-            return (
-              <ListTag
-                key={i}
-                className={`space-y-1 pl-5 ${
-                  block.ordered ? "list-decimal" : "list-disc"
-                } text-text-secondary marker:text-text-muted`}
-              >
-                {block.items?.map((item, j) => (
-                  <li key={j}>{renderInline(item)}</li>
-                ))}
-              </ListTag>
-            );
-          }
-
-          case "blockquote":
-            return (
-              <blockquote
-                key={i}
-                className="border-l-2 border-accent-blue/40 pl-3 text-text-secondary italic"
-              >
-                {renderInline(block.content)}
-              </blockquote>
-            );
-
-          case "hr":
-            return <hr key={i} className="border-border-primary" />;
-
-          case "paragraph":
-          default:
-            return (
-              <p key={i} className="text-text-secondary whitespace-pre-wrap break-words">
-                {renderInline(block.content)}
-              </p>
-            );
-        }
-      })}
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+          {content}
+        </ReactMarkdown>
       </div>
     </div>
   );

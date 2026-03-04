@@ -11,10 +11,8 @@ import "./agent-pimono.js";
 import "./agent-openclaw.js";
 import "./agent-codex.js";
 
-// Side-effect imports: ensure all roles are registered before getRole()
-import "./roles/role-sde.js";
-import "./roles/role-qa.js";
-import "./roles/role-pm.js";
+// Side-effect: auto-discovers and registers all roles before getRole()
+import "./roles/load-all-roles.js";
 
 /**
  * Run the active agent in text output mode (no tool use). Used for simple tasks

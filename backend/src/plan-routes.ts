@@ -45,20 +45,27 @@ import {
   getTotalUnreadInsightCount,
 } from "./plan-db.js";
 import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
+import {
+  createConveneSession,
+  getConveneSession,
+  getConveneSessions,
+  getConveneMessages,
+  createConveneMessage,
+  updateConveneSessionStatus,
+} from "./plan-db.js";
 import { syncSession } from "./db.js";
 import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession, resolveNodeRoles } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runAgentInteractive, getApiBase, getAuthParam } from "./plan-generator.js";
 import { coordinateBlueprint } from "./plan-coordinator.js";
-import { getRole } from "./roles/role-registry.js";
+import { executeConveneSession } from "./plan-convene.js";
+import { getRole, getAllRoles } from "./roles/role-registry.js";
 import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 
-// Side-effect imports: ensure all roles are registered before getRole()
-import "./roles/role-sde.js";
-import "./roles/role-qa.js";
-import "./roles/role-pm.js";
+// Side-effect: auto-discovers and registers all roles before getRole()
+import "./roles/load-all-roles.js";
 
 
 const log = createLogger("plan-routes");
@@ -76,9 +83,12 @@ function safeError(err: unknown): string {
 
 /**
  * If all nodes in a blueprint are terminal (done/skipped), transition the
- * blueprint status to "done".  Called after node status updates from API
- * endpoints (batch update, single-node update) so the blueprint doesn't
- * stay stuck in "running" when the last node(s) are set to done/skipped
+ * blueprint status to "done".  Also resets stuck "running" blueprints back
+ * to "approved" when no nodes are running/queued and no in-memory pending
+ * tasks remain (e.g. after a process crash or queue drain without cleanup).
+ *
+ * Called after node status updates from API endpoints (batch update,
+ * single-node update) so the blueprint doesn't stay stuck in "running"
  * outside the executeAllNodes loop (e.g. via reevaluate or coordinate).
  */
 function maybeFinalizeBlueprint(blueprintId: string): void {
@@ -90,6 +100,19 @@ function maybeFinalizeBlueprint(blueprintId: string): void {
   if (allTerminal) {
     updateBlueprint(blueprintId, { status: "done" });
     log.info(`Blueprint ${blueprintId.slice(0, 8)} auto-finalized — all nodes done/skipped`);
+    return;
+  }
+  // Check for stuck state: blueprint is "running" but no nodes are active
+  // and no in-memory pending tasks exist (queue drained without status update)
+  const anyActive = bp.nodes.some(
+    (n) => n.status === "running" || n.status === "queued",
+  );
+  if (!anyActive) {
+    const queueInfo = getQueueInfo(blueprintId);
+    if (queueInfo.pendingTasks.length === 0 && !queueInfo.running) {
+      updateBlueprint(blueprintId, { status: "approved" });
+      log.info(`Blueprint ${blueprintId.slice(0, 8)} stuck-status reset — no active nodes or pending tasks`);
+    }
   }
 }
 
@@ -1251,6 +1274,8 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/executions", (req, r
 // GET /api/blueprints/:id/queue — get queue info for a blueprint
 planRouter.get("/api/blueprints/:id/queue", (req, res) => {
   try {
+    // Opportunistically fix stuck blueprint status during polling
+    maybeFinalizeBlueprint(req.params.id);
     const info = getQueueInfo(req.params.id);
     res.json(info);
   } catch (err) {
@@ -2446,6 +2471,335 @@ planRouter.post("/api/plans/:id/generate", async (req, res) => {
       return generatePlan(req.params.id, description);
     });
     res.json(nodes);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// ─── Convene Endpoints ─────────────────────────────────────────
+
+// POST /api/blueprints/:id/convene — start a convene session
+// Fire-and-forget: returns immediately with {status:"queued", sessionId}, runs async
+planRouter.post("/api/blueprints/:id/convene", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+
+    const { topic, roleIds, contextNodeIds, maxRounds } = req.body as {
+      topic?: string;
+      roleIds?: string[];
+      contextNodeIds?: string[];
+      maxRounds?: number;
+    };
+
+    if (!topic || typeof topic !== "string" || topic.trim().length === 0) {
+      res.status(400).json({ error: "Missing or empty 'topic'" });
+      return;
+    }
+    if (!roleIds || !Array.isArray(roleIds) || roleIds.length < 2) {
+      res.status(400).json({ error: "roleIds must be an array with at least 2 roles" });
+      return;
+    }
+
+    // Validate roleIds against registered roles (not enabledRoles — enabledRoles is a preference, not a gate)
+    const registeredRoles = new Set(getAllRoles().map((r) => r.id));
+    const invalidRoles = roleIds.filter((r) => !registeredRoles.has(r));
+    if (invalidRoles.length > 0) {
+      res.status(400).json({ error: `Unknown role IDs: ${invalidRoles.join(", ")}` });
+      return;
+    }
+
+    // Validate contextNodeIds if provided
+    if (contextNodeIds && Array.isArray(contextNodeIds)) {
+      const nodeIds = new Set(blueprint.nodes.map((n) => n.id));
+      const invalidNodes = contextNodeIds.filter((id) => !nodeIds.has(id));
+      if (invalidNodes.length > 0) {
+        res.status(400).json({ error: `Context nodes not found in blueprint: ${invalidNodes.join(", ")}` });
+        return;
+      }
+    }
+
+    // Clamp maxRounds to 1-5
+    const rounds = Math.max(1, Math.min(5, maxRounds ?? 3));
+
+    const session = createConveneSession(blueprintId, topic.trim(), roleIds, contextNodeIds, rounds);
+
+    addPendingTask(blueprintId, { type: "convene", queuedAt: new Date().toISOString() });
+
+    enqueueBlueprintTask(blueprintId, async () => {
+      try {
+        await executeConveneSession(session.id);
+      } finally {
+        removePendingTask(blueprintId, undefined, "convene");
+      }
+    }).catch((err) => {
+      log.error(`Convene session ${session.id.slice(0, 8)} failed: ${err instanceof Error ? err.message : err}`);
+    });
+
+    res.json({ status: "queued", sessionId: session.id });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/convene-sessions — list convene sessions for a blueprint
+planRouter.get("/api/blueprints/:id/convene-sessions", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const sessions = getConveneSessions(req.params.id);
+    res.json(sessions);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/convene-sessions/:sessionId — get full convene session with messages
+planRouter.get("/api/blueprints/:id/convene-sessions/:sessionId", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== req.params.id) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+    const messages = getConveneMessages(req.params.sessionId);
+    res.json({ ...session, messages });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/convene-sessions/:sessionId/approve — approve synthesis and create nodes
+planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/approve", (req, res) => {
+  try {
+    const blueprintId = req.params.id;
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== blueprintId) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+    if (session.status !== "synthesizing") {
+      res.status(400).json({ error: `Session status is '${session.status}', must be 'synthesizing' to approve` });
+      return;
+    }
+    if (!session.synthesisResult || session.synthesisResult.length === 0) {
+      res.status(400).json({ error: "No synthesis result to approve" });
+      return;
+    }
+
+    // Reuse batch-create logic: resolve dependencies by index within the array
+    const existingNodeIds = new Set(blueprint.nodes.map((n) => n.id));
+    const maxOrder = Math.max(0, ...blueprint.nodes.map((n) => n.order));
+    const createdNodes: MacroNode[] = [];
+
+    for (let i = 0; i < session.synthesisResult.length; i++) {
+      const step = session.synthesisResult[i];
+      if (!step.title || typeof step.title !== "string") continue;
+
+      const depIds = (step.dependencies || [])
+        .map((dep) => {
+          if (typeof dep === "number") {
+            return dep >= 0 && dep < createdNodes.length ? createdNodes[dep].id : null;
+          }
+          if (typeof dep === "string") {
+            return existingNodeIds.has(dep) || createdNodes.some((n) => n.id === dep) ? dep : null;
+          }
+          return null;
+        })
+        .filter((id): id is string => id !== null);
+
+      const node = createMacroNode(blueprintId, {
+        title: step.title,
+        description: step.description,
+        order: maxOrder + i + 1,
+        dependencies: depIds.length > 0 ? depIds : undefined,
+      });
+
+      // Set roles if provided (createMacroNode doesn't accept roles directly)
+      if (step.roles && Array.isArray(step.roles) && step.roles.length > 0) {
+        const updated = updateMacroNode(blueprintId, node.id, { roles: step.roles });
+        if (updated) {
+          createdNodes.push(updated);
+          continue;
+        }
+      }
+      createdNodes.push(node);
+    }
+
+    updateConveneSessionStatus(req.params.sessionId, "completed");
+
+    res.json({ status: "completed", createdNodeIds: createdNodes.map((n) => n.id) });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/convene-sessions/:sessionId/cancel — cancel a convene session
+planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/cancel", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== req.params.id) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+    if (session.status === "completed" || session.status === "cancelled") {
+      res.status(400).json({ error: `Session already ${session.status}` });
+      return;
+    }
+
+    updateConveneSessionStatus(req.params.sessionId, "cancelled");
+    removePendingTask(req.params.id, undefined, "convene");
+
+    res.json({ status: "cancelled" });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/convene-sessions/:sessionId/panel — read discussion panel (agent-facing)
+planRouter.get("/api/blueprints/:id/convene-sessions/:sessionId/panel", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== req.params.id) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+
+    const messages = getConveneMessages(req.params.sessionId);
+    if (messages.length === 0) {
+      res.type("text/plain").send("(No contributions yet — you are the first to speak.)");
+      return;
+    }
+
+    // Group messages by round
+    const byRound = new Map<number, typeof messages>();
+    for (const msg of messages) {
+      const arr = byRound.get(msg.round) ?? [];
+      arr.push(msg);
+      byRound.set(msg.round, arr);
+    }
+
+    const parts: string[] = [];
+    for (const [round, msgs] of [...byRound.entries()].sort((a, b) => a[0] - b[0])) {
+      parts.push(`## Round ${round}`);
+      for (const msg of msgs) {
+        parts.push(`### ${msg.roleId.toUpperCase()}\n${msg.content}`);
+      }
+    }
+
+    res.type("text/plain").send(parts.join("\n\n"));
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/convene-sessions/:sessionId/contribute — post a role contribution (agent-facing)
+planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/contribute", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== req.params.id) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+    if (session.status !== "active") {
+      res.status(400).json({ error: `Session status is '${session.status}', must be 'active' to contribute` });
+      return;
+    }
+
+    const { roleId, round, content } = req.body as {
+      roleId?: string;
+      round?: number;
+      content?: string;
+    };
+
+    if (!roleId || typeof roleId !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'roleId'" });
+      return;
+    }
+    if (!round || typeof round !== "number" || round < 1 || !Number.isInteger(round)) {
+      res.status(400).json({ error: "Missing or invalid 'round' (must be a positive integer)" });
+      return;
+    }
+    if (!content || typeof content !== "string" || content.trim().length === 0) {
+      res.status(400).json({ error: "Missing or empty 'content'" });
+      return;
+    }
+
+    createConveneMessage(req.params.sessionId, roleId, round, content.trim());
+    res.json({ success: true });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:id/convene-sessions/:sessionId/propose-nodes — synthesis posts proposed nodes (agent-facing)
+planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/propose-nodes", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const session = getConveneSession(req.params.sessionId);
+    if (!session || session.blueprintId !== req.params.id) {
+      res.status(404).json({ error: "Convene session not found" });
+      return;
+    }
+    if (session.status !== "synthesizing") {
+      res.status(400).json({ error: `Session status is '${session.status}', must be 'synthesizing' to propose nodes` });
+      return;
+    }
+
+    const { nodes } = req.body as { nodes?: unknown };
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      res.status(400).json({ error: "Missing or empty 'nodes' array" });
+      return;
+    }
+    for (const node of nodes) {
+      if (!node || typeof node !== "object" || !("title" in node) || typeof node.title !== "string" || !node.title.trim()) {
+        res.status(400).json({ error: "Each node must have a non-empty 'title' string" });
+        return;
+      }
+      if (!("description" in node) || typeof node.description !== "string") {
+        res.status(400).json({ error: "Each node must have a 'description' string" });
+        return;
+      }
+    }
+
+    updateConveneSessionStatus(req.params.sessionId, "synthesizing", nodes);
+    res.json({ success: true, count: nodes.length });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }

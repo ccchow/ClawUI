@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { type Blueprint, type BlueprintStatus, listBlueprints, archiveBlueprint as archiveBlueprintApi, unarchiveBlueprint as unarchiveBlueprintApi, starBlueprint as starBlueprintApi, unstarBlueprint as unstarBlueprintApi } from "@/lib/api";
+import { type Blueprint, type BlueprintStatus, archiveBlueprint as archiveBlueprintApi, unarchiveBlueprint as unarchiveBlueprintApi, starBlueprint as starBlueprintApi, unstarBlueprint as unstarBlueprintApi } from "@/lib/api";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
+import { useBlueprintListQuery } from "@/lib/useBlueprintListQuery";
 
 /** Strip markdown syntax for plain-text preview */
 function stripMarkdown(text: string): string {
@@ -51,9 +52,6 @@ const VALID_BP_STATUSES = new Set<string>(["approved", "running", "done", "draft
 
 export default function BlueprintsPage() {
   const searchParams = useSearchParams();
-  const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   // Initialize filter state from URL search params
   const initialStatus = searchParams.get("status");
@@ -69,6 +67,12 @@ export default function BlueprintsPage() {
   const [starOverrides, setStarOverrides] = useState<Record<string, boolean>>({});
   const statusFilterRef = useRef(statusFilter);
   const showArchivedRef = useRef(showArchived);
+
+  // TanStack Query for blueprint list
+  const { blueprints, loading, error, setBlueprints, prefetchBlueprintDetail } = useBlueprintListQuery({
+    includeArchived: showArchived,
+    search: searchQuery || undefined,
+  });
 
   // Sync filter changes to URL + sessionStorage
   const syncFiltersToUrl = useCallback((status: BlueprintStatus | "all", archived: boolean) => {
@@ -112,18 +116,6 @@ export default function BlueprintsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
   }, []);
 
-  const loadBlueprints = useCallback(() => {
-    return listBlueprints({ includeArchived: showArchived, search: searchQuery || undefined })
-      .then(setBlueprints)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [showArchived, searchQuery]);
-
-  useEffect(() => {
-    setLoading(true);
-    loadBlueprints();
-  }, [loadBlueprints]);
-
   // Apply star overrides to blueprints for optimistic UI
   const effectiveBlueprints = useMemo(() => {
     if (Object.keys(starOverrides).length === 0) return blueprints;
@@ -132,7 +124,7 @@ export default function BlueprintsPage() {
     );
   }, [blueprints, starOverrides]);
 
-  // Clear star overrides when blueprints prop updates (server caught up)
+  // Clear star overrides when blueprints data updates (server caught up)
   useEffect(() => {
     setStarOverrides({});
   }, [blueprints]);
@@ -196,22 +188,22 @@ export default function BlueprintsPage() {
     e.stopPropagation();
     try {
       await archiveBlueprintApi(bpId);
-      setBlueprints((prev) => prev.filter((bp) => bp.id !== bpId));
+      setBlueprints((prev) => prev?.filter((bp) => bp.id !== bpId));
     } catch {
       // silently fail — user can retry
     }
-  }, []);
+  }, [setBlueprints]);
 
   const handleUnarchive = useCallback(async (e: React.MouseEvent, bpId: string) => {
     e.preventDefault();
     e.stopPropagation();
     try {
       const updated = await unarchiveBlueprintApi(bpId);
-      setBlueprints((prev) => prev.map((bp) => bp.id === updated.id ? updated : bp));
+      setBlueprints((prev) => prev?.map((bp) => bp.id === updated.id ? updated : bp));
     } catch {
       // silently fail
     }
-  }, []);
+  }, [setBlueprints]);
 
   if (loading) {
     return (
@@ -373,6 +365,8 @@ export default function BlueprintsPage() {
             <div key={bp.id} className="relative group">
               <Link
                 href={`/blueprints/${bp.id}`}
+                onMouseEnter={() => prefetchBlueprintDetail(bp.id)}
+                onFocus={() => prefetchBlueprintDetail(bp.id)}
                 className={`block rounded-xl border border-border-primary bg-bg-secondary p-4 hover:bg-bg-tertiary hover:border-border-hover transition-all active:scale-[0.995] ${
                   bp.archivedAt ? "opacity-60" : ""
                 }`}

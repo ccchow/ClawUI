@@ -4,12 +4,11 @@ import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from "rea
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
-  type Blueprint,
-  type BlueprintInsight,
   type MacroNodeStatus,
-  type PendingTask,
-  getBlueprint,
-  getQueueStatus,
+  type ConveneSession,
+  type ConveneMessage,
+  type BatchCreateNode,
+  type RoleInfo,
   approveBlueprint,
   updateBlueprint,
   createMacroNode,
@@ -22,15 +21,21 @@ import {
   unarchiveBlueprint as unarchiveBlueprintApi,
   starBlueprint as starBlueprintApi,
   unstarBlueprint as unstarBlueprintApi,
-  fetchBlueprintInsights,
   markInsightRead as markInsightReadApi,
   markAllInsightsRead as markAllInsightsReadApi,
   dismissInsight as dismissInsightApi,
   coordinateBlueprint,
+  getConveneSessionDetail,
+  startConveneSession,
+  approveConveneSession,
+  cancelConveneSession,
+  fetchRoles,
 } from "@/lib/api";
+import { useBlueprintDetailQueries, blueprintKeys } from "@/lib/useBlueprintDetailQueries";
 import { AgentBadge } from "@/components/AgentSelector";
 import { RoleBadge } from "@/components/RoleBadge";
 import { RoleSelector } from "@/components/RoleSelector";
+import { ROLE_COLORS, ROLE_FALLBACK_COLORS } from "@/components/role-colors";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { MacroNodeCard } from "@/components/MacroNodeCard";
 import { MarkdownContent } from "@/components/MarkdownContent";
@@ -41,14 +46,28 @@ import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { useToast } from "@/components/Toast";
 import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 
+/** Strip markdown formatting for plain-text preview (best-effort, line-clamp handles overflow) */
+function stripMarkdown(md: string): string {
+  return md
+    .replace(/```[\s\S]*?```/g, " ")       // fenced code blocks
+    .replace(/`([^`]+)`/g, "$1")            // inline code
+    .replace(/^#{1,6}\s+/gm, "")            // headings
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")     // bold
+    .replace(/(\*|_)(.*?)\1/g, "$2")        // italic
+    .replace(/^>\s?/gm, "")                 // blockquotes
+    .replace(/^[-*+]\s+/gm, "")            // list markers
+    .replace(/^\d+\.\s+/gm, "")            // ordered list markers
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links (keep text)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // images (keep alt)
+    .replace(/\s+/g, " ")                   // collapse whitespace
+    .trim();
+}
+
 export default function BlueprintDetailPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const id = params.id as string;
 
-  const [blueprint, setBlueprint] = useState<Blueprint | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const autoGenerateTriggered = useRef(false);
 
@@ -86,6 +105,11 @@ export default function BlueprintDetailPage() {
     const url = new URL(window.location.href);
     try { sessionStorage.setItem(`clawui:blueprint-${id}-filters`, url.search); } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only on mount
+  }, []);
+
+  // Fetch all registered roles for convene form
+  useEffect(() => {
+    fetchRoles().then(setAllRoles).catch(() => {});
   }, []);
 
   const setStatusFilter = useCallback((value: MacroNodeStatus | "all") => {
@@ -129,16 +153,26 @@ export default function BlueprintDetailPage() {
   const [approving, setApproving] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [reevaluating, setReevaluating] = useState(false);
-  const [pendingTasks, setPendingTasks] = useState<PendingTask[]>([]);
-  const [insights, setInsights] = useState<BlueprintInsight[]>([]);
   const [insightsOpen, setInsightsOpen] = useState(true);
   const [showDismissed, setShowDismissed] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollStartRef = useRef<number | null>(null);
-  const MAX_POLL_DURATION = 35 * 60 * 1000; // 35 min safety cap
+
+  // Convene state
+  const [discussionsOpen, setDiscussionsOpen] = useState(true);
+  const [showConveneForm, setShowConveneForm] = useState(false);
+  const [conveneTopic, setConveneTopic] = useState("");
+  const [conveneRoles, setConveneRoles] = useState<string[]>([]);
+  const [allRoles, setAllRoles] = useState<RoleInfo[]>([]);
+  const [conveneContextNodes, setConveneContextNodes] = useState<string[]>([]);
+  const [conveneMaxRounds, setConveneMaxRounds] = useState(3);
+  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
+  const [sessionDetail, setSessionDetail] = useState<(ConveneSession & { messages: ConveneMessage[] }) | null>(null);
+  const [confirmingDiscard, setConfirmingDiscard] = useState<string | null>(null);
+  const [expandedMsgIds, setExpandedMsgIds] = useState<Set<string>>(new Set());
   const [generateCooldown, setGenerateCooldown] = useState(false);
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
   const [confirmingReevaluate, setConfirmingReevaluate] = useState(false);
+  const [confirmingRunAll, setConfirmingRunAll] = useState(false);
+  const [confirmingStatusReset, setConfirmingStatusReset] = useState(false);
 
   // Generation progress tracking
   const preGenerateNodeIdsRef = useRef<Set<string> | null>(null);
@@ -157,34 +191,22 @@ export default function BlueprintDetailPage() {
 
   const { showToast } = useToast();
 
+  // TanStack Query: blueprint, queue, insights, convene — with coordinated polling
+  const {
+    blueprint, pendingTasks, insights, conveneSessions,
+    loading, error: queryError,
+    invalidateAll, setBlueprint, setInsights, setConveneSessions, queryClient,
+  } = useBlueprintDetailQueries(id, autoRefresh);
+
+  // Local error state for mutation errors (separate from query error)
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const error = queryError || mutationError;
+
   // Cross-tab sync: when another tab fires an operation on this blueprint,
-  // immediately fetch fresh data so shouldPoll activates within one cycle.
+  // immediately invalidate all queries so polling picks up changes.
   const broadcastOperation = useBlueprintBroadcast(id, () => {
-    loadBlueprint();
-    getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => {});
-    fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+    invalidateAll();
   });
-
-  const loadBlueprint = useCallback(() => {
-    return getBlueprint(id)
-      .then((bp) => {
-        setBlueprint(bp);
-        return bp;
-      })
-      .catch((err) => {
-        setError(err.message);
-        return null;
-      })
-      .finally(() => setLoading(false));
-  }, [id]);
-
-  useEffect(() => {
-    loadBlueprint();
-    // Also fetch queue status on initial load so pendingTasks is populated
-    // immediately (prevents losing visibility of queued reevaluate/enrich ops)
-    getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => { /* non-critical: UI still functional */ });
-    fetchBlueprintInsights(id).then(setInsights).catch(() => { /* non-critical */ });
-  }, [loadBlueprint, id]);
 
   // Auto-recover lost sessions for nodes failed by server restart
   useEffect(() => {
@@ -199,9 +221,9 @@ export default function BlueprintDetailPage() {
         recoverNodeSession(id, n.id).catch(() => ({ recovered: false })),
       ),
     ).then((results) => {
-      if (results.some((r) => r.recovered)) loadBlueprint();
+      if (results.some((r) => r.recovered)) invalidateAll();
     });
-  }, [blueprint, id, loadBlueprint]);
+  }, [blueprint, id, invalidateAll]);
 
   // Auto-generate nodes if ?generate=true
   useEffect(() => {
@@ -225,101 +247,101 @@ export default function BlueprintDetailPage() {
     }
     setConfirmingRegenerate(false);
     setGenerating(true);
-    setError(null);
+    setMutationError(null);
     // Snapshot current node IDs to track new ones during generation
     preGenerateNodeIdsRef.current = new Set(blueprint?.nodes.map(n => n.id) ?? []);
     setNewNodeIds(new Set());
     try {
       await generatePlan(id, generateInstruction.trim() || undefined);
       broadcastOperation("generate");
-      // Generate is now fire-and-forget — reload to pick up pending task,
+      // Generate is now fire-and-forget — invalidate queries to pick up pending task,
       // then polling will detect new nodes as Claude creates them via API
-      await loadBlueprint();
-      getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => {});
+      invalidateAll();
       // Prevent accidental reevaluate clicks right after generation
       setGenerateCooldown(true);
       setTimeout(() => setGenerateCooldown(false), 5000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
     } finally {
       setGenerateInstruction("");
       setGenerating(false);
     }
   };
 
-  // Auto-poll when blueprint or any node is running/queued, or has pending tasks
+  // Derived state (used by JSX and below effects)
   const anyNodeRunning = blueprint?.nodes.some(n => n.status === "running") ?? false;
   const anyNodeQueued = blueprint?.nodes.some(n => n.status === "queued") ?? false;
   const hasPendingTasks = pendingTasks.length > 0;
-  const shouldPoll = autoRefresh && (blueprint?.status === "running" || anyNodeRunning || anyNodeQueued || hasPendingTasks);
+  const activeConvene = conveneSessions.some(s => s.status === "active" || s.status === "synthesizing");
+  const isPolling = autoRefresh && (blueprint?.status === "running" || anyNodeRunning || anyNodeQueued || hasPendingTasks);
+
+  // Track newly created nodes during generation (reads TanStack Query data reactively)
   useEffect(() => {
-    if (shouldPoll) {
-      if (!pollStartRef.current) pollStartRef.current = Date.now();
-      // Clear any existing interval before creating a new one to prevent leaks
-      // when the effect re-runs due to dependency changes while still polling.
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(() => {
-        // Safety cap: stop polling after MAX_POLL_DURATION to prevent infinite polling
-        if (pollStartRef.current && Date.now() - pollStartRef.current > MAX_POLL_DURATION) {
-          if (pollRef.current) clearInterval(pollRef.current);
-          pollRef.current = null;
-          pollStartRef.current = null;
-          setPendingTasks([]);
-          setRunningAll(false);
-          return;
-        }
-        Promise.all([
-          getBlueprint(id),
-          getQueueStatus(id),
-          fetchBlueprintInsights(id),
-        ])
-          .then(([bp, queueInfo, freshInsights]) => {
-            setBlueprint(bp);
-            setPendingTasks(queueInfo.pendingTasks);
-            setInsights(freshInsights);
-            // Track newly created nodes during generation
-            if (preGenerateNodeIdsRef.current) {
-              const freshIds = bp.nodes
-                .map(n => n.id)
-                .filter(nid => !preGenerateNodeIdsRef.current!.has(nid));
-              if (freshIds.length > 0) {
-                setNewNodeIds(prev => {
-                  const next = new Set(prev);
-                  freshIds.forEach(nid => next.add(nid));
-                  return next;
-                });
-              }
-              // Clear tracking when generation completes
-              const isGenerating = queueInfo.pendingTasks.some(t => t.type === "generate");
-              if (!isGenerating) {
-                preGenerateNodeIdsRef.current = null;
-                // Keep newNodeIds visible briefly, then clear for animation
-                setTimeout(() => setNewNodeIds(new Set()), 3000);
-              }
-            }
-            const stillActive = bp.status === "running"
-              || bp.nodes.some(n => n.status === "running" || n.status === "queued")
-              || queueInfo.pendingTasks.length > 0;
-            if (!stillActive) {
-              if (pollRef.current) clearInterval(pollRef.current);
-              pollRef.current = null;
-              pollStartRef.current = null;
-              setRunningAll(false);
-            }
-          })
-          .catch(() => { /* non-critical: UI still functional */ });
-      }, 5000);
-    } else {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      pollStartRef.current = null;
+    if (!preGenerateNodeIdsRef.current || !blueprint) return;
+    const freshIds = blueprint.nodes
+      .map(n => n.id)
+      .filter(nid => !preGenerateNodeIdsRef.current!.has(nid));
+    if (freshIds.length > 0) {
+      setNewNodeIds(prev => {
+        const next = new Set(prev);
+        freshIds.forEach(nid => next.add(nid));
+        return next;
+      });
     }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [shouldPoll, id]);
+    // Clear tracking when generation completes
+    const isGenerating = pendingTasks.some(t => t.type === "generate");
+    if (!isGenerating) {
+      preGenerateNodeIdsRef.current = null;
+      setTimeout(() => setNewNodeIds(new Set()), 3000);
+    }
+  }, [blueprint, pendingTasks]);
+
+  // Clear runningAll when no more activity
+  useEffect(() => {
+    if (!runningAll) return;
+    const stillActive = blueprint?.status === "running"
+      || anyNodeRunning || anyNodeQueued || hasPendingTasks;
+    if (!stillActive) setRunningAll(false);
+  }, [blueprint?.status, anyNodeRunning, anyNodeQueued, hasPendingTasks, runningAll]);
+
+  // Fast-poll expanded convene session detail during active discussions (2s)
+  // to stream new round messages as they arrive.
+  const expandedSession = conveneSessions.find(s => s.id === expandedSessionId);
+  const expandedSessionActive = expandedSession?.status === "active" || expandedSession?.status === "synthesizing";
+  useEffect(() => {
+    if (!expandedSessionId || !expandedSessionActive) return;
+    const interval = setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const detail = await getConveneSessionDetail(id, expandedSessionId);
+        setSessionDetail(detail);
+        // Also update the session in the list so status badge refreshes
+        setConveneSessions(prev => prev.map(s => s.id === detail.id ? { ...s, status: detail.status, messageCount: detail.messages.length, synthesisResult: detail.synthesisResult } : s));
+      } catch {
+        // non-critical
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [expandedSessionId, expandedSessionActive, id, setConveneSessions]);
+
+  // Auto-expand latest round messages for active convene sessions
+  const sessionDetailMsgCount = sessionDetail?.messages.length ?? 0;
+  const sessionDetailStatus = sessionDetail?.status;
+  useEffect(() => {
+    if (!sessionDetail || sessionDetailStatus !== "active" || sessionDetailMsgCount === 0) return;
+    const msgs = sessionDetail.messages.filter(m => m.messageType !== "synthesis");
+    if (msgs.length === 0) return;
+    const maxRound = Math.max(...msgs.map(m => m.round));
+    const latestRoundMsgIds = msgs.filter(m => m.round === maxRound).map(m => m.id);
+    setExpandedMsgIds(prev => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const mid of latestRoundMsgIds) {
+        if (!next.has(mid)) { next.add(mid); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [sessionDetail, sessionDetailMsgCount, sessionDetailStatus]);
 
   const handleApprove = async () => {
     setApproving(true);
@@ -327,7 +349,7 @@ export default function BlueprintDetailPage() {
       const updated = await approveBlueprint(id);
       setBlueprint(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
     } finally {
       setApproving(false);
     }
@@ -340,53 +362,111 @@ export default function BlueprintDetailPage() {
     }
     setConfirmingReevaluate(false);
     setReevaluating(true);
-    setError(null);
+    setMutationError(null);
     try {
       await reevaluateAllNodes(id);
       broadcastOperation("reevaluate_all");
-      // Refresh to pick up pending tasks
-      const bp = await getBlueprint(id);
-      setBlueprint(bp);
-      getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => { /* non-critical: UI still functional */ });
+      invalidateAll();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
     } finally {
       setReevaluating(false);
     }
   };
 
   const handleRunAll = async () => {
+    if (!confirmingRunAll) {
+      setConfirmingRunAll(true);
+      return;
+    }
+    setConfirmingRunAll(false);
     setRunningAll(true);
-    setError(null);
+    setMutationError(null);
     try {
       await runAllNodes(id);
       broadcastOperation("run_all");
-      // Start polling — the useEffect above will handle it once status becomes "running"
-      const bp = await getBlueprint(id);
-      setBlueprint(bp);
+      invalidateAll();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
       setRunningAll(false);
     }
   };
 
   const handleRefresh = () => {
-    loadBlueprint();
-    getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => { /* non-critical: UI still functional */ });
-    fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+    invalidateAll();
   };
 
   const handleCoordinate = async () => {
-    setError(null);
+    setMutationError(null);
     try {
       await coordinateBlueprint(id);
       broadcastOperation("coordinate");
-      const bp = await getBlueprint(id);
-      setBlueprint(bp);
-      getQueueStatus(id).then((qi) => setPendingTasks(qi.pendingTasks)).catch(() => {});
-      fetchBlueprintInsights(id).then(setInsights).catch(() => {});
+      invalidateAll();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Coordinator failed");
+      setMutationError(err instanceof Error ? err.message : "Coordinator failed");
+    }
+  };
+
+  // Convene handlers
+  const handleStartConvene = async () => {
+    if (!conveneTopic.trim() || conveneRoles.length < 2) return;
+    setMutationError(null);
+    try {
+      await startConveneSession(id, {
+        topic: conveneTopic.trim(),
+        roleIds: conveneRoles,
+        contextNodeIds: conveneContextNodes.length > 0 ? conveneContextNodes : undefined,
+        maxRounds: conveneMaxRounds,
+      });
+      broadcastOperation("convene");
+      setShowConveneForm(false);
+      setConveneTopic("");
+      setConveneRoles([]);
+      setConveneContextNodes([]);
+      setConveneMaxRounds(3);
+      invalidateAll();
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : "Failed to start discussion");
+    }
+  };
+
+  const handleExpandSession = async (sessionId: string) => {
+    if (expandedSessionId === sessionId) {
+      setExpandedSessionId(null);
+      setSessionDetail(null);
+      return;
+    }
+    setExpandedSessionId(sessionId);
+    setExpandedMsgIds(new Set());
+    try {
+      const detail = await getConveneSessionDetail(id, sessionId);
+      setSessionDetail(detail);
+    } catch {
+      setSessionDetail(null);
+    }
+  };
+
+  const handleApproveConvene = async (sessionId: string) => {
+    try {
+      const result = await approveConveneSession(id, sessionId);
+      showToast(`${result.createdNodeIds.length} nodes created from discussion`);
+      invalidateAll();
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : "Failed to approve session");
+    }
+  };
+
+  const handleCancelConvene = async (sessionId: string) => {
+    try {
+      await cancelConveneSession(id, sessionId);
+      setConfirmingDiscard(null);
+      queryClient.invalidateQueries({ queryKey: blueprintKeys.conveneSessions(id) });
+      if (expandedSessionId === sessionId) {
+        setExpandedSessionId(null);
+        setSessionDetail(null);
+      }
+    } catch (err) {
+      setMutationError(err instanceof Error ? err.message : "Failed to cancel session");
     }
   };
 
@@ -441,7 +521,7 @@ export default function BlueprintDetailPage() {
       setNodeDeps([]);
       setShowAddNode(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
     } finally {
       setAddingNode(false);
     }
@@ -467,12 +547,13 @@ export default function BlueprintDetailPage() {
       setBlueprint((prev) =>
         prev ? { ...prev, nodes: [...prev.nodes, node] } : prev
       );
+      showToast("Node created and enriched");
       setNodeTitle("");
       setNodeDescription("");
       setNodeDeps([]);
       setShowAddNode(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setMutationError(err instanceof Error ? err.message : String(err));
     } finally {
       setEnriching(false);
     }
@@ -488,6 +569,63 @@ export default function BlueprintDetailPage() {
       showToast("Coordinator finished analyzing insights");
     }
   }, [pendingTasks, showToast]);
+
+  // Toast when convene task completes
+  const prevConveneRef = useRef(false);
+  useEffect(() => {
+    const wasConvening = prevConveneRef.current;
+    const nowConvening = pendingTasks.some(t => t.type === "convene");
+    prevConveneRef.current = nowConvening;
+    if (wasConvening && !nowConvening) {
+      showToast("Discussion complete — review synthesis");
+    }
+  }, [pendingTasks, showToast]);
+
+  // Toast when generate task completes
+  const nowGeneratingTask = pendingTasks.some(t => t.type === "generate");
+  const prevGeneratingTaskRef = useRef(false);
+  useEffect(() => {
+    const wasGenerating = prevGeneratingTaskRef.current;
+    prevGeneratingTaskRef.current = nowGeneratingTask;
+    if (wasGenerating && !nowGeneratingTask) {
+      showToast("Generation complete");
+    }
+  }, [nowGeneratingTask, showToast]);
+
+  // Toast when reevaluate-all task completes
+  const nowReevalAllTask = pendingTasks.some(t => t.type === "reevaluate");
+  const prevReevalAllRef = useRef(false);
+  useEffect(() => {
+    const wasReevaluating = prevReevalAllRef.current;
+    prevReevalAllRef.current = nowReevalAllTask;
+    if (wasReevaluating && !nowReevalAllTask) {
+      showToast("Reevaluation complete for all nodes");
+    }
+  }, [nowReevalAllTask, showToast]);
+
+  // Toast when run-all completes (runningAll tracks user-initiated Run All)
+  const prevRunningAllRef = useRef(false);
+  useEffect(() => {
+    const wasRunningAll = prevRunningAllRef.current;
+    prevRunningAllRef.current = runningAll;
+    if (wasRunningAll && !runningAll) {
+      showToast("All executions complete");
+    }
+  }, [runningAll, showToast]);
+
+  // Keyboard shortcut: Cmd/Ctrl+Shift+R → Reevaluate All
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (e.target as HTMLElement).isContentEditable) return;
+      if (e.key === "R" && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        handleReevaluateAll();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  });
 
   // Compute dependency depth for each node (topological level in the DAG)
   // Root nodes (no deps) = depth 0; depth = max(depth of deps) + 1
@@ -560,11 +698,14 @@ export default function BlueprintDetailPage() {
   const isReevaluatingTask = pendingTasks.some(t => t.type === "reevaluate");
   const isRunningTask = pendingTasks.some(t => t.type === "run");
   const isCoordinatingTask = pendingTasks.some(t => t.type === "coordinate");
+  const isConveneTask = pendingTasks.some(t => t.type === "convene");
   const unreadInsightCount = insights.filter((i) => !i.read && !i.dismissed).length;
   const newNodeCount = newNodeIds.size;
   const isRunning = blueprint.status === "running" || runningAll;
-  // Name of the active blueprint-wide operation (for tooltip), or undefined if idle
-  const blueprintBusy = isGeneratingTask ? "Generate" : (isRunning || isRunningTask) ? "Run All" : undefined;
+  // Name of the active blueprint-level operation (for tooltip), or undefined if idle.
+  // "Run All" and individual node runs are NOT included — individual Run buttons remain
+  // clickable so users can queue additional nodes while others execute.
+  const blueprintBusy = isGeneratingTask ? "Generate" : isConveneTask ? "Convene" : isCoordinatingTask ? "Coordinate" : undefined;
   const canRunAll = (blueprint.status === "approved" || blueprint.status === "failed" || blueprint.status === "paused")
     && blueprint.nodes.some((n) => n.status === "pending" || n.status === "failed");
 
@@ -730,6 +871,42 @@ export default function BlueprintDetailPage() {
           <span className="text-xs px-2 py-0.5 rounded-full bg-bg-tertiary text-text-muted capitalize flex-shrink-0">
             {blueprint.status === "running" ? "In Progress" : blueprint.status}
           </span>
+          {blueprint.status === "running" && !anyNodeRunning && !anyNodeQueued && !hasPendingTasks && (
+            confirmingStatusReset ? (
+              <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in flex-shrink-0">
+                <span className="text-xs text-accent-amber whitespace-nowrap">Reset to Approved?</span>
+                <button
+                  onClick={async () => {
+                    setConfirmingStatusReset(false);
+                    try {
+                      const updated = await updateBlueprint(id, { status: "approved" });
+                      setBlueprint(updated);
+                      showToast("Blueprint status reset to Approved");
+                    } catch (err) {
+                      setMutationError(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                  className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all"
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setConfirmingStatusReset(false)}
+                  className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
+                >
+                  No
+                </button>
+              </span>
+            ) : (
+              <button
+                onClick={() => setConfirmingStatusReset(true)}
+                title="Blueprint appears stuck — no nodes are running or queued. Click to reset status to Approved."
+                className="text-xs text-accent-amber hover:text-accent-amber/80 transition-colors flex-shrink-0"
+              >
+                Reset
+              </button>
+            )
+          )}
           {blueprint.archivedAt && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-text-muted/10 text-text-muted flex-shrink-0">
               archived
@@ -759,22 +936,65 @@ export default function BlueprintDetailPage() {
               </button>
             )}
             {canRunAll && (
-              <button
-                onClick={handleRunAll}
-                disabled={isRunning || isRunningTask}
-                title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using the selected agent"}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-              >
-                {isRunning || isRunningTask ? (
-                  <><AISparkle size="xs" /> In Progress...</>
-                ) : (
-                  <>
-                    <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>
-                    Run All
-                  </>
-                )}
-              </button>
+              confirmingRunAll ? (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in">
+                  <span className="text-xs text-accent-amber whitespace-nowrap">Run all pending nodes?</span>
+                  <button
+                    onClick={handleRunAll}
+                    disabled={isRunning || isRunningTask}
+                    className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Yes
+                  </button>
+                  <button
+                    onClick={() => setConfirmingRunAll(false)}
+                    className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleRunAll}
+                  disabled={isRunning || isRunningTask}
+                  title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using the selected agent"}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  {isRunning || isRunningTask ? (
+                    <><AISparkle size="xs" /> In Progress...</>
+                  ) : (
+                    <>
+                      <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>
+                      Run All
+                    </>
+                  )}
+                </button>
+              )
             )}
+            {/* Convene button */}
+            <button
+              onClick={() => {
+                setConveneRoles(blueprint.enabledRoles?.length ? [...blueprint.enabledRoles] : allRoles.map((r) => r.id));
+                setShowConveneForm(true);
+              }}
+              disabled={
+                blueprint.status === "running" ||
+                !!blueprintBusy
+              }
+              title={
+                blueprint.status === "running"
+                  ? "Cannot convene while blueprint is executing"
+                  : !!blueprintBusy
+                    ? "Wait for current operation to complete"
+                    : "Start a multi-role discussion to plan new nodes"
+              }
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium bg-accent-purple/15 text-accent-purple border-accent-purple/30 hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+              Convene
+            </button>
             {blueprint.archivedAt ? (
               <button
                 onClick={async () => {
@@ -901,12 +1121,12 @@ export default function BlueprintDetailPage() {
             <div className="flex items-center gap-1.5 flex-wrap">
               {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
                 confirmingReevaluate ? (
-                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-blue/30 bg-accent-blue/10 animate-fade-in">
-                    <span className="text-xs text-accent-blue whitespace-nowrap">Reevaluate?</span>
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in">
+                    <span className="text-xs text-accent-amber whitespace-nowrap">Reevaluate?</span>
                     <button
                       onClick={handleReevaluateAll}
                       disabled={isReevaluatingTask}
-                      className="px-2 py-0.5 rounded-md bg-accent-blue text-white text-xs font-medium hover:bg-accent-blue/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                      className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       Yes
                     </button>
@@ -922,7 +1142,7 @@ export default function BlueprintDetailPage() {
                     onClick={handleReevaluateAll}
                     disabled={isRunning || reevaluating || generateCooldown || isReevaluatingTask}
                     title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || isReevaluatingTask ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-amber text-xs font-medium hover:bg-accent-amber/10 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                   >
                     {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
                       <><AISparkle size="xs" /> Reevaluating...</>
@@ -993,6 +1213,130 @@ export default function BlueprintDetailPage() {
                 ? ` ${newNodeCount} new node${newNodeCount !== 1 ? "s" : ""} created so far.`
                 : " New nodes will appear as they\u2019re created."}
             </span>
+          </div>
+        )}
+        {/* Convene active banner */}
+        {isConveneTask && (
+          <div className="mt-3 flex items-center gap-2 px-4 py-2 rounded-lg bg-accent-purple/10 border border-accent-purple/20">
+            <span className="w-2 h-2 rounded-full bg-accent-purple animate-pulse flex-shrink-0" />
+            <span className="text-sm text-accent-purple">Role discussion in progress</span>
+          </div>
+        )}
+        {/* Convene configuration form */}
+        {showConveneForm && (
+          <div className="mt-3 rounded-xl border border-accent-purple/30 bg-bg-secondary p-4 animate-fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-medium text-text-primary">Start Discussion</h3>
+              <button
+                onClick={() => setShowConveneForm(false)}
+                className="p-1 rounded text-text-muted hover:text-text-secondary hover:bg-bg-tertiary transition-colors"
+                aria-label="Close convene form"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+              </button>
+            </div>
+            {/* Topic */}
+            <input
+              type="text"
+              value={conveneTopic}
+              onChange={(e) => setConveneTopic(e.target.value)}
+              placeholder="Discussion topic (e.g. 'Design the auth system')"
+              className="w-full px-3 py-2 rounded-lg bg-bg-tertiary text-text-primary text-sm placeholder:text-text-muted border border-border-primary focus:border-accent-purple/40 focus:outline-none mb-3"
+              autoFocus
+            />
+            {/* Role selection — show all registered roles, pre-check enabledRoles */}
+            <div className="mb-3">
+              <label className="text-xs text-text-muted mb-1.5 block">Participating roles (min 2)</label>
+              <div className="flex flex-wrap gap-1.5">
+                {allRoles.map((role) => (
+                  <button
+                    key={role.id}
+                    type="button"
+                    onClick={() =>
+                      setConveneRoles((prev) =>
+                        prev.includes(role.id) ? prev.filter((x) => x !== role.id) : [...prev, role.id]
+                      )
+                    }
+                    className={`px-2 py-1 rounded-md text-xs border transition-colors ${
+                      conveneRoles.includes(role.id)
+                        ? `${ROLE_COLORS[role.id]?.border ?? ROLE_FALLBACK_COLORS.border} ${ROLE_COLORS[role.id]?.bg ?? ROLE_FALLBACK_COLORS.bg} ${ROLE_COLORS[role.id]?.text ?? ROLE_FALLBACK_COLORS.text}`
+                        : "border-border-primary text-text-muted hover:border-border-hover"
+                    }`}
+                  >
+                    {role.id.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              {conveneRoles.length < 2 && (
+                <p className="text-xs text-accent-red mt-1">Select at least 2 roles for a meaningful discussion</p>
+              )}
+            </div>
+            {/* Context nodes (optional) */}
+            {blueprint.nodes.length > 0 && (
+              <div className="mb-3">
+                <label className="text-xs text-text-muted mb-1.5 block">Context nodes (optional)</label>
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                  {blueprint.nodes.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      onClick={() =>
+                        setConveneContextNodes((prev) =>
+                          prev.includes(n.id) ? prev.filter((x) => x !== n.id) : [...prev, n.id]
+                        )
+                      }
+                      className={`flex-shrink-0 px-2 py-1 rounded-md text-xs border transition-colors ${
+                        conveneContextNodes.includes(n.id)
+                          ? "border-accent-blue bg-accent-blue/20 text-accent-blue"
+                          : "border-border-primary text-text-muted hover:border-border-hover"
+                      }`}
+                    >
+                      #{n.seq} {n.title.length > 25 ? n.title.slice(0, 25) + "…" : n.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* Max rounds */}
+            <div className="mb-4">
+              <label className="text-xs text-text-muted mb-1.5 block">Max rounds</label>
+              <div className="flex items-center gap-1.5">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setConveneMaxRounds(n)}
+                    className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors ${
+                      conveneMaxRounds === n
+                        ? "bg-accent-purple/20 text-accent-purple border border-accent-purple/40"
+                        : "bg-bg-tertiary text-text-muted border border-border-primary hover:border-border-hover"
+                    }`}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleStartConvene}
+                disabled={!conveneTopic.trim() || conveneRoles.length < 2}
+                title={!conveneTopic.trim() ? "Enter a topic" : conveneRoles.length < 2 ? "Select at least 2 roles" : "Start discussion"}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent-purple/15 text-accent-purple border border-accent-purple/30 text-xs font-medium hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                Start Discussion
+              </button>
+              <button
+                onClick={() => setShowConveneForm(false)}
+                className="px-3 py-1.5 rounded-lg text-text-muted text-xs hover:text-text-secondary hover:bg-bg-tertiary transition-all"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -1137,6 +1481,235 @@ export default function BlueprintDetailPage() {
         );
       })()}
 
+      {/* Discussions Panel */}
+      {conveneSessions.length > 0 && (
+        <div className="mb-4 rounded-xl border border-border-primary bg-bg-secondary overflow-hidden">
+          {/* Header */}
+          <button
+            onClick={() => setDiscussionsOpen((v) => !v)}
+            className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-bg-tertiary/50 transition-colors"
+          >
+            <svg className={`w-3 h-3 text-text-muted transition-transform ${discussionsOpen ? "rotate-90" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+            <span className="text-sm font-medium text-text-primary">Discussions</span>
+            <span className="bg-accent-purple/15 text-accent-purple text-xs rounded-full px-2 py-0.5">
+              {conveneSessions.length}
+            </span>
+            <span className="text-xs text-text-muted ml-auto">
+              {conveneSessions.filter((s) => s.status === "completed").length} completed
+              {conveneSessions.filter((s) => s.status === "failed").length > 0 && (
+                <span className="text-accent-red ml-1">
+                  {" \u00b7 "}{conveneSessions.filter((s) => s.status === "failed").length} failed
+                </span>
+              )}
+            </span>
+          </button>
+
+          {/* Session list */}
+          {discussionsOpen && (
+            <div className="border-t border-border-primary divide-y divide-border-primary">
+              {conveneSessions.map((session) => {
+                const isExpanded = expandedSessionId === session.id;
+                const statusColors: Record<string, string> = {
+                  active: "bg-accent-purple/15 text-accent-purple",
+                  synthesizing: "bg-accent-amber/15 text-accent-amber",
+                  completed: "bg-accent-green/15 text-accent-green",
+                  cancelled: "bg-text-muted/10 text-text-muted",
+                  failed: "bg-accent-red/15 text-accent-red",
+                };
+                return (
+                  <div key={session.id}>
+                    {/* Session card */}
+                    <button
+                      onClick={() => handleExpandSession(session.id)}
+                      className="w-full text-left hover:bg-bg-hover active:scale-[0.995] transition-all rounded-lg p-3"
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-sm font-medium text-text-primary truncate flex-1">{session.topic}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium capitalize ${statusColors[session.status] ?? statusColors.cancelled}`}>
+                          {session.status}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1">
+                          {session.participatingRoles.map((r) => (
+                            <span
+                              key={r}
+                              className={`w-2 h-2 rounded-full ${ROLE_COLORS[r]?.dot ?? ROLE_FALLBACK_COLORS.dot}`}
+                              title={r.toUpperCase()}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-[10px] text-text-muted">
+                          {session.messageCount} message{session.messageCount !== 1 ? "s" : ""}
+                        </span>
+                        <span className="text-[10px] text-text-muted ml-auto">
+                          {new Date(session.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                    </button>
+
+                    {/* Expanded session detail */}
+                    {isExpanded && (
+                      <div className="px-3 pb-3 max-h-[500px] overflow-y-auto animate-fade-in">
+                        {sessionDetail && sessionDetail.id === session.id ? (
+                          <>
+                            {/* Message list */}
+                            {(() => {
+                              const nonSynthMsgs = sessionDetail.messages.filter(m => m.messageType !== "synthesis");
+                              if (nonSynthMsgs.length >= 4) {
+                                const allExpanded = nonSynthMsgs.every(m => expandedMsgIds.has(m.id));
+                                return (
+                                  <div className="flex justify-end mb-1">
+                                    <button
+                                      onClick={() => {
+                                        setExpandedMsgIds(prev => {
+                                          const next = new Set(prev);
+                                          if (allExpanded) {
+                                            nonSynthMsgs.forEach(m => next.delete(m.id));
+                                          } else {
+                                            nonSynthMsgs.forEach(m => next.add(m.id));
+                                          }
+                                          return next;
+                                        });
+                                      }}
+                                      className="text-[10px] text-accent-blue hover:underline"
+                                    >
+                                      {allExpanded ? "Collapse all" : "Expand all"}
+                                    </button>
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
+                            <div className="space-y-2 mb-3">
+                              {sessionDetail.messages.map((msg) => {
+                                const isSynthesis = msg.messageType === "synthesis";
+                                const roleColor = ROLE_COLORS[msg.roleId] ?? ROLE_FALLBACK_COLORS;
+                                const isMsgExpanded = isSynthesis || expandedMsgIds.has(msg.id);
+                                return (
+                                  <div
+                                    key={msg.id}
+                                    className={`border-l-2 rounded-r-lg ${
+                                      isSynthesis
+                                        ? "bg-accent-purple/10 border-accent-purple"
+                                        : `bg-bg-tertiary/50 ${roleColor.border}`
+                                    }`}
+                                  >
+                                    <button
+                                      onClick={() => {
+                                        if (isSynthesis) return;
+                                        setExpandedMsgIds(prev => {
+                                          const next = new Set(prev);
+                                          if (next.has(msg.id)) next.delete(msg.id);
+                                          else next.add(msg.id);
+                                          return next;
+                                        });
+                                      }}
+                                      className={`w-full text-left flex items-center gap-2 p-3 ${isSynthesis ? "" : "cursor-pointer"} ${!isMsgExpanded ? "pb-0" : ""}`}
+                                      aria-expanded={isMsgExpanded}
+                                      aria-label={`${isSynthesis ? "Synthesis" : msg.roleId.toUpperCase()}${!isSynthesis ? ` Round ${msg.round}` : ""} — ${isMsgExpanded ? "collapse" : "expand"}`}
+                                    >
+                                      {!isSynthesis && (
+                                        <svg className={`w-3 h-3 text-text-muted transition-transform flex-shrink-0 ${isMsgExpanded ? "rotate-90" : ""}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
+                                      )}
+                                      <span className={`text-xs font-medium ${isSynthesis ? "text-accent-purple" : roleColor.text}`}>
+                                        {isSynthesis ? "Synthesis" : msg.roleId.toUpperCase()}
+                                      </span>
+                                      {!isSynthesis && (
+                                        <span className="text-[10px] text-text-muted">Round {msg.round}</span>
+                                      )}
+                                    </button>
+                                    <div className="px-3 pb-3">
+                                      {isMsgExpanded ? (
+                                        <MarkdownContent content={msg.content} maxHeight="200px" />
+                                      ) : (
+                                        <div>
+                                          <p className="text-xs text-text-secondary line-clamp-2 leading-snug">{stripMarkdown(msg.content)}</p>
+                                          <button
+                                            onClick={() => setExpandedMsgIds(prev => new Set(prev).add(msg.id))}
+                                            className="text-[10px] text-accent-blue hover:underline mt-0.5"
+                                          >
+                                            Show more
+                                          </button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Synthesis review — approve/discard */}
+                            {session.status === "synthesizing" && sessionDetail.synthesisResult && sessionDetail.synthesisResult.length > 0 && (
+                              <div className="border border-accent-purple/20 rounded-lg p-3 bg-accent-purple/5">
+                                <h4 className="text-xs font-medium text-accent-purple mb-2">Proposed nodes ({sessionDetail.synthesisResult.length})</h4>
+                                <ul className="space-y-1 mb-3">
+                                  {sessionDetail.synthesisResult.map((node: BatchCreateNode, i: number) => (
+                                    <li key={i} className="text-xs text-text-secondary flex items-start gap-1.5">
+                                      <span className="text-text-muted flex-shrink-0">{i + 1}.</span>
+                                      <span>{node.title}</span>
+                                      {node.roles && node.roles.length > 0 && (
+                                        <span className="flex items-center gap-0.5 ml-auto flex-shrink-0">
+                                          {node.roles.map((r) => (
+                                            <span key={r} className={`w-1.5 h-1.5 rounded-full ${ROLE_COLORS[r]?.dot ?? ROLE_FALLBACK_COLORS.dot}`} />
+                                          ))}
+                                        </span>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => handleApproveConvene(session.id)}
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green border border-accent-green/30 text-xs font-medium hover:bg-accent-green/25 active:scale-[0.97] transition-all"
+                                  >
+                                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+                                    Approve
+                                  </button>
+                                  {confirmingDiscard === session.id ? (
+                                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-red/30 bg-accent-red/10 animate-fade-in">
+                                      <span className="text-xs text-accent-red whitespace-nowrap">Discard?</span>
+                                      <button
+                                        onClick={() => handleCancelConvene(session.id)}
+                                        className="px-2 py-0.5 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 active:scale-[0.97] transition-all"
+                                      >
+                                        Yes
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmingDiscard(null)}
+                                        className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
+                                      >
+                                        No
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setConfirmingDiscard(session.id)}
+                                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-red/15 text-accent-red border border-accent-red/30 text-xs font-medium hover:bg-accent-red/25 active:scale-[0.97] transition-all"
+                                    >
+                                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18" /><path d="M6 6l12 12" /></svg>
+                                      Discard
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="py-4 text-center">
+                            <div className="w-4 h-4 border-2 border-accent-purple/30 border-t-accent-purple rounded-full animate-spin mx-auto" />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Add Node */}
       <div className="mb-4">
         {showAddNode ? (
@@ -1222,7 +1795,7 @@ export default function BlueprintDetailPage() {
                 disabled={!nodeTitle.trim() || enriching}
                 onClick={handleSmartCreate}
                 title={enriching ? "AI is enriching the node..." : !nodeTitle.trim() ? "Enter a node title first" : "AI enriches the title and description, then creates the node"}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-purple text-xs font-medium hover:bg-accent-purple/10 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
               </button>
@@ -1356,7 +1929,7 @@ export default function BlueprintDetailPage() {
                 aria-label="Toggle auto-refresh"
               >
                 <svg
-                  className={`w-3.5 h-3.5 ${shouldPoll ? "animate-spin" : ""}`}
+                  className={`w-3.5 h-3.5 ${isPolling ? "animate-spin" : ""}`}
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -1442,6 +2015,7 @@ export default function BlueprintDetailPage() {
                           broadcastOperation={broadcastOperation}
                           hasSuggestions={(node.suggestionCount ?? 0) > 0}
                           blueprintBusy={blueprintBusy}
+                          hasRunningNodes={anyNodeRunning || anyNodeQueued}
                         />
                       </div>
                     </Fragment>
@@ -1470,6 +2044,7 @@ export default function BlueprintDetailPage() {
                       broadcastOperation={broadcastOperation}
                       hasSuggestions={(node.suggestionCount ?? 0) > 0}
                       blueprintBusy={blueprintBusy}
+                      hasRunningNodes={anyNodeRunning || anyNodeQueued}
                       blueprintDefaultRole={blueprint.defaultRole}
                       blueprintEnabledRoles={blueprint.enabledRoles}
                     />

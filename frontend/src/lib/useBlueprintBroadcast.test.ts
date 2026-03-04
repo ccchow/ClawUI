@@ -143,6 +143,7 @@ describe("useBlueprintBroadcast", () => {
     const allTypes: BroadcastOpType[] = [
       "run", "enrich", "reevaluate", "split", "smart_deps",
       "generate", "run_all", "reevaluate_all", "resume", "coordinate",
+      "convene",
     ];
 
     for (const type of allTypes) {

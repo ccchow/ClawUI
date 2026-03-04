@@ -1220,15 +1220,15 @@ describe("plan-db", () => {
 
   // ─── Role fields tests ─────────────────────────────────────
 
-  it("createBlueprint defaults enabledRoles to ['sde'] and defaultRole to 'sde'", async () => {
+  it("createBlueprint defaults enabledRoles to all four roles and defaultRole to 'sde'", async () => {
     const { createBlueprint, getBlueprint } = await import("../plan-db.js");
 
     const bp = createBlueprint("Role Default Test", "desc", `/tmp/role-default-${randomUUID()}`);
-    expect(bp.enabledRoles).toEqual(["sde"]);
+    expect(bp.enabledRoles).toEqual(["sde", "qa", "pm", "uxd"]);
     expect(bp.defaultRole).toBe("sde");
 
     const fetched = getBlueprint(bp.id)!;
-    expect(fetched.enabledRoles).toEqual(["sde"]);
+    expect(fetched.enabledRoles).toEqual(["sde", "qa", "pm", "uxd"]);
     expect(fetched.defaultRole).toBe("sde");
   });
 
@@ -1248,7 +1248,7 @@ describe("plan-db", () => {
     const { createBlueprint, updateBlueprint, getBlueprint } = await import("../plan-db.js");
 
     const bp = createBlueprint("Role Update Test", "desc", `/tmp/role-update-${randomUUID()}`);
-    expect(bp.enabledRoles).toEqual(["sde"]);
+    expect(bp.enabledRoles).toEqual(["sde", "qa", "pm", "uxd"]);
 
     const updated = updateBlueprint(bp.id, { enabledRoles: ["sde", "pm"], defaultRole: "pm" })!;
     expect(updated.enabledRoles).toEqual(["sde", "pm"]);

@@ -14,7 +14,7 @@ export default function NewBlueprintPage() {
   const [description, setDescription] = useState("");
   const [projectCwd, setProjectCwd] = useState("");
   const [agentType, setAgentType] = useState<AgentType>("claude");
-  const [enabledRoles, setEnabledRoles] = useState<string[]>(["sde"]);
+  const [enabledRoles, setEnabledRoles] = useState<string[]>(["sde", "qa", "pm", "uxd"]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cwdError, setCwdError] = useState<string | null>(null);

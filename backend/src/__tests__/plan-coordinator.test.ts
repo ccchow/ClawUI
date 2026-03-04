@@ -20,10 +20,8 @@ vi.mock("../agent-pimono.js", () => ({}));
 vi.mock("../agent-openclaw.js", () => ({}));
 vi.mock("../agent-codex.js", () => ({}));
 
-// Mock role modules (side-effect imports)
-vi.mock("../roles/role-sde.js", () => ({}));
-vi.mock("../roles/role-qa.js", () => ({}));
-vi.mock("../roles/role-pm.js", () => ({}));
+// Mock role loader (replaces individual role side-effect mocks)
+vi.mock("../roles/load-all-roles.js", () => ({}));
 
 import { coordinateBlueprint, buildCoordinatorPrompt } from "../plan-coordinator.js";
 import { getBlueprint, getInsightsForBlueprint, markAllInsightsRead } from "../plan-db.js";

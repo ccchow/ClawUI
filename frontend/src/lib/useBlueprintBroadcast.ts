@@ -14,7 +14,8 @@ export type BroadcastOpType =
   | "run_all"
   | "reevaluate_all"
   | "resume"
-  | "coordinate";
+  | "coordinate"
+  | "convene";
 
 interface BlueprintBroadcastMessage {
   blueprintId: string;

@@ -64,6 +64,30 @@ Detailed frontend UI conventions for ClawUI. Referenced from [CLAUDE.md](../CLAU
 - **`focus-visible` global styles**: `globals.css` provides `*:focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: 2px; }` for keyboard navigation. No `:focus` styles — only `:focus-visible`.
 - **StatusIndicator**: Uses `role="img"` and `aria-label={label}` with full status label mapping (Pending, Running, Completed, Failed, Blocked, Skipped, Waiting in queue, Draft, Approved, Paused).
 
+## Gesture Color Semantics
+
+Fire-and-forget gesture buttons follow a strict color taxonomy:
+
+| Color Token | Semantic Category | Gestures |
+|-------------|-------------------|----------|
+| `accent-green` | **Execution** — "go" actions that run agent code | Run, Run All, Resume, Mark Done |
+| `accent-purple` | **AI Enrichment/Creation** — AI enhances or generates content | Generate, Enrich, Smart Create, Smart Deps, Coordinate, Convene |
+| `accent-amber` | **Review/Reconsider** — re-evaluation, caution, retry | Re-evaluate, Reevaluate All, Retry, Split, Unqueue, all confirmation strips |
+| `accent-red` | **Destructive** — permanent data loss | Delete |
+| `accent-blue` | **State Transition** — status or role changes | Approve |
+| `text-secondary` | **Neutral** — low-risk mechanical toggles | Skip/Unskip |
+
+**Rules:**
+- Same gesture = same color everywhere (card, detail page, blueprint page).
+- Confirmation strips default to `accent-amber` (caution). Exception: Regenerate strip uses `accent-purple` (creation family).
+- Every fire-and-forget AI gesture must show a completion toast using the `prevXxxQueuedRef` → `useEffect` queue-exit pattern.
+- Button weight varies by context: cards use lighter outlines (`bg-accent-*/20`), detail pages use solid fills for primary actions.
+
+**Keyboard shortcuts** (NodeDetailPage, not in input/textarea/contentEditable):
+- `r` Run node, `e` Toggle edit, `Shift+E` Smart Enrich (edit mode), `Shift+R` Re-evaluate, `d` Toggle deps
+- `Escape` cascades: cancel confirmation → close edit → close switcher
+- `Cmd/Ctrl+Shift+R` Reevaluate All (BlueprintDetailPage)
+
 ## Agent UI Patterns
 
 - **Agent color convention**: Claude=`accent-purple`, OpenClaw=`accent-green`, Pi Mono=`accent-blue`. `AGENT_COLORS` and `AGENT_LABELS` maps in `AgentSelector.tsx`. `AgentBadge` shows colored pill; `AgentSelector` auto-hides when only one agent has sessions. Non-Claude badges shown conditionally: `{agentType && agentType !== "claude" && <AgentBadge ... />}`. `MacroNodeCard` accepts `blueprintAgentType` prop to show override badges only when node agent differs from blueprint default.

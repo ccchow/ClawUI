@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { screen, fireEvent, waitFor, act } from "@testing-library/react";
 import NodeDetailPage from "./page";
-import { makeMockBlueprint, makeMockNode, makeMockExecution } from "@/test-utils";
-import { ToastProvider } from "@/components/Toast";
+import { makeMockBlueprint, makeMockNode, makeMockExecution, renderWithProviders } from "@/test-utils";
 import type { Blueprint, MacroNode, NodeExecution, QueueInfo } from "@/lib/api";
 
 // --- vi.hoisted mocks ---
@@ -97,11 +96,7 @@ vi.mock("@/lib/useBlueprintBroadcast", () => ({
 // --- Helpers ---
 
 function renderPage() {
-  return render(
-    <ToastProvider>
-      <NodeDetailPage />
-    </ToastProvider>,
-  );
+  return renderWithProviders(<NodeDetailPage />);
 }
 
 function setupNodeData(nodeOverrides: Partial<MacroNode> = {}, executions: NodeExecution[] = []) {
@@ -463,6 +458,41 @@ describe("NodeDetailPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/Execution timed out/)).toBeInTheDocument();
+    });
+  });
+
+  it("does not trigger runNode when Cmd+R (browser refresh) is pressed", async () => {
+    setupNodeData({ status: "pending" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Setup database").length).toBeGreaterThan(0);
+    });
+
+    // Simulate Cmd+R (Mac refresh) — should NOT trigger handleRun
+    fireEvent.keyDown(window, { key: "r", metaKey: true });
+    // Simulate Ctrl+R (Windows/Linux refresh) — should NOT trigger handleRun
+    fireEvent.keyDown(window, { key: "r", ctrlKey: true });
+
+    // runNode should not have been called
+    expect(apiMocks.runNode).not.toHaveBeenCalled();
+  });
+
+  it("triggers runNode when bare 'r' key is pressed on pending node", async () => {
+    setupNodeData({ status: "pending" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Setup database").length).toBeGreaterThan(0);
+    });
+
+    // Bare 'r' should trigger handleRun
+    fireEvent.keyDown(window, { key: "r" });
+
+    await waitFor(() => {
+      expect(apiMocks.runNode).toHaveBeenCalledWith("bp-1", "n-1");
     });
   });
 });
