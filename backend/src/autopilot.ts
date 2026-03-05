@@ -31,6 +31,13 @@ import {
 import type { PendingTask } from "./plan-executor.js";
 import { getActiveRuntime } from "./agent-runtime.js";
 import { coordinateBlueprint } from "./plan-coordinator.js";
+import {
+  enrichNodeInternal,
+  reevaluateNodeInternal,
+  splitNodeInternal,
+  smartDepsInternal,
+  reevaluateAllInternal,
+} from "./plan-operations.js";
 import { getDb } from "./db.js";
 import { createLogger } from "./logger.js";
 
@@ -197,9 +204,10 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     includedNodeIds = new Set(allNodes.map((n) => n.id));
   }
 
-  // Build node snapshots with suggestions
+  // Build node snapshots with suggestions, tracking unused count to avoid duplicate DB queries
   const nodes: AutopilotNodeState[] = [];
   const allUnusedSuggestionIds: string[] = [];
+  let totalUnusedSuggestions = 0;
   for (const node of allNodes) {
     if (!includedNodeIds.has(node.id)) continue;
 
@@ -216,6 +224,7 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
           ...(s.roles && s.roles.length > 0 ? { roles: s.roles } : {}),
         };
       });
+    totalUnusedSuggestions += unusedSuggestions.length;
 
     const nodeState: AutopilotNodeState = {
       id: node.id,
@@ -231,6 +240,14 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     if (node.error) nodeState.error = node.error;
 
     nodes.push(nodeState);
+  }
+  // For large blueprints, count unused suggestions for non-included nodes too
+  if (isLargeBlueprint) {
+    for (const node of allNodes) {
+      if (includedNodeIds.has(node.id)) continue;
+      const suggestions = getSuggestionsForNode(node.id);
+      totalUnusedSuggestions += suggestions.filter((s: NodeSuggestion) => !s.used).length;
+    }
   }
 
   // Only include unread, non-dismissed insights — auto-mark as read after snapshot
@@ -267,13 +284,6 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
   const allNodesDone =
     allNodes.length > 0 &&
     allNodes.every((n) => n.status === "done" || n.status === "skipped");
-
-  // Count unused suggestions across all nodes
-  let totalUnusedSuggestions = 0;
-  for (const node of allNodes) {
-    const suggestions = getSuggestionsForNode(node.id);
-    totalUnusedSuggestions += suggestions.filter((s: NodeSuggestion) => !s.used).length;
-  }
 
   const unreadInsightCount = unreadInsights.length;
 
@@ -365,23 +375,28 @@ ${JSON.stringify(state, null, 2)}
 ## Available Tools
 ${TOOL_DESCRIPTIONS}
 
+## Recommended Workflow Rhythm
+Don't just run nodes back-to-back. Follow this quality-aware pattern:
+
+1. **Before running a node**: If its description is short or vague, use enrich_node first to improve the prompt.
+2. **After running a node**: Evaluation runs automatically — you'll see suggestions appear on completed nodes. Review them before moving on.
+3. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
+4. **When suggestions accumulate**: Review them — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
+5. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
+
+A good rhythm: enrich → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.
+
 ## Guidelines
 - Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
 - If a node failed, analyze the error. Consider: resume with feedback, split it, modify its description/prompt, or skip it if non-critical.
-- Review suggestions on completed nodes. Decide for each:
-  - Create a fix/improvement node if the suggestion addresses a real issue
-  - Combine multiple related suggestions into a single new node
-  - Mark as used and move on if the issue is minor or already addressed
-  - Skip if the suggestion is irrelevant
-- If critical insights exist (severity: "critical"), address them before proceeding with normal execution.
-- If warning insights exist, consider addressing them when convenient but don't block progress.
-- If a node seems too complex (long description, many dependencies), consider splitting it first.
-- If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason) — don't loop trying different approaches.
-- Be efficient: prefer the simplest action that makes progress.
-- You have ${remaining} iterations left. Prioritize high-impact actions.
+- If a node seems too complex (long description >500 chars, many dependencies), consider split_node first.
 - If a node has been resumed multiple times (check resumeCount), consider splitting or skipping it instead of retrying.
 - When creating nodes from suggestions, set appropriate dependencies and roles.
-- If the queue is busy (running: true with pending tasks), consider taking non-execution actions like triaging suggestions, managing insights, or creating/updating nodes.
+- If critical insights exist (severity: "critical"), address them before proceeding with normal execution.
+- If warning insights exist, consider addressing them when convenient but don't block progress.
+- If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason).
+- You have ${remaining} iterations left. Balance quality (coordinate, enrich, suggestion triage) with progress (run_node).
+- When all nodes are done: review any remaining unused suggestions. Use batch_mark_suggestions_used for ones not worth acting on. Use create_node for actionable ones. Then call complete().
 
 ## Decision Format
 Respond with exactly one JSON object:
@@ -464,7 +479,7 @@ export async function executeDecision(
         const nodeId = p.nodeId as string;
         addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
         try {
-          await evaluateNodeCompletion(blueprintId, nodeId);
+          await reevaluateNodeInternal(blueprintId, nodeId);
         } catch (err) {
           log.error(`Autopilot reevaluate_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
         } finally {
@@ -477,7 +492,7 @@ export async function executeDecision(
         const nodeId = p.nodeId as string;
         addPendingTask(blueprintId, { type: "enrich", nodeId, queuedAt: new Date().toISOString() });
         try {
-          await evaluateNodeCompletion(blueprintId, nodeId);
+          await enrichNodeInternal(blueprintId, nodeId);
         } catch (err) {
           log.error(`Autopilot enrich_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
         } finally {
@@ -490,7 +505,7 @@ export async function executeDecision(
         const nodeId = p.nodeId as string;
         addPendingTask(blueprintId, { type: "split", nodeId, queuedAt: new Date().toISOString() });
         try {
-          await evaluateNodeCompletion(blueprintId, nodeId);
+          await splitNodeInternal(blueprintId, nodeId);
         } catch (err) {
           log.error(`Autopilot split_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
         } finally {
@@ -503,7 +518,7 @@ export async function executeDecision(
         const nodeId = p.nodeId as string;
         addPendingTask(blueprintId, { type: "smart_deps", nodeId, queuedAt: new Date().toISOString() });
         try {
-          await evaluateNodeCompletion(blueprintId, nodeId);
+          await smartDepsInternal(blueprintId, nodeId);
         } catch (err) {
           log.error(`Autopilot smart_dependencies ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
         } finally {
@@ -623,25 +638,25 @@ export async function executeDecision(
       case "reevaluate_all": {
         const blueprint = getBlueprint(blueprintId);
         if (!blueprint) return { success: false, message: "Blueprint not found", error: "not_found" };
-        const completedNodes = blueprint.nodes.filter((n) => n.status === "done");
-        if (completedNodes.length === 0) {
-          return { success: false, message: "No completed nodes to reevaluate", error: "no_nodes" };
+        const nonDoneNodes = blueprint.nodes.filter(
+          (n) => n.status !== "done" && n.status !== "running" && n.status !== "queued",
+        );
+        if (nonDoneNodes.length === 0) {
+          return { success: false, message: "No nodes to reevaluate", error: "no_nodes" };
         }
-        for (const n of completedNodes) {
+        for (const n of nonDoneNodes) {
           addPendingTask(blueprintId, { type: "reevaluate", nodeId: n.id, queuedAt: new Date().toISOString() });
         }
         try {
-          for (const n of completedNodes) {
-            await evaluateNodeCompletion(blueprintId, n.id);
-          }
+          await reevaluateAllInternal(blueprintId);
         } catch (err) {
           log.error(`Autopilot reevaluate_all failed: ${err instanceof Error ? err.message : err}`);
         } finally {
-          for (const n of completedNodes) {
+          for (const n of nonDoneNodes) {
             removePendingTask(blueprintId, n.id, "reevaluate");
           }
         }
-        return { success: true, message: `Reevaluated ${completedNodes.length} nodes` };
+        return { success: true, message: `Reevaluated ${nonDoneNodes.length} nodes` };
       }
 
       case "mark_insight_read": {
