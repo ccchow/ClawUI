@@ -866,7 +866,12 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
       const state = buildStateSnapshot(blueprintId);
 
       // 2. CHECK EXIT CONDITIONS
-      if (state.allNodesDone) {
+      // Only auto-exit if all nodes done AND no unresolved work remains.
+      // If there are unused suggestions or unread insights, let the LLM
+      // triage them before completing.
+      const hasUnusedSuggestions = state.nodes.some((n) => n.suggestions.length > 0);
+      const hasUnreadInsights = state.insights.some((i) => !i.read);
+      if (state.allNodesDone && !hasUnusedSuggestions && !hasUnreadInsights) {
         updateBlueprint(blueprintId, { status: "done" as BlueprintStatus });
         logAutopilot(blueprintId, iteration, state.summary, "All nodes complete", "complete");
         log.info(`Autopilot completed blueprint ${blueprintId.slice(0, 8)} at iteration ${iteration}`);

@@ -194,6 +194,43 @@ describe("autopilot integration", () => {
       expect(mockRunSession).toHaveBeenCalledTimes(3);
     });
 
+    it("does not auto-exit when unused suggestions remain after all nodes done", async () => {
+      const bp = setup("Suggestions Triage");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      // Pre-mark node A as done so allNodesDone is true from the start
+      db.updateMacroNode(bp.id, nodeA.id, { status: "done" as any });
+      // Add an unused suggestion — should prevent auto-exit
+      db.createSuggestion(bp.id, nodeA.id, "Add logging", "Should add structured logging");
+
+      // LLM is consulted and decides to complete
+      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // LLM was called (not short-circuited by auto-exit)
+      expect(mockRunSession).toHaveBeenCalledTimes(1);
+
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.status).toBe("done");
+    });
+
+    it("does not auto-exit when unread insights remain after all nodes done", async () => {
+      const bp = setup("Insights Triage");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      db.updateMacroNode(bp.id, nodeA.id, { status: "done" as any });
+      // Add an unread insight — should prevent auto-exit
+      db.createInsight(bp.id, nodeA.id, "evaluator", "warning", "Consider refactoring");
+
+      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
+
+      await ap.runAutopilotLoop(bp.id);
+
+      expect(mockRunSession).toHaveBeenCalledTimes(1);
+
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.status).toBe("done");
+    });
+
     it("creates nodes from suggestions and marks them used", async () => {
       const bp = setup("Suggestion Flow");
       const nodeA = db.createMacroNode(bp.id, { title: "Implement feature", order: 1 });
