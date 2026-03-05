@@ -54,7 +54,7 @@ import {
   updateConveneSessionStatus,
 } from "./plan-db.js";
 import { syncSession } from "./db.js";
-import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession, resolveNodeRoles } from "./plan-executor.js";
+import { executeNode, executeNextNode, executeAllNodes, enqueueBlueprintTask, getQueueInfo, getGlobalQueueInfo, addPendingTask, removePendingTask, removeQueuedTask, detectNewSession, runClaudeInteractive, withTimeout, evaluateNodeCompletion, applyGraphMutations, resumeNodeSession, resolveNodeRoles, parseAgentParams } from "./plan-executor.js";
 import type { CompletionEvaluation } from "./plan-executor.js";
 import { runAgentInteractive, getApiBase, getAuthParam } from "./plan-generator.js";
 import { coordinateBlueprint } from "./plan-coordinator.js";
@@ -128,6 +128,7 @@ async function runWithRelatedSessionDetection(
   nodeId: string,
   blueprintId: string,
   type: RelatedSessionType,
+  extraArgs?: string[],
 ): Promise<string> {
   const beforeTimestamp = new Date();
   let relatedSessionDbId: string | null = null;
@@ -156,7 +157,7 @@ async function runWithRelatedSessionDetection(
   }
 
   try {
-    const output = await runAgentInteractive(prompt, projectCwd || undefined);
+    const output = await runAgentInteractive(prompt, projectCwd || undefined, extraArgs);
     return output;
   } finally {
     // Stop polling
@@ -252,8 +253,8 @@ planRouter.post("/api/blueprints", (req, res) => {
         return;
       }
     }
-    const { agentType, enabledRoles, defaultRole } = req.body as { agentType?: string; enabledRoles?: string[]; defaultRole?: string };
-    const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType, enabledRoles, defaultRole);
+    const { agentType, enabledRoles, defaultRole, agentParams } = req.body as { agentType?: string; enabledRoles?: string[]; defaultRole?: string; agentParams?: string };
+    const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType, enabledRoles, defaultRole, agentParams);
     res.status(201).json(blueprint);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -474,7 +475,7 @@ Replace the placeholder values with your actual enriched title and description. 
       addPendingTask(blueprintId, { type: "enrich", nodeId: enrichNodeId, queuedAt: new Date().toISOString() });
       enqueueBlueprintTask(blueprintId, async () => {
         try {
-          await runWithRelatedSessionDetection(prompt, blueprint.projectCwd || undefined, enrichNodeId, blueprintId, "enrich");
+          await runWithRelatedSessionDetection(prompt, blueprint.projectCwd || undefined, enrichNodeId, blueprintId, "enrich", parseAgentParams(blueprint.agentParams));
         } finally {
           removePendingTask(blueprintId, enrichNodeId, "enrich");
         }
@@ -502,7 +503,7 @@ Replace the placeholder values with your actual enriched title and description. 
       let resultPromise: ReturnType<typeof waitForEnrichmentCallback>;
       await enqueueBlueprintTask(blueprintId, async () => {
         resultPromise = waitForEnrichmentCallback(requestId);
-        await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+        await runAgentInteractive(prompt, blueprint.projectCwd || undefined, parseAgentParams(blueprint.agentParams));
       });
 
       const result = await resultPromise!;
@@ -603,7 +604,7 @@ Replace the placeholder values with your actual updated title and description. M
     const reevCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runWithRelatedSessionDetection(prompt, reevCwd || undefined, nodeId, blueprintId, "reevaluate");
+        await runWithRelatedSessionDetection(prompt, reevCwd || undefined, nodeId, blueprintId, "reevaluate", parseAgentParams(blueprint.agentParams));
       } finally {
         removePendingTask(blueprintId, nodeId, "reevaluate");
       }
@@ -732,7 +733,7 @@ ${splitHeuristic}
     const splitCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runWithRelatedSessionDetection(prompt, splitCwd || undefined, nodeId, blueprintId, "split");
+        await runWithRelatedSessionDetection(prompt, splitCwd || undefined, nodeId, blueprintId, "split", parseAgentParams(blueprint.agentParams));
       } finally {
         removePendingTask(blueprintId, nodeId, "split");
       }
@@ -834,7 +835,7 @@ Replace the nodeId values with actual IDs from the available nodes list above. U
     const smartDepsCwd = blueprint.projectCwd;
     enqueueBlueprintTask(blueprintId, async () => {
       try {
-        await runWithRelatedSessionDetection(prompt, smartDepsCwd || undefined, nodeId, blueprintId, "smart_deps");
+        await runWithRelatedSessionDetection(prompt, smartDepsCwd || undefined, nodeId, blueprintId, "smart_deps", parseAgentParams(blueprint.agentParams));
       } finally {
         removePendingTask(blueprintId, nodeId, "smart_deps");
       }
@@ -2055,7 +2056,7 @@ curl -X PUT '${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuth
     enqueueBlueprintTask(blueprintId, async () => {
       try {
         await withTimeout(
-          runClaudeInteractive(prompt, reevAllCwd || undefined),
+          runClaudeInteractive(prompt, reevAllCwd || undefined, parseAgentParams(blueprint.agentParams)),
           REEVALUATE_TIMEOUT,
           "Reevaluate-all timed out after 32 minutes",
         );

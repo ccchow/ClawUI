@@ -421,22 +421,46 @@ export function detectNewSession(
 
 // ─── Low-level agent runners (delegating to runtime) ─────────
 
-export function runClaudeInteractive(prompt: string, cwd?: string): Promise<string> {
+export function runClaudeInteractive(prompt: string, cwd?: string, extraArgs?: string[]): Promise<string> {
   const runtime = getActiveRuntime();
-  return runtime.runSessionInteractive(prompt, cwd);
+  return runtime.runSessionInteractive(prompt, cwd, extraArgs);
 }
 
-function runClaude(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+function runClaude(prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
   const runtime = getActiveRuntime();
-  return runtime.runSession(prompt, cwd, onPid);
+  return runtime.runSession(prompt, cwd, onPid, extraArgs);
 }
 
-function runClaudeResume(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+function runClaudeResume(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
   const runtime = getActiveRuntime();
   if (!runtime.capabilities.supportsResume) {
     throw new Error(`Agent runtime "${runtime.type}" does not support session resume`);
   }
-  return runtime.resumeSession(sessionId, prompt, cwd, onPid);
+  return runtime.resumeSession(sessionId, prompt, cwd, onPid, extraArgs);
+}
+
+// ─── Agent params helper ─────────────────────────────────────
+
+/**
+ * Parse a blueprint's agentParams string into an array of CLI arguments.
+ * Splits on whitespace, respecting quoted strings.
+ * Returns empty array if agentParams is undefined/empty.
+ */
+export function parseAgentParams(agentParams?: string): string[] {
+  if (!agentParams || !agentParams.trim()) return [];
+  // Split on whitespace, but respect quoted strings
+  const args: string[] = [];
+  const regex = /(?:[^\s"']+|"[^"]*"|'[^']*')+/g;
+  let match;
+  while ((match = regex.exec(agentParams)) !== null) {
+    // Strip surrounding quotes if present
+    let arg = match[0];
+    if ((arg.startsWith('"') && arg.endsWith('"')) || (arg.startsWith("'") && arg.endsWith("'"))) {
+      arg = arg.slice(1, -1);
+    }
+    args.push(arg);
+  }
+  return args;
 }
 
 // ─── Role resolution helpers ─────────────────────────────────
@@ -670,7 +694,7 @@ async function generateArtifact(
   const ARTIFACT_TIMEOUT = 5 * 60_000; // 5 minutes max for artifact generation (P15 fix)
   let summary: string;
   try {
-    summary = await withTimeout(runClaude(summaryPrompt, cwd), ARTIFACT_TIMEOUT, "Artifact generation");
+    summary = await withTimeout(runClaude(summaryPrompt, cwd, undefined, parseAgentParams(bp?.agentParams)), ARTIFACT_TIMEOUT, "Artifact generation");
   } catch {
     // Fallback: use last 500 chars of the response (not the prompt)
     summary = tail.slice(-500);
@@ -1030,7 +1054,7 @@ export async function evaluateNodeCompletion(
   }
 
   try {
-    await runClaudeInteractive(prompt, cwd);
+    await runClaudeInteractive(prompt, cwd, parseAgentParams(blueprint.agentParams));
   } catch (err) {
     log.error(`Evaluation Claude call failed for node ${nodeId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
     return null;
@@ -1206,11 +1230,12 @@ async function executeNodeInternal(
   }
 
   try {
+    const extraArgs = parseAgentParams(blueprint.agentParams);
     const output = await runClaude(prompt, blueprint.projectCwd, (pid) => {
       log.debug(`CLI process spawned: pid=${pid}, executionId=${execution.id.slice(0, 8)}`);
       // Store CLI PID in execution record for liveness tracking across restarts
       updateExecution(execution.id, { cliPid: pid });
-    });
+    }, extraArgs);
 
     // Stop session polling if still active
     if (sessionPollTimer) {
@@ -1506,10 +1531,11 @@ export async function resumeNodeSession(
   const resumePrompt = `Continue where you left off. The previous session was interrupted. Complete the remaining work for: ${node.title}`;
 
   try {
+    const extraArgs = parseAgentParams(blueprint.agentParams);
     const output = await runClaudeResume(resumeSessionId, resumePrompt, blueprint.projectCwd, (pid) => {
       log.debug(`CLI resume process spawned: pid=${pid}, executionId=${execution.id.slice(0, 8)}`);
       updateExecution(execution.id, { cliPid: pid });
-    });
+    }, extraArgs);
 
     const elapsed = (Date.now() - startTime) / 60_000;
 

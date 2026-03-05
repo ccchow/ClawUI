@@ -130,7 +130,8 @@ export async function coordinateBlueprint(blueprintId: string): Promise<void> {
 
   // 5. Run agent in interactive mode
   try {
-    await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+    const { parseAgentParams } = await import("./plan-executor.js");
+    await runAgentInteractive(prompt, blueprint.projectCwd || undefined, parseAgentParams(blueprint.agentParams));
   } catch (err) {
     log.error(`Coordinator agent call failed for blueprint ${blueprintId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
   }

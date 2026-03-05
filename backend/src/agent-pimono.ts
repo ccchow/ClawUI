@@ -329,7 +329,8 @@ export class PiMonoAgentRuntime implements AgentRuntime {
    * Run Pi Mono in print mode (-p) for text output.
    * No TTY/expect needed — Pi outputs plain text directly in -p mode.
    */
-  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const { binary, baseArgs } = this.buildCommand();
       const args = [...baseArgs, "-p", prompt];
@@ -372,7 +373,8 @@ export class PiMonoAgentRuntime implements AgentRuntime {
    * Pi's print mode handles tool use natively, so this is the same as runSession.
    * Used for tasks where the agent calls API endpoints via curl.
    */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSessionInteractive(prompt: string, cwd?: string, _extraArgs?: string[]): Promise<string> {
     return this.runSession(prompt, cwd);
   }
 
@@ -380,7 +382,8 @@ export class PiMonoAgentRuntime implements AgentRuntime {
    * Resume an existing Pi Mono session by session file path.
    * Uses --session <path> to continue from a specific session file.
    */
-  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       // Find the session file from the session ID
       const sessionPath = this.findSessionFile(sessionId);

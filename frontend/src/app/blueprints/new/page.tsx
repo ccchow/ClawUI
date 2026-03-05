@@ -14,6 +14,7 @@ export default function NewBlueprintPage() {
   const [description, setDescription] = useState("");
   const [projectCwd, setProjectCwd] = useState("");
   const [agentType, setAgentType] = useState<AgentType>("claude");
+  const [agentParams, setAgentParams] = useState("");
   const [enabledRoles, setEnabledRoles] = useState<string[]>(["sde", "qa", "pm", "uxd"]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +32,7 @@ export default function NewBlueprintPage() {
         description: description.trim() || undefined,
         projectCwd: projectCwd.trim() || undefined,
         agentType,
+        agentParams: agentParams.trim() || undefined,
         enabledRoles,
         defaultRole: enabledRoles[0],
       });
@@ -107,6 +109,21 @@ export default function NewBlueprintPage() {
           onChange={setAgentType}
           disabled={submitting}
         />
+
+        <div>
+          <label htmlFor="agentParams" className="block text-sm text-text-secondary mb-1">
+            Agent Parameters
+          </label>
+          <input
+            id="agentParams"
+            type="text"
+            value={agentParams}
+            onChange={(e) => setAgentParams(e.target.value)}
+            placeholder="e.g., --plugin-dir /path/to/plugins --model sonnet"
+            className="w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 font-mono"
+          />
+          <p className="text-text-muted text-xs mt-1">Additional CLI arguments passed to the agent (e.g., --plugin-dir, --model)</p>
+        </div>
 
         <RoleSelector
           value={enabledRoles}

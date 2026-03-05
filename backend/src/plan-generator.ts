@@ -30,8 +30,8 @@ export function runAgentText(prompt: string, cwd?: string): Promise<string> {
  *
  * Routes through AgentRuntime so the configured AGENT_TYPE is respected.
  */
-export function runAgentInteractive(prompt: string, cwd?: string): Promise<string> {
-  return getActiveRuntime().runSessionInteractive(prompt, cwd);
+export function runAgentInteractive(prompt: string, cwd?: string, extraArgs?: string[]): Promise<string> {
+  return getActiveRuntime().runSessionInteractive(prompt, cwd, extraArgs);
 }
 
 /**
@@ -165,5 +165,6 @@ ${decompositionHeuristics}
 - After the curl call succeeds, your task is COMPLETE. Do not verify, retry, or repeat the call.
 - Do not output the nodes as JSON or text — only use the curl call.`;
 
-  await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+  const { parseAgentParams } = await import("./plan-executor.js");
+  await runAgentInteractive(prompt, blueprint.projectCwd || undefined, parseAgentParams(blueprint.agentParams));
 }

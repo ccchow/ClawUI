@@ -354,7 +354,8 @@ export class OpenClawAgentRuntime implements AgentRuntime {
    * Run OpenClaw agent with a prompt and capture JSON output.
    * No TTY/expect needed — OpenClaw outputs clean text/JSON.
    */
-  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const sessionId = randomUUID();
       const args = [
@@ -402,7 +403,8 @@ export class OpenClawAgentRuntime implements AgentRuntime {
    * Run OpenClaw in interactive mode (full tool use, no --json).
    * Used for tasks where the agent directly calls API endpoints via curl.
    */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSessionInteractive(prompt: string, cwd?: string, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const sessionId = randomUUID();
       const args = [
@@ -440,7 +442,8 @@ export class OpenClawAgentRuntime implements AgentRuntime {
    * Resume an existing OpenClaw session by session ID.
    * Uses --session-id to continue an existing session.
    */
-  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
         ...this.profileArgs(),

@@ -304,6 +304,7 @@ export interface Blueprint {
   starred?: boolean;
   archivedAt?: string;
   agentType?: AgentType;
+  agentParams?: string;
   enabledRoles?: string[];
   defaultRole?: string;
   conveneSessionCount?: number;
@@ -336,6 +337,7 @@ export function createBlueprint(data: {
   description?: string;
   projectCwd?: string;
   agentType?: AgentType;
+  agentParams?: string;
   enabledRoles?: string[];
   defaultRole?: string;
 }): Promise<Blueprint> {
@@ -348,7 +350,7 @@ export function createBlueprint(data: {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "enabledRoles" | "defaultRole">>
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole">>
 ): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
     method: "PUT",

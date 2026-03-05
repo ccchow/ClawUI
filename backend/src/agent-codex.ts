@@ -366,7 +366,8 @@ export class CodexAgentRuntime implements AgentRuntime {
    * task-summary, report-blocker) that require localhost network access.
    * The --full-auto flag forces workspace-write sandbox which blocks these calls.
    */
-  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
         "exec",
@@ -422,7 +423,8 @@ export class CodexAgentRuntime implements AgentRuntime {
    * API endpoints (e.g., batch-create, report-status). The --full-auto flag
    * forces workspace-write sandbox which blocks localhost network calls.
    */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  runSessionInteractive(prompt: string, cwd?: string, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
         "exec",
@@ -468,7 +470,8 @@ export class CodexAgentRuntime implements AgentRuntime {
    * task-summary, report-blocker) that require localhost network access.
    * The --full-auto flag forces workspace-write sandbox which blocks these calls.
    */
-  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, _extraArgs?: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const args = [
         "exec",

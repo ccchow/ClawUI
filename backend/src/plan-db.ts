@@ -58,6 +58,7 @@ export interface Blueprint {
   starred?: boolean;
   archivedAt?: string;
   agentType?: string;
+  agentParams?: string;
   enabledRoles?: string[];
   defaultRole?: string;
   conveneSessionCount?: number;
@@ -412,6 +413,12 @@ export function initPlanTables(): void {
     db.exec("ALTER TABLE blueprints ADD COLUMN default_role TEXT DEFAULT 'sde'");
   }
 
+  // Incremental migration: add agent_params column to blueprints
+  const bpCols6 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols6.some((c) => c.name === "agent_params")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN agent_params TEXT");
+  }
+
   // Incremental migration: add agent_type column to macro_nodes (per-node agent override)
   const mnCols = db.prepare("PRAGMA table_info(macro_nodes)").all() as { name: string }[];
   if (!mnCols.some((c) => c.name === "agent_type")) {
@@ -519,6 +526,7 @@ interface BlueprintRow {
   starred: number;
   archived_at: string | null;
   agent_type: string | null;
+  agent_params: string | null;
   enabled_roles: string | null;
   default_role: string | null;
   next_node_seq: number;
@@ -678,6 +686,7 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = [], conveneSessi
     ...(row.project_cwd ? { projectCwd: row.project_cwd } : {}),
     ...(row.archived_at ? { archivedAt: row.archived_at } : {}),
     ...(row.agent_type ? { agentType: row.agent_type } : {}),
+    ...(row.agent_params ? { agentParams: row.agent_params } : {}),
     ...(enabledRoles ? { enabledRoles } : {}),
     ...(row.default_role ? { defaultRole: row.default_role } : {}),
     ...(conveneSessionCount != null && conveneSessionCount > 0 ? { conveneSessionCount } : {}),
@@ -813,6 +822,7 @@ export function createBlueprint(
   agentType?: string,
   enabledRoles?: string[],
   defaultRole?: string,
+  agentParams?: string,
 ): Blueprint {
   const db = getDb();
   const id = randomUUID();
@@ -821,9 +831,9 @@ export function createBlueprint(
   const role = defaultRole ?? "sde";
 
   db.prepare(`
-    INSERT INTO blueprints (id, title, description, status, project_cwd, agent_type, enabled_roles, default_role, next_node_seq, created_at, updated_at)
-    VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, 1, ?, ?)
-  `).run(id, title, description ?? null, projectCwd ?? null, agentType ?? "claude", rolesJson, role, now, now);
+    INSERT INTO blueprints (id, title, description, status, project_cwd, agent_type, agent_params, enabled_roles, default_role, next_node_seq, created_at, updated_at)
+    VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, 1, ?, ?)
+  `).run(id, title, description ?? null, projectCwd ?? null, agentType ?? "claude", agentParams ?? null, rolesJson, role, now, now);
 
   return {
     id,
@@ -832,6 +842,7 @@ export function createBlueprint(
     status: "draft",
     ...(projectCwd ? { projectCwd } : {}),
     ...(agentType ? { agentType } : {}),
+    ...(agentParams ? { agentParams } : {}),
     enabledRoles: enabledRoles ?? ["sde", "qa", "pm", "uxd"],
     defaultRole: role,
     nodes: [],
@@ -948,7 +959,7 @@ export function unstarBlueprint(id: string): Blueprint | null {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "enabledRoles" | "defaultRole">>,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole">>,
 ): Blueprint | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
@@ -977,6 +988,10 @@ export function updateBlueprint(
   if (patch.agentType !== undefined) {
     sets.push("agent_type = ?");
     params.push(patch.agentType);
+  }
+  if (patch.agentParams !== undefined) {
+    sets.push("agent_params = ?");
+    params.push(patch.agentParams || null);
   }
   if (patch.enabledRoles !== undefined) {
     sets.push("enabled_roles = ?");

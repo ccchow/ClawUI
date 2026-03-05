@@ -2527,3 +2527,66 @@ describe("smartRecoverStaleExecutions logic", () => {
     expect(shouldSkip).toBe(true);
   });
 });
+
+// ─── parseAgentParams ─────────────────────────────────────────
+
+describe("parseAgentParams", () => {
+  // Import the function dynamically to avoid side-effect issues
+  let parseAgentParams: (agentParams?: string) => string[];
+
+  beforeEach(async () => {
+    const mod = await import("../plan-executor.js");
+    parseAgentParams = mod.parseAgentParams;
+  });
+
+  it("returns empty array for undefined", () => {
+    expect(parseAgentParams(undefined)).toEqual([]);
+  });
+
+  it("returns empty array for empty string", () => {
+    expect(parseAgentParams("")).toEqual([]);
+  });
+
+  it("returns empty array for whitespace-only string", () => {
+    expect(parseAgentParams("   ")).toEqual([]);
+  });
+
+  it("splits simple flags", () => {
+    expect(parseAgentParams("--plugin-dir /path/to/plugins")).toEqual([
+      "--plugin-dir",
+      "/path/to/plugins",
+    ]);
+  });
+
+  it("handles quoted strings with spaces", () => {
+    expect(parseAgentParams('--plugin-dir "/path/with spaces/plugins"')).toEqual([
+      "--plugin-dir",
+      "/path/with spaces/plugins",
+    ]);
+  });
+
+  it("handles single-quoted strings", () => {
+    expect(parseAgentParams("--model 'claude-sonnet'")).toEqual([
+      "--model",
+      "claude-sonnet",
+    ]);
+  });
+
+  it("handles multiple flags", () => {
+    expect(parseAgentParams("--plugin-dir /path --model sonnet --verbose")).toEqual([
+      "--plugin-dir",
+      "/path",
+      "--model",
+      "sonnet",
+      "--verbose",
+    ]);
+  });
+
+  it("handles extra whitespace between args", () => {
+    expect(parseAgentParams("  --flag1   value1   --flag2  ")).toEqual([
+      "--flag1",
+      "value1",
+      "--flag2",
+    ]);
+  });
+});

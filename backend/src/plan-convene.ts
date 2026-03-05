@@ -235,7 +235,8 @@ export async function executeConveneSession(sessionId: string): Promise<void> {
 
       let stdout: string;
       try {
-        stdout = await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+        const { parseAgentParams: parseParams } = await import("./plan-executor.js");
+        stdout = await runAgentInteractive(prompt, blueprint.projectCwd || undefined, parseParams(blueprint.agentParams));
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         log.error(`Convene ${sessionId.slice(0, 8)} — agent error for role ${roleId} round ${round}: ${errMsg}`);
@@ -304,7 +305,8 @@ async function synthesizeConveneResults(sessionId: string): Promise<void> {
 
   let output: string;
   try {
-    output = await runAgentInteractive(prompt, blueprint.projectCwd || undefined);
+    const { parseAgentParams: parseSynthParams } = await import("./plan-executor.js");
+    output = await runAgentInteractive(prompt, blueprint.projectCwd || undefined, parseSynthParams(blueprint.agentParams));
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     log.error(`Convene ${sessionId.slice(0, 8)} — synthesis agent error: ${errMsg}`);

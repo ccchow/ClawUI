@@ -1669,4 +1669,44 @@ describe("plan-db", () => {
     expect(f2!.roles).toEqual(["uxd", "pm"]);
     expect(f3!.roles).toBeUndefined();
   });
+
+  // ─── agentParams tests ──────────────────────────────────────
+
+  it("createBlueprint with agentParams stores and retrieves them", async () => {
+    const { createBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Params Test", "desc", "/tmp/test", "claude", ["sde"], "sde", "--plugin-dir /path/to/plugins");
+    expect(bp.agentParams).toBe("--plugin-dir /path/to/plugins");
+
+    const fetched = getBlueprint(bp.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.agentParams).toBe("--plugin-dir /path/to/plugins");
+  });
+
+  it("createBlueprint without agentParams leaves it undefined", async () => {
+    const { createBlueprint, getBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("No Params");
+    expect(bp.agentParams).toBeUndefined();
+
+    const fetched = getBlueprint(bp.id);
+    expect(fetched!.agentParams).toBeUndefined();
+  });
+
+  it("updateBlueprint can set and clear agentParams", async () => {
+    const { createBlueprint, updateBlueprint } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Update Params");
+    expect(bp.agentParams).toBeUndefined();
+
+    // Set agentParams
+    const updated = updateBlueprint(bp.id, { agentParams: "--model sonnet" });
+    expect(updated).not.toBeNull();
+    expect(updated!.agentParams).toBe("--model sonnet");
+
+    // Clear agentParams
+    const cleared = updateBlueprint(bp.id, { agentParams: "" });
+    expect(cleared).not.toBeNull();
+    expect(cleared!.agentParams).toBeUndefined();
+  });
 });

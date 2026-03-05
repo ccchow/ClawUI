@@ -112,12 +112,13 @@ export class ClaudeAgentRuntime implements AgentRuntime {
    * Run Claude in text output mode (--output-format text).
    * Uses expect for TTY on Unix; direct spawn on Windows.
    */
-  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
+    const extra = extraArgs ?? [];
     // ── Windows: direct spawn ──
     if (process.platform === "win32") {
       return (async () => {
         const { stdout, pid } = await spawnClaudeWindows(
-          ["--dangerously-skip-permissions", "--output-format", "text", "-p", prompt],
+          ["--dangerously-skip-permissions", ...extra, "--output-format", "text", "-p", prompt],
           { cwd, timeout: EXEC_TIMEOUT },
         );
         if (pid && onPid) onPid(pid);
@@ -130,6 +131,7 @@ export class ClaudeAgentRuntime implements AgentRuntime {
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
 
+      const extraStr = extra.length > 0 ? " " + extra.join(" ") : "";
       const outputFile = join(tmpdir(), `clawui-plan-output-${randomUUID()}.out`);
       const expectScript = `
 log_user 0
@@ -145,7 +147,7 @@ file delete "${tmpFile}"
 set of [open "${outputFile}" w]
 set output ""
 
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions${extraStr} --output-format text -p $prompt
 expect {
   -re ".+" {
     append output $expect_out(0,string)
@@ -213,11 +215,12 @@ close $of
    * Run Claude in interactive mode (full tool use, no --output-format text).
    * Used for tasks where Claude directly calls API endpoints.
    */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string> {
+  runSessionInteractive(prompt: string, cwd?: string, extraArgs?: string[]): Promise<string> {
+    const extra = extraArgs ?? [];
     // ── Windows: direct spawn ──
     if (process.platform === "win32") {
       return spawnClaudeWindows(
-        ["--dangerously-skip-permissions", "-p", prompt],
+        ["--dangerously-skip-permissions", ...extra, "-p", prompt],
         { cwd, timeout: EXEC_TIMEOUT },
       ).then(({ stdout }) => stdout);
     }
@@ -227,6 +230,7 @@ close $of
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
 
+      const extraStr = extra.length > 0 ? " " + extra.join(" ") : "";
       const fullScript = `
 set timeout 1800
 set stty_init "columns 2000"
@@ -234,7 +238,7 @@ set fp [open "${tmpFile}" r]
 set prompt [read -nonewline $fp]
 close $fp
 file delete "${tmpFile}"
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions${extraStr} -p $prompt
 expect eof
 catch {wait}
 `;
@@ -269,12 +273,13 @@ catch {wait}
   /**
    * Resume an existing session by ID with a continuation prompt.
    */
-  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string> {
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
+    const extra = extraArgs ?? [];
     // ── Windows: direct spawn ──
     if (process.platform === "win32") {
       return (async () => {
         const { stdout, pid } = await spawnClaudeWindows(
-          ["--dangerously-skip-permissions", "--output-format", "text", "--resume", sessionId, "-p", prompt],
+          ["--dangerously-skip-permissions", ...extra, "--output-format", "text", "--resume", sessionId, "-p", prompt],
           { cwd, timeout: EXEC_TIMEOUT },
         );
         if (pid && onPid) onPid(pid);
@@ -287,6 +292,7 @@ catch {wait}
       const tmpFile = join(tmpdir(), `clawui-plan-prompt-${randomUUID()}.txt`);
       writeFileSync(tmpFile, prompt, "utf-8");
 
+      const extraStr = extra.length > 0 ? " " + extra.join(" ") : "";
       const outputFile = join(tmpdir(), `clawui-plan-output-${randomUUID()}.out`);
       const expectScript = `
 log_user 0
@@ -302,7 +308,7 @@ file delete "${tmpFile}"
 set of [open "${outputFile}" w]
 set output ""
 
-spawn ${CLAUDE_PATH} --dangerously-skip-permissions --output-format text --resume ${sessionId} -p $prompt
+spawn ${CLAUDE_PATH} --dangerously-skip-permissions${extraStr} --output-format text --resume ${sessionId} -p $prompt
 expect {
   -re ".+" {
     append output $expect_out(0,string)

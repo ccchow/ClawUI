@@ -50,21 +50,21 @@ export interface AgentRuntime {
    * Used for simple tasks that only need text output (artifact generation, etc.)
    * Returns the cleaned text output.
    */
-  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string>;
+  runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string>;
 
   /**
    * Run the agent in interactive mode (full tool use, no --output-format text).
    * Used for tasks where the agent directly calls API endpoints via curl.
    * Returns raw stdout (usually ignored — side effects happen via API calls).
    */
-  runSessionInteractive(prompt: string, cwd?: string): Promise<string>;
+  runSessionInteractive(prompt: string, cwd?: string, extraArgs?: string[]): Promise<string>;
 
   /**
    * Resume an existing session by ID with a continuation prompt.
    * Used for retrying failed executions.
    * Returns the cleaned text output.
    */
-  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void): Promise<string>;
+  resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string>;
 
   /**
    * Encode a project CWD to match the agent's directory naming convention.

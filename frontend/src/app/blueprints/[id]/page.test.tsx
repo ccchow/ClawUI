@@ -572,10 +572,10 @@ describe("BlueprintDetailPage", () => {
       expect(screen.getByPlaceholderText(/Discussion topic/)).toBeInTheDocument();
       expect(screen.getByText("Participating roles (min 2)")).toBeInTheDocument();
       expect(screen.getByText("Max rounds")).toBeInTheDocument();
-      // Role buttons
-      expect(screen.getByText("SDE")).toBeInTheDocument();
-      expect(screen.getByText("QA")).toBeInTheDocument();
-      expect(screen.getByText("PM")).toBeInTheDocument();
+      // Role buttons (use getByRole to avoid matching RoleBadge spans in header)
+      expect(screen.getByRole("button", { name: "SDE" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "QA" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "PM" })).toBeInTheDocument();
     });
 
     it("shows max round stepper buttons 1-5 with default 3 selected", async () => {
@@ -605,12 +605,12 @@ describe("BlueprintDetailPage", () => {
       fireEvent.change(screen.getByPlaceholderText(/Discussion topic/), { target: { value: "Test topic" } });
 
       // Deselect all roles (they start pre-selected) by clicking each
-      fireEvent.click(screen.getByText("SDE"));
-      fireEvent.click(screen.getByText("QA"));
-      fireEvent.click(screen.getByText("PM"));
+      fireEvent.click(screen.getByRole("button", { name: "SDE" }));
+      fireEvent.click(screen.getByRole("button", { name: "QA" }));
+      fireEvent.click(screen.getByRole("button", { name: "PM" }));
 
       // Re-select only 1 role
-      fireEvent.click(screen.getByText("SDE"));
+      fireEvent.click(screen.getByRole("button", { name: "SDE" }));
 
       const startBtn = screen.getByRole("button", { name: /Start Discussion/ });
       expect(startBtn).toBeDisabled();
@@ -624,7 +624,7 @@ describe("BlueprintDetailPage", () => {
       fireEvent.change(screen.getByPlaceholderText(/Discussion topic/), { target: { value: "Design auth system" } });
 
       // Deselect PM (keep SDE and QA selected)
-      fireEvent.click(screen.getByText("PM"));
+      fireEvent.click(screen.getByRole("button", { name: "PM" }));
 
       // Change max rounds to 2
       fireEvent.click(screen.getByRole("button", { name: "2" }));

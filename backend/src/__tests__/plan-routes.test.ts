@@ -321,6 +321,7 @@ vi.mock("../plan-executor.js", () => ({
   })),
   resumeNodeSession: vi.fn(async () => {}),
   resolveNodeRoles: vi.fn(() => ["sde"]),
+  parseAgentParams: vi.fn((params?: string) => params ? params.split(/\s+/).filter(Boolean) : []),
   buildArtifactPrompt: vi.fn(() => ""),
 }));
 
@@ -462,6 +463,7 @@ describe("plan-routes", () => {
         undefined,
         ["sde", "qa"],
         "qa",
+        undefined,
       );
       expect(res.body.enabledRoles).toEqual(["sde", "qa"]);
       expect(res.body.defaultRole).toBe("qa");

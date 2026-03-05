@@ -1001,6 +1001,11 @@ export default function BlueprintDetailPage() {
           {blueprint.agentType && blueprint.agentType !== "claude" && (
             <AgentBadge agentType={blueprint.agentType} size="xs" />
           )}
+          {blueprint.agentParams && (
+            <span className="text-xs text-text-muted font-mono bg-bg-tertiary px-1.5 py-0.5 rounded" title={blueprint.agentParams}>
+              {blueprint.agentParams.length > 30 ? blueprint.agentParams.slice(0, 30) + "…" : blueprint.agentParams}
+            </span>
+          )}
           {/* State-control actions + archive */}
           <div className="flex items-center gap-1 flex-shrink-0">
             {blueprint.status === "draft" && (
