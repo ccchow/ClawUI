@@ -205,17 +205,21 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     nodes.push(nodeState);
   }
 
-  // Unread/undismissed insights
+  // Only include unread, non-dismissed insights — auto-mark as read after snapshot
   const allInsights = getInsightsForBlueprint(blueprintId);
-  const insights: AutopilotInsightState[] = allInsights
-    .filter((i: BlueprintInsight) => !i.dismissed)
+  const unreadInsights = allInsights.filter((i: BlueprintInsight) => !i.dismissed && !i.read);
+  const insights: AutopilotInsightState[] = unreadInsights
     .map((i: BlueprintInsight) => ({
       id: i.id,
       severity: i.severity,
       message: truncate(i.message, 200),
       ...(i.sourceNodeId ? { sourceNodeId: i.sourceNodeId } : {}),
-      read: i.read,
+      read: false,
     }));
+  // Mark as read — autopilot has now "seen" them in this iteration
+  for (const i of unreadInsights) {
+    markInsightRead(i.id);
+  }
 
   // Queue info
   const queue = getQueueInfo(blueprintId);
@@ -243,10 +247,7 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     totalUnusedSuggestions += suggestions.filter((s: NodeSuggestion) => !s.used).length;
   }
 
-  // Count unread insights
-  const unreadInsightCount = allInsights.filter(
-    (i: BlueprintInsight) => !i.read && !i.dismissed,
-  ).length;
+  const unreadInsightCount = unreadInsights.length;
 
   const summaryParts: string[] = [`${doneCount}/${allNodes.length} nodes done`];
   if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
@@ -306,6 +307,8 @@ const TOOL_DESCRIPTIONS = `### Node Execution
 - **mark_insight_read(insightId)** — Acknowledge an insight without taking action.
 - **dismiss_insight(insightId)** — Dismiss an irrelevant insight.
 - **mark_suggestion_used(nodeId, suggestionId)** — Mark a suggestion as acted upon/addressed.
+- **batch_mark_suggestions_used(suggestionIds)** — Mark multiple suggestions as used at once. suggestionIds is an array of suggestion ID strings.
+- **batch_dismiss_insights(insightIds)** — Dismiss multiple insights at once. insightIds is an array of insight ID strings.
 
 ### Control Flow
 - **pause(reason)** — Pause autopilot and request human input. Use when you encounter ambiguous requirements, architectural decisions, or external dependencies that need human judgment.
@@ -631,6 +634,23 @@ export async function executeDecision(
         const result = markSuggestionUsed(suggestionId);
         if (!result) return { success: false, message: `Suggestion ${suggestionId} not found`, error: "not_found" };
         return { success: true, message: `Marked suggestion ${suggestionId} as used` };
+      }
+
+      case "batch_mark_suggestions_used": {
+        const ids = p.suggestionIds as string[];
+        let marked = 0;
+        for (const id of ids) {
+          if (markSuggestionUsed(id)) marked++;
+        }
+        return { success: true, message: `Marked ${marked}/${ids.length} suggestions as used` };
+      }
+
+      case "batch_dismiss_insights": {
+        const ids = p.insightIds as string[];
+        for (const id of ids) {
+          dismissInsight(id);
+        }
+        return { success: true, message: `Dismissed ${ids.length} insights` };
       }
 
       case "pause": {

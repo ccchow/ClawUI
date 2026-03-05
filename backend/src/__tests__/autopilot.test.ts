@@ -253,7 +253,7 @@ describe("autopilot", () => {
       expect(state.nodes[0].suggestions[1].roles).toEqual(["qa"]);
     });
 
-    it("only includes undismissed insights (filtering dismissed)", () => {
+    it("only includes unread, undismissed insights and auto-marks them as read", () => {
       const insights = [
         { id: "i1", blueprintId: "bp-1", severity: "warning" as const, message: "Watch out", read: false, dismissed: false, createdAt: "", role: "sde" },
         { id: "i2", blueprintId: "bp-1", severity: "critical" as const, message: "Big issue", read: true, dismissed: false, createdAt: "", role: "qa", sourceNodeId: "n1" },
@@ -267,13 +267,14 @@ describe("autopilot", () => {
 
       const state = buildStateSnapshot("bp-1");
 
-      // Dismissed insight filtered out
-      expect(state.insights).toHaveLength(2);
+      // Only unread + undismissed insight included (i2 is read, i3 is dismissed)
+      expect(state.insights).toHaveLength(1);
       expect(state.insights[0].id).toBe("i1");
       expect(state.insights[0].read).toBe(false);
-      expect(state.insights[1].id).toBe("i2");
-      expect(state.insights[1].read).toBe(true);
-      expect(state.insights[1].sourceNodeId).toBe("n1");
+
+      // Auto-marked as read
+      expect(markInsightRead).toHaveBeenCalledWith("i1");
+      expect(markInsightRead).toHaveBeenCalledTimes(1);
     });
 
     it("includes queue info", () => {
