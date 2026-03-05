@@ -13,6 +13,7 @@ export type ExecutionType = "primary" | "retry" | "continuation" | "subtask";
 export type ExecutionStatus = "running" | "done" | "failed" | "cancelled";
 export type FailureReason = "timeout" | "context_exhausted" | "output_token_limit" | "hung" | "error" | null;
 export type ReportedStatus = "done" | "failed" | "blocked" | null;
+export type ExecutionMode = "manual" | "autopilot";
 export type RelatedSessionType = "enrich" | "reevaluate" | "split" | "evaluate" | "reevaluate_all" | "generate" | "smart_deps" | "coordinate";
 export type InsightSeverity = "info" | "warning" | "critical";
 export type ConveneSessionStatus = "active" | "synthesizing" | "completed" | "cancelled" | "failed";
@@ -61,6 +62,9 @@ export interface Blueprint {
   agentParams?: string;
   enabledRoles?: string[];
   defaultRole?: string;
+  executionMode?: ExecutionMode;
+  maxIterations?: number;
+  pauseReason?: string;
   conveneSessionCount?: number;
   nodes: MacroNode[];
   createdAt: string;
@@ -147,6 +151,18 @@ export interface NodeSuggestion {
   description: string;
   used: boolean;
   roles?: string[];
+  createdAt: string;
+}
+
+export interface AutopilotLogEntry {
+  id: string;
+  blueprintId: string;
+  iteration: number;
+  observation?: string;
+  decision: string;
+  action: string;
+  actionParams?: string;
+  result?: string;
   createdAt: string;
 }
 
@@ -507,6 +523,37 @@ export function initPlanTables(): void {
     `);
   }
 
+  // Incremental migration: add autopilot columns to blueprints
+  const bpCols6 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols6.some((c) => c.name === "execution_mode")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN execution_mode TEXT DEFAULT 'manual'");
+  }
+  if (!bpCols6.some((c) => c.name === "max_iterations")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN max_iterations INTEGER DEFAULT 50");
+  }
+  if (!bpCols6.some((c) => c.name === "pause_reason")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN pause_reason TEXT DEFAULT NULL");
+  }
+
+  // Incremental migration: create autopilot_log table if not exists
+  const autopilotLogTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='autopilot_log'").all();
+  if (autopilotLogTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS autopilot_log (
+        id              TEXT PRIMARY KEY,
+        blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        iteration       INTEGER NOT NULL,
+        observation     TEXT,
+        decision        TEXT NOT NULL,
+        action          TEXT NOT NULL,
+        action_params   TEXT,
+        result          TEXT,
+        created_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_autopilot_log_blueprint ON autopilot_log(blueprint_id, iteration);
+    `);
+  }
+
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
       "plan_schema",
@@ -530,6 +577,9 @@ interface BlueprintRow {
   enabled_roles: string | null;
   default_role: string | null;
   next_node_seq: number;
+  execution_mode: string | null;
+  max_iterations: number | null;
+  pause_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -689,6 +739,9 @@ function rowToBlueprint(row: BlueprintRow, nodes: MacroNode[] = [], conveneSessi
     ...(row.agent_params ? { agentParams: row.agent_params } : {}),
     ...(enabledRoles ? { enabledRoles } : {}),
     ...(row.default_role ? { defaultRole: row.default_role } : {}),
+    ...(row.execution_mode && row.execution_mode !== "manual" ? { executionMode: row.execution_mode as ExecutionMode } : {}),
+    ...(row.max_iterations != null && row.max_iterations !== 50 ? { maxIterations: row.max_iterations } : {}),
+    ...(row.pause_reason ? { pauseReason: row.pause_reason } : {}),
     ...(conveneSessionCount != null && conveneSessionCount > 0 ? { conveneSessionCount } : {}),
     nodes,
     createdAt: row.created_at,
@@ -959,7 +1012,7 @@ export function unstarBlueprint(id: string): Blueprint | null {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole">>,
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole" | "executionMode" | "maxIterations" | "pauseReason">>,
 ): Blueprint | null {
   const db = getDb();
   const existing = db.prepare("SELECT * FROM blueprints WHERE id = ?").get(id) as BlueprintRow | undefined;
@@ -1000,6 +1053,18 @@ export function updateBlueprint(
   if (patch.defaultRole !== undefined) {
     sets.push("default_role = ?");
     params.push(patch.defaultRole);
+  }
+  if (patch.executionMode !== undefined) {
+    sets.push("execution_mode = ?");
+    params.push(patch.executionMode);
+  }
+  if (patch.maxIterations !== undefined) {
+    sets.push("max_iterations = ?");
+    params.push(patch.maxIterations);
+  }
+  if (patch.pauseReason !== undefined) {
+    sets.push("pause_reason = ?");
+    params.push(patch.pauseReason);
   }
 
   params.push(id);
@@ -1822,6 +1887,47 @@ export function getTotalUnreadInsightCount(): number {
     "SELECT COUNT(*) as cnt FROM blueprint_insights WHERE read = 0 AND dismissed = 0",
   ).get() as { cnt: number };
   return row.cnt;
+}
+
+// ─── Autopilot Log ────────────────────────────────────────────
+
+export function getAutopilotLog(
+  blueprintId: string,
+  limit = 20,
+  offset = 0,
+): AutopilotLogEntry[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, blueprint_id, iteration, observation, decision, action, action_params, result, created_at
+       FROM autopilot_log
+       WHERE blueprint_id = ?
+       ORDER BY iteration DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(blueprintId, limit, offset) as Array<{
+    id: string;
+    blueprint_id: string;
+    iteration: number;
+    observation: string | null;
+    decision: string;
+    action: string;
+    action_params: string | null;
+    result: string | null;
+    created_at: string;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    iteration: row.iteration,
+    ...(row.observation ? { observation: row.observation } : {}),
+    decision: row.decision,
+    action: row.action,
+    ...(row.action_params ? { actionParams: row.action_params } : {}),
+    ...(row.result ? { result: row.result } : {}),
+    createdAt: row.created_at,
+  }));
 }
 
 // ─── Convene Sessions CRUD ────────────────────────────────────

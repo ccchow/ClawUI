@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import BlueprintDetailPage from "./page";
 import { makeMockBlueprint, makeMockNode, makeMockInsight } from "@/test-utils";
 import { ToastProvider } from "@/components/Toast";
-import type { Blueprint, BlueprintInsight, QueueInfo, ConveneSession, ConveneMessage, BatchCreateNode, RoleInfo } from "@/lib/api";
+import type { Blueprint, BlueprintInsight, QueueInfo, ConveneSession, ConveneMessage, BatchCreateNode, RoleInfo, AutopilotLogEntry } from "@/lib/api";
 
 // --- vi.hoisted mocks ---
 
@@ -39,6 +39,7 @@ const apiMocks = vi.hoisted(() => ({
     { id: "pm", label: "PM", description: "Product Manager", builtin: true, artifactTypes: [], blockerTypes: [] },
     { id: "uxd", label: "UXD", description: "UX Designer", builtin: true, artifactTypes: [], blockerTypes: [] },
   ])),
+  fetchAutopilotLog: vi.fn((): Promise<AutopilotLogEntry[]> => Promise.resolve([])),
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -1880,6 +1881,74 @@ describe("BlueprintDetailPage", () => {
       await renderAndGetPreview("- Item one\n- Item two");
       await waitFor(() => {
         expect(screen.getByText(/Item one Item two/)).toBeInTheDocument();
+      });
+    });
+  });
+
+  // ─── Autopilot: Run All button label & styling ──────────────────
+
+  describe("Autopilot Run All button", () => {
+    it("shows 'Run All (Autopilot)' label when executionMode is autopilot", async () => {
+      setupBlueprintWithNodes({ status: "approved", executionMode: "autopilot" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Run All (Autopilot)")).toBeInTheDocument();
+      });
+    });
+
+    it("shows 'Run All' label when executionMode is manual", async () => {
+      setupBlueprintWithNodes({ status: "approved", executionMode: "manual" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Run All")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Run All (Autopilot)")).not.toBeInTheDocument();
+    });
+
+    it("shows 'Run All' label when executionMode is undefined (default)", async () => {
+      setupBlueprintWithNodes({ status: "approved" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Run All")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("Run All (Autopilot)")).not.toBeInTheDocument();
+    });
+
+    it("shows autopilot confirmation label 'Run all (autopilot)?' when confirming in autopilot mode", async () => {
+      setupBlueprintWithNodes({ status: "approved", executionMode: "autopilot" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Run All (Autopilot)")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Run All (Autopilot)"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Run all (autopilot)?")).toBeInTheDocument();
+      });
+    });
+
+    it("shows standard confirmation label when confirming in manual mode", async () => {
+      setupBlueprintWithNodes({ status: "approved", executionMode: "manual" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Run All")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Run All"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Run all pending nodes?")).toBeInTheDocument();
       });
     });
   });

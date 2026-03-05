@@ -44,6 +44,9 @@ import { computeDepLayout } from "@/components/DependencyGraph";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { useToast } from "@/components/Toast";
 import { ConfirmationStrip } from "@/components/ConfirmationStrip";
+import { AutopilotToggle } from "@/components/AutopilotToggle";
+import { AutopilotLog } from "@/components/AutopilotLog";
+import { PauseBanner } from "@/components/PauseBanner";
 import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 
 /** Strip markdown formatting for plain-text preview (best-effort, line-clamp handles overflow) */
@@ -715,6 +718,7 @@ export default function BlueprintDetailPage() {
   // "Run All" and individual node runs are NOT included — individual Run buttons remain
   // clickable so users can queue additional nodes while others execute.
   const blueprintBusy = isGeneratingTask ? "Generate" : isConveneTask ? "Convene" : isCoordinatingTask ? "Coordinate" : undefined;
+  const isAutopilot = blueprint.executionMode === "autopilot";
   const canRunAll = (blueprint.status === "approved" || blueprint.status === "failed" || blueprint.status === "paused")
     && blueprint.nodes.some((n) => n.status === "pending" || n.status === "failed");
 
@@ -1006,6 +1010,12 @@ export default function BlueprintDetailPage() {
               {blueprint.agentParams.length > 30 ? blueprint.agentParams.slice(0, 30) + "…" : blueprint.agentParams}
             </span>
           )}
+          <AutopilotToggle
+            blueprintId={id}
+            executionMode={blueprint.executionMode}
+            blueprintStatus={blueprint.status}
+            onUpdate={(patch) => setBlueprint((prev) => prev ? { ...prev, ...patch } : prev)}
+          />
           {/* State-control actions + archive */}
           <div className="flex items-center gap-1 flex-shrink-0">
             {blueprint.status === "draft" && (
@@ -1022,7 +1032,7 @@ export default function BlueprintDetailPage() {
             {canRunAll && (
               confirmingRunAll ? (
                 <ConfirmationStrip
-                  confirmLabel="Run all pending nodes?"
+                  confirmLabel={isAutopilot ? "Run all (autopilot)?" : "Run all pending nodes?"}
                   variant="amber"
                   onConfirm={handleRunAll}
                   onCancel={() => setConfirmingRunAll(false)}
@@ -1032,15 +1042,19 @@ export default function BlueprintDetailPage() {
                 <button
                   onClick={handleRunAll}
                   disabled={isRunning || isRunningTask}
-                  title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : "Execute all pending nodes in dependency order using the selected agent"}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                  title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : isAutopilot ? "Execute all pending nodes via autopilot agent loop" : "Execute all pending nodes in dependency order using the selected agent"}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                    isAutopilot
+                      ? "bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
+                      : "bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
+                  }`}
                 >
                   {isRunning || isRunningTask ? (
                     <><AISparkle size="xs" /> In Progress...</>
                   ) : (
                     <>
                       <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z" /></svg>
-                      Run All
+                      {isAutopilot ? "Run All (Autopilot)" : "Run All"}
                     </>
                   )}
                 </button>
@@ -1402,6 +1416,30 @@ export default function BlueprintDetailPage() {
         <div className="text-sm text-accent-red bg-accent-red/10 rounded-lg p-3 mb-4">
           {error}
         </div>
+      )}
+
+      {/* Autopilot Pause Banner */}
+      {blueprint.status === "paused" && blueprint.pauseReason && isAutopilot && (
+        <PauseBanner
+          blueprintId={id}
+          pauseReason={blueprint.pauseReason}
+          onUpdate={(patch) => setBlueprint((prev) => prev ? { ...prev, ...patch } as typeof prev : prev)}
+          onInvalidate={invalidateAll}
+          onBroadcast={(type) => broadcastOperation(type as Parameters<typeof broadcastOperation>[0])}
+          onScrollToNode={(nodeId) => {
+            const el = document.getElementById(`node-${nodeId}`);
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+          }}
+        />
+      )}
+
+      {/* Autopilot Decision Log */}
+      {isAutopilot && (
+        <AutopilotLog
+          blueprintId={id}
+          executionMode={blueprint.executionMode}
+          blueprintStatus={blueprint.status}
+        />
       )}
 
       {/* Insights Panel */}
@@ -2047,7 +2085,7 @@ export default function BlueprintDetailPage() {
                           </span>
                         </button>
                       )}
-                      <div className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
+                      <div id={`node-${node.id}`} className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
                         <MacroNodeCard
                           node={node}
                           pendingTasks={pendingTasks}
@@ -2077,7 +2115,7 @@ export default function BlueprintDetailPage() {
               {topDisplayNodes.map((node, displayIdx) => {
                 const originalIndex = blueprint.nodes.indexOf(node);
                 return (
-                  <div key={node.id} className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
+                  <div key={node.id} id={`node-${node.id}`} className={newNodeIds.has(node.id) ? "animate-node-appear" : ""}>
                     <MacroNodeCard
                       node={node}
                       pendingTasks={pendingTasks}

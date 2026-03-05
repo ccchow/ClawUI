@@ -43,6 +43,7 @@ import {
   markAllInsightsRead,
   dismissInsight,
   getTotalUnreadInsightCount,
+  getAutopilotLog,
 } from "./plan-db.js";
 import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, ReportedStatus, RelatedSessionType } from "./plan-db.js";
 import {
@@ -63,6 +64,7 @@ import { getRole, getAllRoles } from "./roles/role-registry.js";
 import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR } from "./config.js";
+import { runAutopilotLoop } from "./autopilot.js";
 
 // Side-effect: auto-discovers and registers all roles before getRole()
 import "./roles/load-all-roles.js";
@@ -298,11 +300,54 @@ planRouter.get("/api/blueprints/:id", (req, res) => {
 planRouter.put("/api/blueprints/:id", (req, res) => {
   try {
     const patch = req.body as Record<string, unknown>;
+
+    // Validate executionMode if provided
+    if (patch.executionMode !== undefined) {
+      if (patch.executionMode !== "manual" && patch.executionMode !== "autopilot") {
+        res.status(400).json({ error: "executionMode must be 'manual' or 'autopilot'" });
+        return;
+      }
+    }
+
+    // Validate maxIterations if provided
+    if (patch.maxIterations !== undefined) {
+      const maxIter = Number(patch.maxIterations);
+      if (isNaN(maxIter) || maxIter < 10 || maxIter > 200) {
+        res.status(400).json({ error: "maxIterations must be between 10 and 200" });
+        return;
+      }
+      patch.maxIterations = maxIter;
+    }
+
+    // Check if switching to autopilot — need current state before update
+    const currentBp = getBlueprint(req.params.id);
+    if (!currentBp) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const switchingToAutopilot =
+      patch.executionMode === "autopilot" &&
+      currentBp.executionMode !== "autopilot" &&
+      (currentBp.status === "approved" || currentBp.status === "paused");
+
+    // Clear pause_reason when switching to autopilot
+    if (switchingToAutopilot) {
+      patch.pauseReason = "";
+    }
+
     const blueprint = updateBlueprint(req.params.id, patch);
     if (!blueprint) {
       res.status(404).json({ error: "Blueprint not found" });
       return;
     }
+
+    // Side effect: enqueue autopilot loop when switching to autopilot on approved/paused blueprint
+    if (switchingToAutopilot) {
+      enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
+        log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    }
+
     res.json(blueprint);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -375,6 +420,25 @@ planRouter.post("/api/blueprints/:id/unstar", (req, res) => {
       return;
     }
     res.json(result);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/autopilot-log — get autopilot decision log
+planRouter.get("/api/blueprints/:id/autopilot-log", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const rawLimit = parseInt(req.query.limit as string, 10);
+    const rawOffset = parseInt(req.query.offset as string, 10);
+    const limit = Math.min(Math.max(isNaN(rawLimit) ? 20 : rawLimit, 1), 100);
+    const offset = Math.max(isNaN(rawOffset) ? 0 : rawOffset, 0);
+    const entries = getAutopilotLog(req.params.id, limit, offset);
+    res.json(entries);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
@@ -2087,7 +2151,7 @@ curl -X PUT '${getApiBase()}/api/blueprints/${blueprintId}/nodes/batch?${getAuth
   }
 });
 
-// POST /api/blueprints/:id/run-all — run all nodes in background
+// POST /api/blueprints/:id/run-all — run all nodes in background (mode-aware)
 planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
   try {
     const blueprint = getBlueprint(req.params.id);
@@ -2096,9 +2160,15 @@ planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
       return;
     }
     // Fire and forget — execution continues in background
-    executeAllNodes(req.params.id).catch((err) => {
-      log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
-    });
+    if (blueprint.executionMode === "autopilot") {
+      enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
+        log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    } else {
+      executeAllNodes(req.params.id).catch((err) => {
+        log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    }
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -2462,7 +2532,7 @@ planRouter.post("/api/plans/:id/run", async (req, res) => {
   }
 });
 
-// POST /api/plans/:id/run-all
+// POST /api/plans/:id/run-all (legacy, mode-aware)
 planRouter.post("/api/plans/:id/run-all", (req, res) => {
   try {
     const blueprint = getBlueprint(req.params.id);
@@ -2470,9 +2540,15 @@ planRouter.post("/api/plans/:id/run-all", (req, res) => {
       res.status(404).json({ error: "Plan not found" });
       return;
     }
-    executeAllNodes(req.params.id).catch((err) => {
-      log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
-    });
+    if (blueprint.executionMode === "autopilot") {
+      enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
+        log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    } else {
+      executeAllNodes(req.params.id).catch((err) => {
+        log.error(`Run-all failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    }
     res.json({ message: "execution started", blueprintId: req.params.id });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });

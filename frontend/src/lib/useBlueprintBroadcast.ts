@@ -15,7 +15,11 @@ export type BroadcastOpType =
   | "reevaluate_all"
   | "resume"
   | "coordinate"
-  | "convene";
+  | "convene"
+  | "autopilot_start"
+  | "autopilot_pause"
+  | "autopilot_resume"
+  | "autopilot_complete";
 
 interface BlueprintBroadcastMessage {
   blueprintId: string;

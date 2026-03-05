@@ -221,6 +221,7 @@ export function updateAppState(patch: Record<string, unknown>): Promise<void> {
 
 export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
 export type MacroNodeStatus = "pending" | "queued" | "running" | "done" | "failed" | "blocked" | "skipped";
+export type ExecutionMode = "manual" | "autopilot";
 
 export interface Artifact {
   id: string;
@@ -307,6 +308,9 @@ export interface Blueprint {
   agentParams?: string;
   enabledRoles?: string[];
   defaultRole?: string;
+  executionMode?: ExecutionMode;
+  maxIterations?: number;
+  pauseReason?: string;
   conveneSessionCount?: number;
   nodes: MacroNode[];
   createdAt: string;
@@ -350,7 +354,7 @@ export function createBlueprint(data: {
 
 export function updateBlueprint(
   id: string,
-  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole">>
+  patch: Partial<Pick<Blueprint, "title" | "description" | "status" | "projectCwd" | "agentType" | "agentParams" | "enabledRoles" | "defaultRole" | "executionMode" | "maxIterations" | "pauseReason">>
 ): Promise<Blueprint> {
   return fetchJSON(`${API_BASE}/blueprints/${encodeURIComponent(id)}`, {
     method: "PUT",
@@ -596,7 +600,7 @@ export function runAllNodes(
 // --- Queue Status API ---
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene" | "autopilot";
   nodeId?: string;
   blueprintId: string;
   queuedAt: string;
@@ -849,6 +853,33 @@ export function cancelConveneSession(
 }
 
 // ─── Image upload ─────────────────────────────────────────────
+
+// ─── Autopilot Types ──────────────────────────────────────────
+
+export interface AutopilotLogEntry {
+  id: string;
+  blueprintId: string;
+  iteration: number;
+  observation?: string;
+  decision: string;
+  action: string;
+  actionParams?: string;
+  result?: string;
+  createdAt: string;
+}
+
+export function fetchAutopilotLog(
+  blueprintId: string,
+  limit = 20,
+  offset = 0,
+): Promise<AutopilotLogEntry[]> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (offset > 0) params.set("offset", String(offset));
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/autopilot-log?${params}`,
+  );
+}
 
 export function uploadImage(dataUrl: string, filename?: string): Promise<{ url: string }> {
   return fetchJSON(`${API_BASE}/uploads`, {

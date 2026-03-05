@@ -36,7 +36,7 @@ import type { RoleDefinition } from "./roles/role-registry.js";
 // ─── Pending task tracking (in-memory, for queue status API) ─
 
 export interface PendingTask {
-  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene";
+  type: "run" | "reevaluate" | "enrich" | "generate" | "split" | "smart_deps" | "evaluate" | "coordinate" | "convene" | "autopilot";
   nodeId?: string;
   blueprintId: string;
   queuedAt: string;
@@ -1115,6 +1115,35 @@ export async function evaluateNodeCompletion(
 
 // ─── Node execution ─────────────────────────────────────────
 
+/** Execute a node directly without going through the workspace queue. Used by autopilot (which already owns the queue slot). */
+export async function executeNodeDirect(
+  blueprintId: string,
+  nodeId: string,
+): Promise<NodeExecution> {
+  // Only mark as queued and add pending task if not already queued (e.g., by executeAllNodes pre-marking)
+  const bp = getBlueprint(blueprintId);
+  const existing = bp?.nodes.find((n) => n.id === nodeId);
+  if (!existing || existing.status !== "queued") {
+    updateMacroNode(blueprintId, nodeId, { status: "queued" });
+    addPendingTask(blueprintId, { type: "run", nodeId, queuedAt: new Date().toISOString() });
+  }
+
+  removePendingTask(blueprintId, nodeId, "run");
+  try {
+    return await executeNodeInternal(blueprintId, nodeId);
+  } catch (err) {
+    // If executeNodeInternal throws before reaching "running" state
+    // (e.g., dependency check failure), the node is stuck in "queued".
+    // Reset it so the user can retry.
+    const current = getBlueprint(blueprintId)?.nodes.find((n) => n.id === nodeId);
+    if (current && current.status === "queued") {
+      updateMacroNode(blueprintId, nodeId, { status: "pending" });
+      log.warn(`Node ${nodeId.slice(0, 8)} reset to pending after pre-execution failure: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    throw err;
+  }
+}
+
 export async function executeNode(
   blueprintId: string,
   nodeId: string,
@@ -1961,6 +1990,25 @@ export function smartRecoverStaleExecutions(): void {
 
   // Mark remaining stale executions as truly failed
   recoverStaleExecutions(skipIds);
+
+  // Re-enter autopilot loop for blueprints with execution_mode='autopilot' still in 'running' state
+  const db = getDb();
+  const autopilotBlueprints = db
+    .prepare("SELECT id FROM blueprints WHERE execution_mode = 'autopilot' AND status = 'running'")
+    .all() as { id: string }[];
+  if (autopilotBlueprints.length > 0) {
+    // Use dynamic import to avoid circular dependency (autopilot.ts imports plan-executor.ts)
+    import("./autopilot.js").then(({ runAutopilotLoop }) => {
+      for (const bp of autopilotBlueprints) {
+        recoveryLog.info(`Re-entering autopilot loop for blueprint ${bp.id.slice(0, 8)} after recovery`);
+        enqueueBlueprintTask(bp.id, () => runAutopilotLoop(bp.id)).catch((err) => {
+          recoveryLog.error(`Autopilot recovery failed for ${bp.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+        });
+      }
+    }).catch((err) => {
+      recoveryLog.error(`Failed to load autopilot module for recovery: ${err instanceof Error ? err.message : err}`);
+    });
+  }
 
   // Start background monitor if we have alive executions
   if (recoveryEntries.size > 0) {
