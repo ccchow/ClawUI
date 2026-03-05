@@ -122,6 +122,30 @@ export function clearResumeCounts(blueprintId: string): void {
   autopilotResumeCounts.delete(blueprintId);
 }
 
+// ─── Per-run seen suggestions tracking (in-memory) ────────────
+
+const autopilotSeenSuggestions = new Map<string, Set<string>>();
+
+/** Record suggestion IDs the autopilot has seen in a snapshot. */
+export function markSuggestionsSeen(blueprintId: string, suggestionIds: string[]): void {
+  if (!autopilotSeenSuggestions.has(blueprintId)) {
+    autopilotSeenSuggestions.set(blueprintId, new Set());
+  }
+  const seen = autopilotSeenSuggestions.get(blueprintId)!;
+  for (const id of suggestionIds) seen.add(id);
+}
+
+/** Check if there are unused suggestions the autopilot hasn't seen yet. */
+export function hasUnseenSuggestions(blueprintId: string, unusedSuggestionIds: string[]): boolean {
+  const seen = autopilotSeenSuggestions.get(blueprintId);
+  if (!seen) return unusedSuggestionIds.length > 0;
+  return unusedSuggestionIds.some((id) => !seen.has(id));
+}
+
+export function clearSeenSuggestions(blueprintId: string): void {
+  autopilotSeenSuggestions.delete(blueprintId);
+}
+
 // ─── Helpers ─────────────────────────────────────────────────
 
 function truncate(text: string, maxLen: number): string {
@@ -175,6 +199,7 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
 
   // Build node snapshots with suggestions
   const nodes: AutopilotNodeState[] = [];
+  const allUnusedSuggestionIds: string[] = [];
   for (const node of allNodes) {
     if (!includedNodeIds.has(node.id)) continue;
 
@@ -182,12 +207,15 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     const allSuggestions = getSuggestionsForNode(node.id);
     const unusedSuggestions: AutopilotSuggestionState[] = allSuggestions
       .filter((s: NodeSuggestion) => !s.used)
-      .map((s: NodeSuggestion) => ({
-        id: s.id,
-        title: s.title,
-        description: truncate(s.description, 150),
-        ...(s.roles && s.roles.length > 0 ? { roles: s.roles } : {}),
-      }));
+      .map((s: NodeSuggestion) => {
+        allUnusedSuggestionIds.push(s.id);
+        return {
+          id: s.id,
+          title: s.title,
+          description: truncate(s.description, 150),
+          ...(s.roles && s.roles.length > 0 ? { roles: s.roles } : {}),
+        };
+      });
 
     const nodeState: AutopilotNodeState = {
       id: node.id,
@@ -866,6 +894,7 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
   updateBlueprint(blueprintId, { status: "running" as BlueprintStatus });
   addPendingTask(blueprintId, { type: "autopilot" as PendingTask["type"], queuedAt: new Date().toISOString() });
   clearResumeCounts(blueprintId);
+  clearSeenSuggestions(blueprintId);
 
   const maxIterations = blueprint.maxIterations ?? 50;
   let iteration = 0;
@@ -886,12 +915,13 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
       const state = buildStateSnapshot(blueprintId);
 
       // 2. CHECK EXIT CONDITIONS
-      // Only auto-exit if all nodes done AND no unresolved work remains.
-      // If there are unused suggestions or unread insights, let the LLM
-      // triage them before completing.
-      const hasUnusedSuggestions = state.nodes.some((n) => n.suggestions.length > 0);
-      const hasUnreadInsights = state.insights.some((i) => !i.read);
-      if (state.allNodesDone && !hasUnusedSuggestions && !hasUnreadInsights) {
+      // Only auto-exit if all nodes done AND no NEW unresolved work.
+      // Unseen suggestions or unread insights → let the LLM triage first.
+      // Suggestions the LLM already saw (and chose not to act on) don't block exit.
+      const unusedSuggestionIds = state.nodes.flatMap((n) => n.suggestions.map((s) => s.id));
+      const hasNewSuggestions = hasUnseenSuggestions(blueprintId, unusedSuggestionIds);
+      const hasUnreadInsights = state.insights.length > 0; // snapshot only contains unread
+      if (state.allNodesDone && !hasNewSuggestions && !hasUnreadInsights) {
         updateBlueprint(blueprintId, { status: "done" as BlueprintStatus });
         logAutopilot(blueprintId, iteration, state.summary, "All nodes complete", "complete");
         log.info(`Autopilot completed blueprint ${blueprintId.slice(0, 8)} at iteration ${iteration}`);
@@ -929,6 +959,9 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
         log.warn(`Autopilot paused: ${noProgressReason}`);
         break;
       }
+
+      // Mark suggestions as seen (after exit check, so first sight blocks exit)
+      markSuggestionsSeen(blueprintId, unusedSuggestionIds);
 
       // 3. DECIDE — Ask AI what to do next
       const prompt = buildAutopilotPrompt(state, iteration, maxIterations);
