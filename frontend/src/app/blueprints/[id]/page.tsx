@@ -33,7 +33,6 @@ import {
 } from "@/lib/api";
 import { useBlueprintDetailQueries, blueprintKeys } from "@/lib/useBlueprintDetailQueries";
 import { AgentBadge } from "@/components/AgentSelector";
-import { RoleBadge } from "@/components/RoleBadge";
 import { RoleSelector } from "@/components/RoleSelector";
 import { ROLE_COLORS, ROLE_FALLBACK_COLORS } from "@/components/role-colors";
 import { StatusIndicator } from "@/components/StatusIndicator";
@@ -44,6 +43,7 @@ import { AISparkle } from "@/components/AISparkle";
 import { computeDepLayout } from "@/components/DependencyGraph";
 import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { useToast } from "@/components/Toast";
+import { ConfirmationStrip } from "@/components/ConfirmationStrip";
 import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 
 /** Strip markdown formatting for plain-text preview (best-effort, line-clamp handles overflow) */
@@ -173,6 +173,7 @@ export default function BlueprintDetailPage() {
   const [confirmingReevaluate, setConfirmingReevaluate] = useState(false);
   const [confirmingRunAll, setConfirmingRunAll] = useState(false);
   const [confirmingStatusReset, setConfirmingStatusReset] = useState(false);
+  const [confirmingStatusTransition, setConfirmingStatusTransition] = useState<string | null>(null);
 
   // Generation progress tracking
   const preGenerateNodeIdsRef = useRef<Set<string> | null>(null);
@@ -207,6 +208,14 @@ export default function BlueprintDetailPage() {
   const broadcastOperation = useBlueprintBroadcast(id, () => {
     invalidateAll();
   });
+
+  // Dynamic browser tab title
+  useEffect(() => {
+    if (blueprint?.title) {
+      document.title = `${blueprint.title} — ClawUI`;
+    }
+    return () => { document.title = "ClawUI — Agent Session Viewer"; };
+  }, [blueprint?.title]);
 
   // Auto-recover lost sessions for nodes failed by server restart
   useEffect(() => {
@@ -873,30 +882,22 @@ export default function BlueprintDetailPage() {
           </span>
           {blueprint.status === "running" && !anyNodeRunning && !anyNodeQueued && !hasPendingTasks && (
             confirmingStatusReset ? (
-              <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in flex-shrink-0">
-                <span className="text-xs text-accent-amber whitespace-nowrap">Reset to Approved?</span>
-                <button
-                  onClick={async () => {
-                    setConfirmingStatusReset(false);
-                    try {
-                      const updated = await updateBlueprint(id, { status: "approved" });
-                      setBlueprint(updated);
-                      showToast("Blueprint status reset to Approved");
-                    } catch (err) {
-                      setMutationError(err instanceof Error ? err.message : String(err));
-                    }
-                  }}
-                  className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all"
-                >
-                  Yes
-                </button>
-                <button
-                  onClick={() => setConfirmingStatusReset(false)}
-                  className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
-                >
-                  No
-                </button>
-              </span>
+              <ConfirmationStrip
+                confirmLabel="Reset to Approved?"
+                variant="amber"
+                inline
+                onConfirm={async () => {
+                  setConfirmingStatusReset(false);
+                  try {
+                    const updated = await updateBlueprint(id, { status: "approved" });
+                    setBlueprint(updated);
+                    showToast("Blueprint status reset to Approved");
+                  } catch (err) {
+                    setMutationError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                onCancel={() => setConfirmingStatusReset(false)}
+              />
             ) : (
               <button
                 onClick={() => setConfirmingStatusReset(true)}
@@ -907,6 +908,91 @@ export default function BlueprintDetailPage() {
               </button>
             )
           )}
+          {/* Status transitions: done/failed → approved, approved → draft, paused → approved */}
+          {(blueprint.status === "done" || blueprint.status === "failed") && (
+            confirmingStatusTransition === "reopen" ? (
+              <ConfirmationStrip
+                confirmLabel="Reopen to Approved?"
+                variant="blue"
+                inline
+                onConfirm={async () => {
+                  setConfirmingStatusTransition(null);
+                  try {
+                    const updated = await updateBlueprint(id, { status: "approved" });
+                    setBlueprint(updated);
+                    showToast("Blueprint reopened — status set to Approved");
+                  } catch (err) {
+                    setMutationError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                onCancel={() => setConfirmingStatusTransition(null)}
+              />
+            ) : (
+              <button
+                onClick={() => setConfirmingStatusTransition("reopen")}
+                title={`Reopen this ${blueprint.status} blueprint — sets status back to Approved for re-execution`}
+                className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors flex-shrink-0"
+              >
+                Reopen
+              </button>
+            )
+          )}
+          {blueprint.status === "approved" && (
+            confirmingStatusTransition === "draft" ? (
+              <ConfirmationStrip
+                confirmLabel="Revert to Draft?"
+                variant="blue"
+                inline
+                onConfirm={async () => {
+                  setConfirmingStatusTransition(null);
+                  try {
+                    const updated = await updateBlueprint(id, { status: "draft" });
+                    setBlueprint(updated);
+                    showToast("Blueprint reverted to Draft");
+                  } catch (err) {
+                    setMutationError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                onCancel={() => setConfirmingStatusTransition(null)}
+              />
+            ) : (
+              <button
+                onClick={() => setConfirmingStatusTransition("draft")}
+                title="Revert blueprint to Draft for further planning"
+                className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors flex-shrink-0"
+              >
+                Back to Draft
+              </button>
+            )
+          )}
+          {blueprint.status === "paused" && (
+            confirmingStatusTransition === "resume" ? (
+              <ConfirmationStrip
+                confirmLabel="Resume to Approved?"
+                variant="blue"
+                inline
+                onConfirm={async () => {
+                  setConfirmingStatusTransition(null);
+                  try {
+                    const updated = await updateBlueprint(id, { status: "approved" });
+                    setBlueprint(updated);
+                    showToast("Blueprint resumed — status set to Approved");
+                  } catch (err) {
+                    setMutationError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                onCancel={() => setConfirmingStatusTransition(null)}
+              />
+            ) : (
+              <button
+                onClick={() => setConfirmingStatusTransition("resume")}
+                title="Resume this paused blueprint — sets status to Approved for execution"
+                className="text-xs text-accent-blue hover:text-accent-blue/80 transition-colors flex-shrink-0"
+              >
+                Resume
+              </button>
+            )
+          )}
           {blueprint.archivedAt && (
             <span className="text-xs px-2 py-0.5 rounded-full bg-text-muted/10 text-text-muted flex-shrink-0">
               archived
@@ -914,13 +1000,6 @@ export default function BlueprintDetailPage() {
           )}
           {blueprint.agentType && blueprint.agentType !== "claude" && (
             <AgentBadge agentType={blueprint.agentType} size="xs" />
-          )}
-          {blueprint.enabledRoles && blueprint.enabledRoles.length > 1 && (
-            <div className="flex items-center gap-1 flex-shrink-0">
-              {blueprint.enabledRoles.map((r) => (
-                <RoleBadge key={r} roleId={r} size="xs" />
-              ))}
-            </div>
           )}
           {/* State-control actions + archive */}
           <div className="flex items-center gap-1 flex-shrink-0">
@@ -937,22 +1016,13 @@ export default function BlueprintDetailPage() {
             )}
             {canRunAll && (
               confirmingRunAll ? (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in">
-                  <span className="text-xs text-accent-amber whitespace-nowrap">Run all pending nodes?</span>
-                  <button
-                    onClick={handleRunAll}
-                    disabled={isRunning || isRunningTask}
-                    className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Yes
-                  </button>
-                  <button
-                    onClick={() => setConfirmingRunAll(false)}
-                    className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
-                  >
-                    No
-                  </button>
-                </div>
+                <ConfirmationStrip
+                  confirmLabel="Run all pending nodes?"
+                  variant="amber"
+                  onConfirm={handleRunAll}
+                  onCancel={() => setConfirmingRunAll(false)}
+                  disabled={isRunning || isRunningTask}
+                />
               ) : (
                 <button
                   onClick={handleRunAll}
@@ -1121,22 +1191,13 @@ export default function BlueprintDetailPage() {
             <div className="flex items-center gap-1.5 flex-wrap">
               {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
                 confirmingReevaluate ? (
-                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-amber/30 bg-accent-amber/10 animate-fade-in">
-                    <span className="text-xs text-accent-amber whitespace-nowrap">Reevaluate?</span>
-                    <button
-                      onClick={handleReevaluateAll}
-                      disabled={isReevaluatingTask}
-                      className="px-2 py-0.5 rounded-md bg-accent-amber text-white text-xs font-medium hover:bg-accent-amber/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      Yes
-                    </button>
-                    <button
-                      onClick={() => setConfirmingReevaluate(false)}
-                      className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
-                    >
-                      No
-                    </button>
-                  </div>
+                  <ConfirmationStrip
+                    confirmLabel="Reevaluate?"
+                    variant="amber"
+                    onConfirm={handleReevaluateAll}
+                    onCancel={() => setConfirmingReevaluate(false)}
+                    disabled={isReevaluatingTask}
+                  />
                 ) : (
                   <button
                     onClick={handleReevaluateAll}
@@ -1161,22 +1222,13 @@ export default function BlueprintDetailPage() {
             {/* Primary generate action — right side */}
             <div className="flex items-center gap-1.5 flex-shrink-0">
               {confirmingRegenerate ? (
-                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-purple/30 bg-accent-purple/10 animate-fade-in">
-                  <span className="text-xs text-accent-purple whitespace-nowrap">Regenerate?</span>
-                  <button
-                    onClick={() => handleGenerate(true)}
-                    disabled={isGeneratingTask}
-                    className="px-2 py-0.5 rounded-md bg-accent-purple text-white text-xs font-medium hover:bg-accent-purple/90 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Yes
-                  </button>
-                  <button
-                    onClick={() => setConfirmingRegenerate(false)}
-                    className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
-                  >
-                    No
-                  </button>
-                </div>
+                <ConfirmationStrip
+                  confirmLabel="Regenerate?"
+                  variant="purple"
+                  onConfirm={() => handleGenerate(true)}
+                  onCancel={() => setConfirmingRegenerate(false)}
+                  disabled={isGeneratingTask}
+                />
               ) : (
                 <button
                   onClick={() => handleGenerate()}
@@ -1389,7 +1441,7 @@ export default function BlueprintDetailPage() {
                 onClick={(e) => { e.stopPropagation(); handleCoordinate(); }}
                 disabled={isRunning || isCoordinatingTask || unreadInsightCount === 0}
                 title={isCoordinatingTask ? "Coordinator is analyzing insights..." : unreadInsightCount === 0 ? "No unread insights to analyze" : "Agent analyzes unread insights and creates/updates nodes"}
-                className="text-[11px] text-accent-purple hover:text-accent-purple/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-purple/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="text-[11px] text-accent-purple hover:text-accent-purple/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-purple/10 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
               >
                 {isCoordinatingTask ? (<><AISparkle size="xs" /> Analyzing...</>) : "Analyze"}
               </button>
@@ -1417,7 +1469,7 @@ export default function BlueprintDetailPage() {
                           {/* Content */}
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${cfg.bg} ${cfg.text}`}>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${(ROLE_COLORS[insight.role] ?? ROLE_FALLBACK_COLORS).bg} ${(ROLE_COLORS[insight.role] ?? ROLE_FALLBACK_COLORS).text}`}>
                                 {insight.role}
                               </span>
                               <span className={`text-[10px] px-1 py-0.5 rounded capitalize ${cfg.bg} ${cfg.text}`}>
@@ -1667,21 +1719,12 @@ export default function BlueprintDetailPage() {
                                     Approve
                                   </button>
                                   {confirmingDiscard === session.id ? (
-                                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg border border-accent-red/30 bg-accent-red/10 animate-fade-in">
-                                      <span className="text-xs text-accent-red whitespace-nowrap">Discard?</span>
-                                      <button
-                                        onClick={() => handleCancelConvene(session.id)}
-                                        className="px-2 py-0.5 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 active:scale-[0.97] transition-all"
-                                      >
-                                        Yes
-                                      </button>
-                                      <button
-                                        onClick={() => setConfirmingDiscard(null)}
-                                        className="px-2 py-0.5 rounded-md text-text-muted text-xs hover:text-text-secondary transition-colors"
-                                      >
-                                        No
-                                      </button>
-                                    </div>
+                                    <ConfirmationStrip
+                                      confirmLabel="Discard?"
+                                      variant="red"
+                                      onConfirm={() => handleCancelConvene(session.id)}
+                                      onCancel={() => setConfirmingDiscard(null)}
+                                    />
                                   ) : (
                                     <button
                                       onClick={() => setConfirmingDiscard(session.id)}
@@ -2016,6 +2059,7 @@ export default function BlueprintDetailPage() {
                           hasSuggestions={(node.suggestionCount ?? 0) > 0}
                           blueprintBusy={blueprintBusy}
                           hasRunningNodes={anyNodeRunning || anyNodeQueued}
+                          blueprintStatus={blueprint.status}
                         />
                       </div>
                     </Fragment>
@@ -2047,6 +2091,7 @@ export default function BlueprintDetailPage() {
                       hasRunningNodes={anyNodeRunning || anyNodeQueued}
                       blueprintDefaultRole={blueprint.defaultRole}
                       blueprintEnabledRoles={blueprint.enabledRoles}
+                      blueprintStatus={blueprint.status}
                     />
                   </div>
                 );

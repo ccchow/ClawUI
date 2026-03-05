@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+  <!-- Paw print icon matching ClawUI branding -->
+  <!-- Toe pads -->
+  <ellipse cx="10" cy="8" rx="3.2" ry="3.8" fill="#d97706"/>
+  <ellipse cx="22" cy="8" rx="3.2" ry="3.8" fill="#d97706"/>
+  <ellipse cx="5.5" cy="15" rx="2.8" ry="3.4" transform="rotate(-15 5.5 15)" fill="#d97706"/>
+  <ellipse cx="26.5" cy="15" rx="2.8" ry="3.4" transform="rotate(15 26.5 15)" fill="#d97706"/>
+  <!-- Main pad -->
+  <path d="M16 14 C10 14, 6 19, 8 24 C9.5 27, 12.5 29, 16 29 C19.5 29, 22.5 27, 24 24 C26 19, 22 14, 16 14Z" fill="#d97706"/>
+</svg>

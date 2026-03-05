@@ -426,4 +426,105 @@ describe("MacroNodeCard", () => {
 
     expect(screen.queryByTestId("toast-item")).not.toBeInTheDocument();
   });
+
+  // ─── Reset to Pending ──────────────────────────
+
+  it("shows Reset button for done nodes when blueprint is approved", () => {
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="approved"
+        />
+      </ToastProvider>,
+    );
+    expect(screen.getByLabelText("Reset node to pending")).toBeInTheDocument();
+  });
+
+  it("does not show Reset button for done nodes when blueprint is not approved", () => {
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="done"
+        />
+      </ToastProvider>,
+    );
+    expect(screen.queryByLabelText("Reset node to pending")).not.toBeInTheDocument();
+  });
+
+  it("does not show Reset button for pending nodes even when blueprint is approved", () => {
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "pending" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="approved"
+        />
+      </ToastProvider>,
+    );
+    expect(screen.queryByLabelText("Reset node to pending")).not.toBeInTheDocument();
+  });
+
+  it("shows confirmation strip when Reset is clicked", () => {
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="approved"
+        />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByLabelText("Reset node to pending"));
+    expect(screen.getByText("Yes")).toBeInTheDocument();
+    expect(screen.getByText("No")).toBeInTheDocument();
+  });
+
+  it("calls updateMacroNode with pending status on Reset confirmation", async () => {
+    const { updateMacroNode: mockUpdateMacroNode } = await import("@/lib/api");
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="approved"
+        />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByLabelText("Reset node to pending"));
+    fireEvent.click(screen.getByText("Yes"));
+    expect(mockUpdateMacroNode).toHaveBeenCalledWith("bp-1", "node-1", { status: "pending" });
+  });
+
+  it("dismisses Reset confirmation on No click", () => {
+    render(
+      <ToastProvider>
+        <MacroNodeCard
+          node={makeMockNode({ status: "done" })}
+          index={0}
+          total={3}
+          blueprintId="bp-1"
+          blueprintStatus="approved"
+        />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByLabelText("Reset node to pending"));
+    expect(screen.getByText("Yes")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("No"));
+    expect(screen.queryByText("Reset?")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Reset node to pending")).toBeInTheDocument();
+  });
 });

@@ -720,7 +720,7 @@ export interface EvaluationAppliedResult {
   rewiredDependencies: { nodeId: string; oldDeps: string[]; newDeps: string[] }[];
 }
 
-function buildEvaluationPrompt(
+export function buildEvaluationPrompt(
   blueprint: Blueprint,
   node: MacroNode,
   artifactContent: string,
@@ -734,9 +734,24 @@ function buildEvaluationPrompt(
   const suggestionsUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/suggestions-callback?${authParam}`;
   const insightsUrl = `${apiBase}/api/blueprints/${blueprintId}/nodes/${nodeId}/insights-callback?${authParam}`;
 
-  // Resolve roles for evaluation context
+  // Resolve roles for evaluation context (node-scoped)
   const roleIds = resolveNodeRoles(node, blueprint);
   const roles = roleIds
+    .map((id) => getRole(id))
+    .filter((r): r is RoleDefinition => r !== undefined);
+
+  // Compute blueprint-wide role set once and reuse for both suggestions and
+  // insights sections, avoiding redundant iteration over all nodes per call.
+  const allBlueprintRoleIds = new Set<string>();
+  for (const n of blueprint.nodes) {
+    if (n.roles) {
+      for (const r of n.roles) allBlueprintRoleIds.add(r);
+    }
+  }
+  if (blueprint.defaultRole) allBlueprintRoleIds.add(blueprint.defaultRole);
+  if (allBlueprintRoleIds.size === 0) allBlueprintRoleIds.add("sde");
+
+  const allBlueprintRoles = [...allBlueprintRoleIds]
     .map((id) => getRole(id))
     .filter((r): r is RoleDefinition => r !== undefined);
 
@@ -814,20 +829,27 @@ Make ONE curl call with your evaluation result.
     suggestionsContent = sde?.prompts.suggestionsTemplate ?? "";
   }
 
+  // Reuse pre-computed blueprint-wide roles for suggestion role assignment
+  const validSugRoles = allBlueprintRoles.map((r) => `"${r.id}"`).join(", ");
+
   prompt += `
 ${suggestionsContent}
 
+Each suggestion must include a "roles" array indicating which role(s) should handle the follow-up work. Valid role IDs: ${validSugRoles}. Use ONLY these exact role ID strings. Assign one or more roles per suggestion based on the nature of the work.
+
 Then make one curl call to the suggestions endpoint:
 
-curl -s -X POST '${suggestionsUrl}' -H 'Content-Type: application/json' -d '{"suggestions": [{"title": "...", "description": "..."}, {"title": "...", "description": "..."}, {"title": "...", "description": "..."}]}'`;
+curl -s -X POST '${suggestionsUrl}' -H 'Content-Type: application/json' -d '{"suggestions": [{"title": "...", "description": "...", "roles": ["sde"]}, {"title": "...", "description": "...", "roles": ["qa"]}, {"title": "...", "description": "...", "roles": ["sde", "qa"]}]}'`;
 
-  // Build insights section using role-specific insight templates
+  // Build insights section using ALL blueprint roles (not just this node's roles)
+  // so the evaluating agent can surface cross-cutting insights from any perspective.
+  // allBlueprintRoles is pre-computed at the top of this function.
   let insightsContent: string;
-  if (roles.length === 1) {
-    insightsContent = roles[0].prompts.insightsTemplate;
-  } else if (roles.length > 1) {
-    insightsContent = roles
-      .map((r) => `### ${r.label}\n${r.prompts.insightsTemplate}`)
+  if (allBlueprintRoles.length === 1) {
+    insightsContent = allBlueprintRoles[0].prompts.insightsTemplate;
+  } else if (allBlueprintRoles.length > 1) {
+    insightsContent = allBlueprintRoles
+      .map((r) => `### ${r.label} (role ID: "${r.id}")\n${r.prompts.insightsTemplate}`)
       .join("\n\n");
   } else {
     const sde = getRole("sde");
@@ -844,6 +866,8 @@ Only send insights if you observe issues that affect areas OUTSIDE the current n
 If you have cross-cutting observations, make one curl call:
 
 curl -s -X POST '${insightsUrl}' -H 'Content-Type: application/json' -d '{"insights": [{"role": "<role-id>", "severity": "info|warning|critical", "message": "..."}]}'
+
+Valid role IDs: ${allBlueprintRoles.map((r) => `"${r.id}"`).join(", ")}. Use ONLY these exact role ID strings in the "role" field — never use full role names or labels.
 
 ## CRITICAL — DO NOT REPEAT
 - You must call each endpoint AT MOST ONCE. Do not repeat any curl call.

@@ -2,6 +2,17 @@ import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 import express from "express";
 import request from "supertest";
 
+const mockLog = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("../logger.js", () => ({
+  createLogger: vi.fn(() => mockLog),
+}));
+
 // Mock node:fs for projectCwd validation in blueprint creation
 // Normalize paths for cross-platform: on Windows join("/test","CLAUDE.md") → "\test\CLAUDE.md"
 vi.mock("node:fs", async (importOriginal) => {
@@ -1373,8 +1384,8 @@ describe("plan-routes", () => {
       expect(res.body.count).toBe(2);
       expect(getSuggestionsForNode).toHaveBeenCalledWith("node-1");
       expect(createSuggestion).toHaveBeenCalledTimes(2);
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add logging", "Add structured logging to all endpoints");
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add tests", "Write unit tests for the new module");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add logging", "Add structured logging to all endpoints", undefined);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add tests", "Write unit tests for the new module", undefined);
     });
 
     it("defaults description to empty string when omitted", async () => {
@@ -1383,7 +1394,7 @@ describe("plan-routes", () => {
         .send({ suggestions: [{ title: "Quick fix" }] });
       expect(res.status).toBe(200);
       expect(res.body.count).toBe(1);
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Quick fix", "");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Quick fix", "", undefined);
     });
 
     it("limits to max 3 suggestions", async () => {
@@ -1402,7 +1413,7 @@ describe("plan-routes", () => {
       expect(createSuggestion).toHaveBeenCalledTimes(3);
       // S4 must not have been created
       expect(createSuggestion).not.toHaveBeenCalledWith(
-        expect.anything(), expect.anything(), "S4 should be dropped", expect.anything()
+        expect.anything(), expect.anything(), "S4 should be dropped", expect.anything(), expect.anything()
       );
     });
 
@@ -1423,7 +1434,7 @@ describe("plan-routes", () => {
       expect(res.body.count).toBe(2);
       // Only the new suggestion should be created; existing one is kept
       expect(createSuggestion).toHaveBeenCalledTimes(1);
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "New suggestion", "Brand new");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "New suggestion", "Brand new", undefined);
       expect(deleteSuggestion).not.toHaveBeenCalled();
     });
 
@@ -1440,7 +1451,7 @@ describe("plan-routes", () => {
       expect(deleteSuggestion).toHaveBeenCalledTimes(1);
       expect(deleteSuggestion).toHaveBeenCalledWith("old-1");
       expect(createSuggestion).toHaveBeenCalledTimes(1);
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Brand new", "");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Brand new", "", undefined);
     });
 
     it("returns 400 when suggestions array is missing", async () => {
@@ -1489,7 +1500,65 @@ describe("plan-routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.count).toBe(1);
       expect(createSuggestion).toHaveBeenCalledTimes(1);
-      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Valid one", "This is fine");
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Valid one", "This is fine", undefined);
+    });
+
+    it("passes roles to createSuggestion when provided", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "Add tests", description: "Write tests", roles: ["qa"] },
+            { title: "Refactor", description: "Clean up", roles: ["sde", "sa"] },
+            { title: "No roles", description: "No role info" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(3);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Add tests", "Write tests", ["qa"]);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Refactor", "Clean up", ["sde", "sa"]);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "No roles", "No role info", undefined);
+    });
+
+    it("filters non-string elements from roles arrays", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "Mixed roles", description: "Has non-string", roles: ["sde", 42, null, "qa", true] },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      // Only string elements should survive filtering
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "Mixed roles", "Has non-string", ["sde", "qa"]);
+    });
+
+    it("normalizes empty roles array after filtering to undefined", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "All filtered", description: "desc", roles: [123, null, false] },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      // All elements filtered out → roles should be undefined
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "All filtered", "desc", undefined);
+    });
+
+    it("treats non-array roles as undefined", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/suggestions-callback")
+        .send({
+          suggestions: [
+            { title: "String roles", description: "desc", roles: "sde" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "node-1", "String roles", "desc", undefined);
     });
 
     it("returns 404 for missing blueprint", async () => {
@@ -1658,6 +1727,26 @@ describe("plan-routes", () => {
         .post("/api/blueprints/bp-1/nodes/nonexistent/insights-callback")
         .send({ insights: [{ role: "sde", severity: "info", message: "Test" }] });
       expect(res.status).toBe(404);
+    });
+
+    it("logs warning when role label does not match any known role", async () => {
+      mockLog.warn.mockClear();
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/nodes/node-1/insights-callback")
+        .send({
+          insights: [
+            { role: "hallucinated-role", severity: "info", message: "Some insight" },
+          ],
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      // Unrecognized role stored as-is
+      expect(createInsight).toHaveBeenCalledWith("bp-1", "node-1", "hallucinated-role", "info", "Some insight");
+      // Warning emitted with the bad label and valid IDs
+      expect(mockLog.warn).toHaveBeenCalledTimes(1);
+      expect(mockLog.warn.mock.calls[0][0]).toContain("hallucinated-role");
+      expect(mockLog.warn.mock.calls[0][0]).toContain("sde");
+      expect(mockLog.warn.mock.calls[0][0]).toContain("qa");
     });
   });
 

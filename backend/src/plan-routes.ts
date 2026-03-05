@@ -1529,7 +1529,7 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/suggestions-callback", (req, 
     if (!node) { res.status(404).json({ error: "Node not found" }); return; }
 
     const { suggestions } = req.body as {
-      suggestions?: Array<{ title?: string; description?: string }>;
+      suggestions?: Array<{ title?: string; description?: string; roles?: string[] }>;
     };
 
     if (!Array.isArray(suggestions) || suggestions.length === 0) {
@@ -1563,7 +1563,8 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/suggestions-callback", (req, 
     const created: ReturnType<typeof createSuggestion>[] = [];
     for (const s of valid) {
       if (!existingByTitle.has(s.title!)) {
-        created.push(createSuggestion(blueprintId, nodeId, s.title!, s.description || ""));
+        const roles = Array.isArray(s.roles) ? s.roles.filter((r) => typeof r === "string") : undefined;
+        created.push(createSuggestion(blueprintId, nodeId, s.title!, s.description || "", roles && roles.length > 0 ? roles : undefined));
       }
     }
 
@@ -1606,8 +1607,24 @@ planRouter.post("/api/blueprints/:id/nodes/:nodeId/insights-callback", (req, res
       return;
     }
 
+    // Build a label→id lookup to normalize role labels to IDs
+    const roleLabelToId = new Map<string, string>();
+    for (const r of getAllRoles()) {
+      roleLabelToId.set(r.label.toLowerCase(), r.id);
+    }
+
     for (const i of valid) {
-      createInsight(blueprintId, nodeId, i.role!, i.severity! as InsightSeverity, i.message!);
+      // Normalize: if the role value isn't a known ID, try matching by label
+      let roleId = i.role!;
+      if (!getRole(roleId)) {
+        const normalized = roleLabelToId.get(roleId.toLowerCase());
+        if (normalized) {
+          roleId = normalized;
+        } else {
+          log.warn(`Unrecognized role label "${roleId}" — valid IDs: [${getAllRoles().map(r => r.id).join(", ")}]. Storing as-is.`);
+        }
+      }
+      createInsight(blueprintId, nodeId, roleId, i.severity! as InsightSeverity, i.message!);
     }
 
     log.info(`Insights callback for node ${nodeId.slice(0, 8)} "${node.title}": ${valid.length} insights created`);

@@ -324,17 +324,6 @@ describe("NodeDetailPage", () => {
     });
   });
 
-  it("shows role badges for node with roles", async () => {
-    setupNodeData({ roles: ["sde", "qa"] });
-
-    renderPage();
-
-    await waitFor(() => {
-      const badges = screen.getAllByTestId("role-badge");
-      expect(badges.length).toBeGreaterThanOrEqual(2);
-    });
-  });
-
   it("shows RoleSelector in the page", async () => {
     setupNodeData({ status: "pending" });
 

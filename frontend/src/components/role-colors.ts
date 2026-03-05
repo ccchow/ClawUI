@@ -30,6 +30,12 @@ export const ROLE_COLORS: Record<string, { bg: string; text: string; border: str
     border: "border-accent-red/30",
     dot: "bg-accent-red",
   },
+  mle: {
+    bg: "bg-accent-amber/15",
+    text: "text-accent-amber",
+    border: "border-accent-amber/30",
+    dot: "bg-accent-amber",
+  },
 };
 
 export const ROLE_FALLBACK_COLORS = {

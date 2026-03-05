@@ -1451,4 +1451,222 @@ describe("plan-db", () => {
     expect(insight.sourceNodeId).toBe(n.id);
     expect(insight.createdAt).toBeDefined();
   });
+
+  // ─── batch-create intra-batch artifact resolution ───────────
+
+  it("batch-created node with dependency on earlier batch node has empty inputArtifacts (no artifacts exist yet)", async () => {
+    const { createBlueprint, createMacroNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Batch Artifact Test 1", "desc", `/tmp/batch-art-${randomUUID()}`);
+    // Simulate batch-create: node A first, then node B depending on A
+    const nodeA = createMacroNode(bp.id, { title: "Step A", order: 0 });
+    const nodeB = createMacroNode(bp.id, {
+      title: "Step B",
+      order: 1,
+      dependencies: [nodeA.id],
+    });
+
+    // Node B should have empty inputArtifacts because node A has no output artifacts yet
+    expect(nodeB.inputArtifacts).toEqual([]);
+    expect(nodeB.dependencies).toEqual([nodeA.id]);
+  });
+
+  it("batch-created node with dependency on existing executed node picks up inputArtifacts", async () => {
+    const { createBlueprint, createMacroNode, createArtifact } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Batch Artifact Test 2", "desc", `/tmp/batch-art2-${randomUUID()}`);
+    // Create an existing node and give it an output artifact (simulating execution)
+    const existingNode = createMacroNode(bp.id, { title: "Existing Done", order: 0 });
+    createArtifact(bp.id, existingNode.id, "handoff_summary", "Result from existing node");
+
+    // Now create a new node depending on the existing one (like batch-create would)
+    const newNode = createMacroNode(bp.id, {
+      title: "New Dependent",
+      order: 1,
+      dependencies: [existingNode.id],
+    });
+
+    // New node should pick up the untargeted handoff_summary from its dependency
+    expect(newNode.inputArtifacts).toHaveLength(1);
+    expect(newNode.inputArtifacts[0].content).toBe("Result from existing node");
+    expect(newNode.inputArtifacts[0].sourceNodeId).toBe(existingNode.id);
+  });
+
+  it("batch-created node with dependency on existing node with targeted artifact picks up inputArtifacts", async () => {
+    const { createBlueprint, createMacroNode, createArtifact } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Batch Artifact Test 3", "desc", `/tmp/batch-art3-${randomUUID()}`);
+    const existingNode = createMacroNode(bp.id, { title: "Source", order: 0 });
+
+    // Create the dependent node first (to get its ID for targeting)
+    const depNode = createMacroNode(bp.id, {
+      title: "Target",
+      order: 1,
+      dependencies: [existingNode.id],
+    });
+    // At creation, no artifacts exist yet
+    expect(depNode.inputArtifacts).toEqual([]);
+
+    // Now simulate execution of the source node creating a targeted artifact
+    createArtifact(bp.id, existingNode.id, "handoff_summary", "Targeted content", depNode.id);
+
+    // Fetch via getBlueprint to get the updated view
+    const { getBlueprint } = await import("../plan-db.js");
+    const fetched = getBlueprint(bp.id)!;
+    const fetchedDep = fetched.nodes.find((n) => n.id === depNode.id)!;
+    expect(fetchedDep.inputArtifacts).toHaveLength(1);
+    expect(fetchedDep.inputArtifacts[0].content).toBe("Targeted content");
+  });
+
+  it("three-node batch chain: C depends on B depends on A, all have correct empty inputArtifacts", async () => {
+    const { createBlueprint, createMacroNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Batch Chain Test", "desc", `/tmp/batch-chain-${randomUUID()}`);
+    const a = createMacroNode(bp.id, { title: "A", order: 0 });
+    const b = createMacroNode(bp.id, { title: "B", order: 1, dependencies: [a.id] });
+    const c = createMacroNode(bp.id, { title: "C", order: 2, dependencies: [b.id] });
+
+    // All new nodes — no artifacts exist yet
+    expect(a.inputArtifacts).toEqual([]);
+    expect(b.inputArtifacts).toEqual([]);
+    expect(c.inputArtifacts).toEqual([]);
+
+    // Verify dependency chain is correct
+    expect(a.dependencies).toEqual([]);
+    expect(b.dependencies).toEqual([a.id]);
+    expect(c.dependencies).toEqual([b.id]);
+  });
+
+  // ─── Suggestion Roles CRUD ───────────────────────────────
+
+  it("createSuggestion with roles array round-trips through JSON serialization", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Suggestion Roles Test", "desc", `/tmp/sug-roles-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Node with suggestions", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "Add tests", "Write unit tests", ["qa", "sde"]);
+    expect(sug.roles).toEqual(["qa", "sde"]);
+
+    // Verify round-trip via getSuggestionsForNode
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found).toBeDefined();
+    expect(found!.roles).toEqual(["qa", "sde"]);
+  });
+
+  it("createSuggestion without roles returns no roles field", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Suggestion No Roles Test", "desc", `/tmp/sug-noroles-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Node no roles", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "Quick fix", "A small fix");
+    expect(sug.roles).toBeUndefined();
+
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found).toBeDefined();
+    expect(found!.roles).toBeUndefined();
+  });
+
+  it("createSuggestion with empty roles array stores null and returns no roles field", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Suggestion Empty Roles", "desc", `/tmp/sug-empty-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Node empty roles", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "Empty roles", "desc", []);
+    expect(sug.roles).toBeUndefined();
+
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found).toBeDefined();
+    expect(found!.roles).toBeUndefined();
+  });
+
+  it("getSuggestionsForNode handles NULL roles column (backward compat)", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+    const { getDb } = await import("../db.js");
+
+    const bp = createBlueprint("Suggestion Null Compat", "desc", `/tmp/sug-null-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Null compat node", order: 0 });
+
+    // Create a suggestion normally, then manually NULL out the roles column
+    const sug = createSuggestion(bp.id, n.id, "Legacy suggestion", "From before roles", ["sde"]);
+    const db = getDb();
+    db.prepare("UPDATE node_suggestions SET roles = NULL WHERE id = ?").run(sug.id);
+
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found).toBeDefined();
+    expect(found!.roles).toBeUndefined();
+  });
+
+  it("getSuggestionsForNode handles malformed JSON in roles column gracefully", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+    const { getDb } = await import("../db.js");
+
+    const bp = createBlueprint("Suggestion Bad JSON", "desc", `/tmp/sug-badjson-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Bad JSON node", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "Bad JSON suggestion", "desc", ["sde"]);
+    const db = getDb();
+    db.prepare("UPDATE node_suggestions SET roles = ? WHERE id = ?").run("{not valid json", sug.id);
+
+    // Should not throw — malformed JSON is silently ignored
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found).toBeDefined();
+    expect(found!.roles).toBeUndefined();
+  });
+
+  it("createSuggestion with single role preserves it correctly", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Single Role Test", "desc", `/tmp/sug-single-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Single role node", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "QA only", "desc", ["qa"]);
+    expect(sug.roles).toEqual(["qa"]);
+
+    const fetched = getSuggestionsForNode(n.id);
+    const found = fetched.find((s) => s.id === sug.id);
+    expect(found!.roles).toEqual(["qa"]);
+  });
+
+  it("markSuggestionUsed preserves roles", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, markSuggestionUsed } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Mark Used Roles", "desc", `/tmp/sug-used-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Mark used node", order: 0 });
+
+    const sug = createSuggestion(bp.id, n.id, "Mark me", "desc", ["sde", "pm"]);
+    const updated = markSuggestionUsed(sug.id);
+    expect(updated).not.toBeNull();
+    expect(updated!.used).toBe(true);
+    expect(updated!.roles).toEqual(["sde", "pm"]);
+  });
+
+  it("multiple suggestions with different roles on same node", async () => {
+    const { createBlueprint, createMacroNode, createSuggestion, getSuggestionsForNode } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Multi Sug Roles", "desc", `/tmp/sug-multi-${randomUUID()}`);
+    const n = createMacroNode(bp.id, { title: "Multi suggestions", order: 0 });
+
+    const sug1 = createSuggestion(bp.id, n.id, "Write tests", "Testing", ["qa"]);
+    const sug2 = createSuggestion(bp.id, n.id, "Design review", "UX check", ["uxd", "pm"]);
+    const sug3 = createSuggestion(bp.id, n.id, "Deploy", "Ship it");
+
+    const fetched = getSuggestionsForNode(n.id);
+    expect(fetched.length).toBeGreaterThanOrEqual(3);
+
+    const f1 = fetched.find((s) => s.id === sug1.id);
+    const f2 = fetched.find((s) => s.id === sug2.id);
+    const f3 = fetched.find((s) => s.id === sug3.id);
+
+    expect(f1!.roles).toEqual(["qa"]);
+    expect(f2!.roles).toEqual(["uxd", "pm"]);
+    expect(f3!.roles).toBeUndefined();
+  });
 });

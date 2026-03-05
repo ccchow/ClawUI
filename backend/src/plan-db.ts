@@ -145,6 +145,7 @@ export interface NodeSuggestion {
   title: string;
   description: string;
   used: boolean;
+  roles?: string[];
   createdAt: string;
 }
 
@@ -269,6 +270,7 @@ export function initPlanTables(): void {
         title         TEXT NOT NULL,
         description   TEXT NOT NULL,
         used          INTEGER NOT NULL DEFAULT 0,
+        roles         TEXT,
         created_at    TEXT NOT NULL
       );
 
@@ -363,6 +365,7 @@ export function initPlanTables(): void {
         title         TEXT NOT NULL,
         description   TEXT NOT NULL,
         used          INTEGER NOT NULL DEFAULT 0,
+        roles         TEXT,
         created_at    TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_suggestions_node ON node_suggestions(node_id);
@@ -374,6 +377,12 @@ export function initPlanTables(): void {
   const sugCols = db.prepare("PRAGMA table_info(node_suggestions)").all() as { name: string }[];
   if (!sugCols.some((c) => c.name === "used")) {
     db.exec("ALTER TABLE node_suggestions ADD COLUMN used INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Incremental migration: add roles column to node_suggestions
+  const sugCols2 = db.prepare("PRAGMA table_info(node_suggestions)").all() as { name: string }[];
+  if (!sugCols2.some((c) => c.name === "roles")) {
+    db.exec("ALTER TABLE node_suggestions ADD COLUMN roles TEXT");
   }
 
   // Incremental migration: add archived_at column to blueprints
@@ -1632,11 +1641,12 @@ interface SuggestionRow {
   title: string;
   description: string;
   used: number;
+  roles: string | null;
   created_at: string;
 }
 
 function rowToSuggestion(row: SuggestionRow): NodeSuggestion {
-  return {
+  const suggestion: NodeSuggestion = {
     id: row.id,
     nodeId: row.node_id,
     blueprintId: row.blueprint_id,
@@ -1645,6 +1655,10 @@ function rowToSuggestion(row: SuggestionRow): NodeSuggestion {
     used: row.used === 1,
     createdAt: row.created_at,
   };
+  if (row.roles) {
+    try { suggestion.roles = JSON.parse(row.roles); } catch { /* ignore bad JSON */ }
+  }
+  return suggestion;
 }
 
 export function createSuggestion(
@@ -1652,15 +1666,19 @@ export function createSuggestion(
   nodeId: string,
   title: string,
   description: string,
+  roles?: string[],
 ): NodeSuggestion {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
+  const rolesJson = roles && roles.length > 0 ? JSON.stringify(roles) : null;
   db.prepare(`
-    INSERT INTO node_suggestions (id, node_id, blueprint_id, title, description, used, created_at)
-    VALUES (?, ?, ?, ?, ?, 0, ?)
-  `).run(id, nodeId, blueprintId, title, description, now);
-  return { id, nodeId, blueprintId, title, description, used: false, createdAt: now };
+    INSERT INTO node_suggestions (id, node_id, blueprint_id, title, description, used, roles, created_at)
+    VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+  `).run(id, nodeId, blueprintId, title, description, rolesJson, now);
+  const suggestion: NodeSuggestion = { id, nodeId, blueprintId, title, description, used: false, createdAt: now };
+  if (roles && roles.length > 0) suggestion.roles = roles;
+  return suggestion;
 }
 
 export function getSuggestionsForNode(nodeId: string): NodeSuggestion[] {

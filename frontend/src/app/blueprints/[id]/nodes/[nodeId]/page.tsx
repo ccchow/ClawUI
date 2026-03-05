@@ -110,6 +110,15 @@ export default function NodeDetailPage() {
     invalidateAll();
   });
 
+  // Dynamic browser tab title
+  useEffect(() => {
+    if (node?.title) {
+      const prefix = blueprint?.title ? `${node.title} · ${blueprint.title}` : node.title;
+      document.title = `${prefix} — ClawUI`;
+    }
+    return () => { document.title = "ClawUI — Agent Session Viewer"; };
+  }, [node?.title, blueprint?.title]);
+
   // A suggestion is "used" if marked in DB (s.used) or if a matching node already exists
   const usedSuggestionIds = useMemo(() => {
     if (suggestions.length === 0) return new Set<string>();
@@ -690,14 +699,6 @@ export default function NodeDetailPage() {
           {node.agentType && node.agentType !== (blueprint?.agentType ?? "claude") && (
             <AgentBadge agentType={node.agentType} size="xs" />
           )}
-          {node.roles && node.roles.length > 0
-            ? node.roles.map((r) => (
-                <RoleBadge key={r} roleId={r} size="sm" />
-              ))
-            : (blueprint.enabledRoles ?? [blueprint.defaultRole ?? "sde"]).map((r) => (
-                <RoleBadge key={r} roleId={r} size="sm" inherited />
-              ))
-          }
           {isRunning && (
             <AISparkle size="sm" className="text-accent-blue" />
           )}
@@ -1709,11 +1710,14 @@ export default function NodeDetailPage() {
                       if (!blueprintId || isUsed || isCreating) return;
                       setCreatingSuggestionId(s.id);
                       try {
-                        await createMacroNode(blueprintId, {
+                        const newNode = await createMacroNode(blueprintId, {
                           title: s.title,
                           description: s.description,
                           dependencies: [nodeId],
                         });
+                        if (s.roles && s.roles.length > 0) {
+                          await updateMacroNode(blueprintId, newNode.id, { roles: s.roles });
+                        }
                         await markSuggestionUsed(blueprintId, nodeId, s.id);
                         invalidateAll();
                       } catch {
@@ -1731,6 +1735,13 @@ export default function NodeDetailPage() {
                     <div className="flex items-center gap-2">
                       <span className="text-accent-amber text-xs">+</span>
                       <span className="text-sm font-medium text-text-primary">{s.title}</span>
+                      {s.roles && s.roles.length > 0 && (
+                        <span className="flex items-center gap-1">
+                          {s.roles.map((r) => (
+                            <RoleBadge key={r} roleId={r} size="xs" />
+                          ))}
+                        </span>
+                      )}
                       {isUsed && <span className="text-xs text-accent-green ml-auto">Created</span>}
                       {isCreating && <span className="text-xs text-text-muted ml-auto animate-pulse">Creating...</span>}
                     </div>

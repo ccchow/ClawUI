@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { type MacroNode, type PendingTask, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
+import { type MacroNode, type PendingTask, type BlueprintStatus, runNode, updateMacroNode, deleteMacroNode, enrichNode, reevaluateNode, resumeNodeSession, unqueueNode } from "@/lib/api";
 import { type BroadcastOpType } from "@/lib/useBlueprintBroadcast";
 import { StatusIndicator } from "./StatusIndicator";
 import { MarkdownContent } from "./MarkdownContent";
@@ -11,6 +11,7 @@ import { AISparkle } from "./AISparkle";
 import { RoleBadge } from "./RoleBadge";
 import { type DepRowLayout, DepGutter } from "./DependencyGraph";
 import { useToast } from "./Toast";
+import { ConfirmationStrip } from "./ConfirmationStrip";
 
 /** Strip markdown syntax for plain-text preview */
 function stripMarkdown(text: string): string {
@@ -46,6 +47,7 @@ export function MacroNodeCard({
   hasRunningNodes,
   blueprintDefaultRole,
   blueprintEnabledRoles,
+  blueprintStatus,
 }: {
   node: MacroNode;
   pendingTasks?: PendingTask[];
@@ -68,6 +70,8 @@ export function MacroNodeCard({
   blueprintDefaultRole?: string;
   /** Blueprint's enabledRoles for inherited role display */
   blueprintEnabledRoles?: string[];
+  /** Blueprint status — used to show reset-to-pending on done nodes when blueprint is approved */
+  blueprintStatus?: BlueprintStatus;
 }) {
   const { showToast } = useToast();
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -76,6 +80,7 @@ export function MacroNodeCard({
   const busyTip = blueprintBusy ? `Waiting for ${blueprintBusy} to complete` : "";
   const canRun = blueprintId && (node.status === "pending" || node.status === "failed");
   const canManage = blueprintId && (node.status === "pending" || node.status === "failed" || node.status === "skipped");
+  const canResetToPending = blueprintId && node.status === "done" && blueprintStatus === "approved";
   const isQueued = node.status === "queued";
 
   // Check if there's a pending reevaluate task for this node (from queue API)
@@ -115,6 +120,10 @@ export function MacroNodeCard({
 
   // Reevaluate state
   const [reevaluating, setReevaluating] = useState(false);
+
+  // Reset to pending state
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   // Resume session state
   const [resumingExecId, setResumingExecId] = useState<string | null>(null);
@@ -554,6 +563,11 @@ export function MacroNodeCard({
                         {reevaluating || reevaluateQueued ? "Re-evaluating..." : "Re-evaluate"}
                       </button>
                     )}
+                    {canResetToPending && (
+                      <button onClick={(e) => { e.stopPropagation(); setShowResetConfirm(true); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
+                        Reset to Pending
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -576,35 +590,29 @@ export function MacroNodeCard({
               </button>
             )}
             {isQueued && !isEditing && showUnqueueConfirm && (
-              <span className="flex items-center gap-1 animate-fade-in">
-                <button
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    if (!blueprintId) return;
-                    setUnqueuing(true);
-                    try {
-                      await unqueueNode(blueprintId, node.id);
-                      onRefresh?.();
-                    } catch {
-                      /* ignore — next poll will update */
-                    } finally {
-                      setUnqueuing(false);
-                      setShowUnqueueConfirm(false);
-                    }
-                  }}
-                  disabled={unqueuing}
-                  title={unqueuing ? "Removing from queue..." : undefined}
-                  className="px-2 py-1 rounded-lg bg-accent-amber/20 text-accent-amber text-xs font-medium hover:bg-accent-amber/30 transition-colors disabled:opacity-50 active:scale-[0.97]"
-                >
-                  {unqueuing ? "..." : "Yes"}
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); setShowUnqueueConfirm(false); }}
-                  className="px-2 py-1 rounded-lg bg-bg-tertiary text-text-muted text-xs font-medium hover:bg-bg-tertiary/80 transition-colors active:scale-[0.97]"
-                >
-                  Cancel
-                </button>
-              </span>
+              <ConfirmationStrip
+                confirmLabel="Unqueue?"
+                variant="amber"
+                inline
+                stopPropagation
+                disabled={unqueuing}
+                confirmText={unqueuing ? "..." : "Yes"}
+                cancelText="Cancel"
+                onConfirm={async () => {
+                  if (!blueprintId) return;
+                  setUnqueuing(true);
+                  try {
+                    await unqueueNode(blueprintId, node.id);
+                    onRefresh?.();
+                  } catch {
+                    /* ignore — next poll will update */
+                  } finally {
+                    setUnqueuing(false);
+                    setShowUnqueueConfirm(false);
+                  }
+                }}
+                onCancel={() => setShowUnqueueConfirm(false)}
+              />
             )}
             {canRun && !isEditing && (
               <>
@@ -634,6 +642,47 @@ export function MacroNodeCard({
                   </span>
                 )}
               </>
+            )}
+            {canResetToPending && !isEditing && (
+              showResetConfirm ? (
+                <ConfirmationStrip
+                  confirmLabel="Reset?"
+                  variant="amber"
+                  inline
+                  stopPropagation
+                  disabled={resetting}
+                  confirmText={resetting ? "..." : "Yes"}
+                  onConfirm={async () => {
+                    if (!blueprintId) return;
+                    setResetting(true);
+                    try {
+                      await updateMacroNode(blueprintId, node.id, { status: "pending" });
+                      onNodeUpdated?.();
+                      showToast(`Node #${node.seq} reset to Pending`);
+                    } catch {
+                      /* ignore */
+                    } finally {
+                      setResetting(false);
+                      setShowResetConfirm(false);
+                    }
+                  }}
+                  onCancel={() => setShowResetConfirm(false)}
+                />
+              ) : (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowResetConfirm(true); }}
+                  disabled={!!blueprintBusy}
+                  title={blueprintBusy ? busyTip : "Reset this completed node back to Pending for re-execution"}
+                  aria-label="Reset node to pending"
+                  className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-amber/15 text-accent-amber text-xs font-medium hover:bg-accent-amber/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:inline-flex items-center gap-1"
+                >
+                  <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
+                    <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z" />
+                  </svg>
+                  Reset
+                </button>
+              )
             )}
             {node.executions.length > 0 && (
               <span className="text-xs text-text-muted hidden sm:inline">

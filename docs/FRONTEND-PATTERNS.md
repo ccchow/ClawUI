@@ -88,6 +88,17 @@ Fire-and-forget gesture buttons follow a strict color taxonomy:
 - `Escape` cascades: cancel confirmation → close edit → close switcher
 - `Cmd/Ctrl+Shift+R` Reevaluate All (BlueprintDetailPage)
 
+## Color & Role Conventions
+
+- **Available accent tokens**: Only `accent-blue`, `accent-purple`, `accent-green`, `accent-amber`, `accent-red` exist. No `accent-yellow`, `accent-orange`, or `accent-cyan` — use `accent-amber` as the closest warm alternative. Exception: `BADGE_COLOR` in `TimelineNode.tsx` uses Tailwind defaults with `dark:` variants for tool-type differentiation (14+ tool types exceed the 5-accent palette).
+- **Role color convention**: SDE=accent-blue, QA=accent-green, PM=accent-purple, UXD=accent-amber, SA=accent-red, MLE=accent-amber, unknown=accent-amber (fallback). Defined in `role-colors.ts` (single source of truth), imported by `RoleBadge.tsx` and `RoleSelector.tsx`.
+- **Blueprint vs node status labels**: Blueprint-level "running" displays as "In Progress" in the UI; node-level "running" displays as "Running". `StatusIndicator` accepts `context?: "blueprint" | "node"` prop.
+- **Agent-neutral UI language**: Frontend user-facing text uses "agent" (not "Claude Code") since multiple agent runtimes are supported. Tooltips say "using the selected agent", empty states say "use an agent", etc.
+
+## Inline Confirmation
+
+- **ConfirmationStrip component**: Use `ConfirmationStrip` (not hand-rolled markup) for all Yes/No confirmation prompts. Accepts `variant` (amber/red/blue/purple/green) matching gesture color semantics, `confirmLabel`, `onConfirm`, `onCancel`. Use `inline` prop for span wrapper, `stopPropagation` for nested click contexts. Built-in keyboard accessibility: Escape dismisses the strip, confirm button auto-focuses on mount, focus returns to trigger element on cancel. Consumers manage their own show/hide state via `useState`.
+
 ## Agent UI Patterns
 
 - **Agent color convention**: Claude=`accent-purple`, OpenClaw=`accent-green`, Pi Mono=`accent-blue`. `AGENT_COLORS` and `AGENT_LABELS` maps in `AgentSelector.tsx`. `AgentBadge` shows colored pill; `AgentSelector` auto-hides when only one agent has sessions. Non-Claude badges shown conditionally: `{agentType && agentType !== "claude" && <AgentBadge ... />}`. `MacroNodeCard` accepts `blueprintAgentType` prop to show override badges only when node agent differs from blueprint default.

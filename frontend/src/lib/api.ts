@@ -674,6 +674,7 @@ export interface NodeSuggestion {
   title: string;
   description: string;
   used: boolean;
+  roles?: string[];
   createdAt: string;
 }
 

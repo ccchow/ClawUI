@@ -63,10 +63,6 @@ vi.mock("@/components/AgentSelector", () => ({
   AgentBadge: ({ agentType }: { agentType: string }) => <span data-testid="agent-badge">{agentType}</span>,
 }));
 
-vi.mock("@/components/RoleBadge", () => ({
-  RoleBadge: ({ roleId }: { roleId: string }) => <span data-testid="role-badge">{roleId}</span>,
-}));
-
 vi.mock("@/components/RoleSelector", () => ({
   RoleSelector: () => <div data-testid="role-selector" />,
 }));
@@ -1293,6 +1289,167 @@ describe("BlueprintDetailPage", () => {
       await waitFor(() => {
         expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "approved" });
       });
+    });
+  });
+
+  // ─── Manual Blueprint Status Transitions ──────────────────────────
+
+  describe("Manual blueprint status transitions", () => {
+    it("shows Reopen button for done blueprints", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "done", nodes: [
+        makeMockNode({ id: "n-1", seq: 1, title: "Done node", status: "done", order: 0 }),
+      ] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen")).toBeInTheDocument();
+      });
+    });
+
+    it("shows Reopen button for failed blueprints", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "failed", nodes: [
+        makeMockNode({ id: "n-1", seq: 1, title: "Failed node", status: "failed", order: 0 }),
+      ] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen")).toBeInTheDocument();
+      });
+    });
+
+    it("calls updateBlueprint with approved on Reopen confirmation for done blueprint", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "done", nodes: [] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+      apiMocks.updateBlueprint.mockResolvedValue(makeMockBlueprint({ id: "bp-1", status: "approved" }));
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Reopen"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen to Approved?")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Yes"));
+
+      await waitFor(() => {
+        expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "approved" });
+      });
+    });
+
+    it("shows Back to Draft button for approved blueprints", async () => {
+      setupBlueprintWithNodes({ status: "approved" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Back to Draft")).toBeInTheDocument();
+      });
+    });
+
+    it("calls updateBlueprint with draft on Back to Draft confirmation", async () => {
+      setupBlueprintWithNodes({ status: "approved" });
+      apiMocks.updateBlueprint.mockResolvedValue(makeMockBlueprint({ id: "bp-1", status: "draft" }));
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Back to Draft")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Back to Draft"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Revert to Draft?")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Yes"));
+
+      await waitFor(() => {
+        expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "draft" });
+      });
+    });
+
+    it("shows Resume button for paused blueprints", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "paused", nodes: [] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Resume")).toBeInTheDocument();
+      });
+    });
+
+    it("calls updateBlueprint with approved on Resume confirmation", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "paused", nodes: [] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+      apiMocks.updateBlueprint.mockResolvedValue(makeMockBlueprint({ id: "bp-1", status: "approved" }));
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Resume")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Resume"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Resume to Approved?")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Yes"));
+
+      await waitFor(() => {
+        expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "approved" });
+      });
+    });
+
+    it("dismisses confirmation strip on No click", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "done", nodes: [] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Reopen"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Reopen to Approved?")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("No"));
+
+      await waitFor(() => {
+        expect(screen.queryByText("Reopen to Approved?")).not.toBeInTheDocument();
+        expect(screen.getByText("Reopen")).toBeInTheDocument();
+      });
+    });
+
+    it("does not show Reopen for running or draft blueprints", async () => {
+      const bp = makeMockBlueprint({ id: "bp-1", status: "running", nodes: [
+        makeMockNode({ id: "n-1", seq: 1, title: "Running node", status: "running", order: 0 }),
+      ] });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("In Progress")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText("Reopen")).not.toBeInTheDocument();
     });
   });
 

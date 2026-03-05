@@ -224,6 +224,13 @@ Codex organizes sessions by date, not by project path (unlike Claude's `~/.claud
 - **plan-generator.ts** — AI-powered task decomposition: breaks a high-level task into ordered nodes with dependencies. Supports cross-dependencies to existing nodes (by ID) and uses handoff summaries (output artifacts) instead of raw descriptions for done node context. Exports `runClaudeInteractiveGen()` (delegates to agent-claude.ts), `getApiBase()`, `getAuthParam()` used by plan-routes.ts for interactive-mode flows.
 - **plan-executor.ts** — Node execution via agent runtime (`getActiveRuntime()`) + artifact generation for cross-node context passing + post-completion evaluation with graph mutations (INSERT_BETWEEN, ADD_SIBLING). CLI functions (`runClaude`, `runClaudeResume`, `runClaudeInteractive`, `detectNewSession`) delegate to active runtime. Also exports `getGlobalQueueInfo()` for cross-blueprint queue aggregation.
 
+## Configuration Patterns
+
+- **Windows path resolution pattern**: All `resolve*Path()` functions in `config.ts` use `process.platform === "win32"` branches. Windows: candidates use `.cmd` extensions in `AppData/Roaming/npm/` and `.npm-global/`, PATH lookup via `execFileSync("where", [...])`. Unix: `~/.local/bin/`, `/usr/local/bin/`, PATH lookup via `/usr/bin/which`. Reference implementation: `resolveClaudePath()`.
+- **Agent binary paths import from config.ts**: Agent files (`agent-codex.ts`, `agent-openclaw.ts`, `agent-pimono.ts`) import `CODEX_PATH`/`OPENCLAW_PATH`/`PI_PATH` from `config.ts` with bare-command fallback (e.g., `CONFIG_CODEX_PATH ?? "codex"`). Don't add local resolution functions — keep resolution centralized in config.ts.
+- **Agent runtime side-effect imports**: Modules using `getActiveRuntime()` or `getRegisteredRuntimes()` must import all runtime modules as side-effects. Currently done in `plan-executor.ts`, `plan-generator.ts`, `plan-coordinator.ts`, `plan-convene.ts`, `db.ts`, and `routes.ts`.
+- **Role auto-loading via `load-all-roles.ts`**: Modules using `getRole()`, `getAllRoles()`, or `getBuiltinRoles()` import `./roles/load-all-roles.js` as a single side-effect. The loader auto-discovers `role-*.ts` files via `readdirSync` + dynamic `import()` with top-level await. Adding a new role requires **only** creating `roles/role-<id>.ts`.
+
 ## Security Patterns
 
 - **Session ID validation**: All endpoints accepting session IDs must call `validateSessionId()` from `cli-runner.ts` before passing to shell commands. Prevents Tcl injection via `expect` script interpolation. Regex: `/^[a-zA-Z0-9_-]{1,128}$/`.

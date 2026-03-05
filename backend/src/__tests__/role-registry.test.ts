@@ -350,3 +350,38 @@ describe("role-sa (side-effect registration)", () => {
     });
   });
 });
+
+describe("role-mle (side-effect registration)", () => {
+  beforeEach(() => {
+    clearRoles();
+  });
+
+  it("registers MLE role with correct fields after import", async () => {
+    await import("../roles/role-mle.js");
+
+    assertRoleRegistration("mle", {
+      label: "ML Engineer",
+      builtin: true,
+      artifactTypes: ["model_spec", "experiment_report"],
+      blockerTypes: [
+        "missing_data",
+        "compute_constraint",
+        "model_limitation",
+        "unclear_metric",
+      ],
+      workVerb: "build and evaluate",
+      promptContains: {
+        persona: "machine learning engineer",
+        executionGuidance: "reproducible",
+        artifactFormat: "Model/data details",
+        evaluationExamples: "API rate limits",
+        decompositionHeuristic: "ML pipeline stage",
+        specificityGuidance: "model architectures",
+        dependencyConsiderations: "Data dependencies",
+        verificationSteps: "data pipelines",
+        reevaluationVerification: "data pipeline correctness",
+      },
+      toolHintsContain: "Serena",
+    });
+  });
+});

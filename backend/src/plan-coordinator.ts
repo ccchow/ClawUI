@@ -71,7 +71,7 @@ Analyze the insights above in the context of the current blueprint state. For ea
 \`\`\`
 curl -s -X POST '${apiBase}/api/blueprints/${blueprintId}/nodes/batch-create?${authParam}' \\
   -H 'Content-Type: application/json' \\
-  -d '[{"title": "Node title", "description": "Detailed description", "dependencies": ["existing-node-id"]}]'
+  -d '[{"title": "Node title", "description": "Detailed description", "dependencies": ["existing-node-id"], "roles": ["qa"]}]'
 \`\`\`
 
 ### Update an existing node:
@@ -96,6 +96,7 @@ curl -s -X POST '${apiBase}/api/blueprints/${blueprintId}/insights/<insightId>/d
 - Process EVERY insight — either act on it or dismiss it
 - Mark each insight as read or dismissed after processing
 - When creating nodes, use a single batch-create call with all new nodes
+- **Assign roles from insights**: Each insight has a \`role\` field (e.g., "qa", "sde", "sa"). When creating a new node from an insight, set the node's \`"roles"\` array to include the insight's role. If multiple insights with different roles lead to the same new node, combine them (e.g., \`"roles": ["sde", "qa"]\`)
 - Only update pending or failed nodes — never touch done/running nodes
 - Keep node titles and descriptions specific and actionable
 - Do NOT output your analysis as text — only make API calls`;
