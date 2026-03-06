@@ -2609,6 +2609,85 @@ describe("plan-routes", () => {
       expect(enqueueBlueprintTask).not.toHaveBeenCalled();
     });
 
+    it("clears pause and enqueues loop when switching autopilot→fsd while paused", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "paused",
+        executionMode: "autopilot",
+        pauseReason: "No progress detected after 5 consecutive iterations.",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "fsd" });
+      expect(res.status).toBe(200);
+
+      // Should clear pauseReason and restart the loop in fsd mode
+      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", expect.objectContaining({
+        executionMode: "fsd",
+        pauseReason: "",
+      }));
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+
+      const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
+      await enqueueCall[1]();
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("clears pause and enqueues loop when switching fsd→autopilot while paused", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "paused",
+        executionMode: "fsd",
+        pauseReason: "Autopilot reached maximum iterations (200).",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "autopilot" });
+      expect(res.status).toBe(200);
+
+      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", expect.objectContaining({
+        executionMode: "autopilot",
+        pauseReason: "",
+      }));
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+    });
+
+    it("does NOT enqueue when switching autopilot→fsd while running (loop already active)", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        executionMode: "autopilot",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "fsd" });
+      expect(res.status).toBe(200);
+
+      // Running loop will pick up the mode change dynamically — no restart needed
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
     it("returns 400 for invalid executionMode", async () => {
       const res = await request(app)
         .put("/api/blueprints/bp-1")

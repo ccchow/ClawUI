@@ -267,8 +267,17 @@ planRouter.put("/api/blueprints/:id", (req, res) => {
       !isAutopilotMode(currentBp.executionMode) &&
       (currentBp.status === "approved" || currentBp.status === "paused");
 
-    // Clear pause_reason when switching to autopilot/fsd
-    if (switchingToAutopilot) {
+    // Detect switching between autopilot-like modes (autopilot ↔ fsd) while paused.
+    // The previous loop may have paused due to safeguards; switching to fsd should
+    // clear the stale pause and restart the loop in the new mode.
+    const switchingBetweenAutopilotModes =
+      isAutopilotMode(patch.executionMode as string) &&
+      isAutopilotMode(currentBp.executionMode) &&
+      patch.executionMode !== currentBp.executionMode &&
+      currentBp.status === "paused";
+
+    // Clear pause_reason when switching to autopilot/fsd or between autopilot modes while paused
+    if (switchingToAutopilot || switchingBetweenAutopilotModes) {
       patch.pauseReason = "";
     }
 
@@ -278,8 +287,9 @@ planRouter.put("/api/blueprints/:id", (req, res) => {
       return;
     }
 
-    // Side effect: enqueue autopilot loop when switching to autopilot on approved/paused blueprint
-    if (switchingToAutopilot) {
+    // Side effect: enqueue autopilot loop when switching to autopilot on approved/paused blueprint,
+    // or when switching between autopilot modes while paused (e.g. autopilot→fsd restarts loop)
+    if (switchingToAutopilot || switchingBetweenAutopilotModes) {
       enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
         log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
       });
