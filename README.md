@@ -142,7 +142,7 @@ Switch agent backend via the `AGENT_TYPE` environment variable:
 | Agent | `AGENT_TYPE` | Description |
 |---|---|---|
 | **Claude Code** | `claude` (default) | Anthropic's official CLI |
-| **OpenClaw** | `openclaw` | Open-source Claude Code fork with custom model providers |
+| **OpenClaw** | `openclaw` | Open-source agent framework |
 | **Pi Mono** | `pi` | Lightweight coding agent |
 | **Codex CLI** | `codex` | OpenAI's Codex CLI agent |
 
