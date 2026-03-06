@@ -524,14 +524,14 @@ export function initPlanTables(): void {
   }
 
   // Incremental migration: add autopilot columns to blueprints
-  const bpCols6 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
-  if (!bpCols6.some((c) => c.name === "execution_mode")) {
+  const bpColsAP = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpColsAP.some((c) => c.name === "execution_mode")) {
     db.exec("ALTER TABLE blueprints ADD COLUMN execution_mode TEXT DEFAULT 'manual'");
   }
-  if (!bpCols6.some((c) => c.name === "max_iterations")) {
+  if (!bpColsAP.some((c) => c.name === "max_iterations")) {
     db.exec("ALTER TABLE blueprints ADD COLUMN max_iterations INTEGER DEFAULT 50");
   }
-  if (!bpCols6.some((c) => c.name === "pause_reason")) {
+  if (!bpColsAP.some((c) => c.name === "pause_reason")) {
     db.exec("ALTER TABLE blueprints ADD COLUMN pause_reason TEXT DEFAULT NULL");
   }
 
