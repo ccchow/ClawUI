@@ -718,7 +718,7 @@ export default function BlueprintDetailPage() {
   // "Run All" and individual node runs are NOT included — individual Run buttons remain
   // clickable so users can queue additional nodes while others execute.
   const blueprintBusy = isGeneratingTask ? "Generate" : isConveneTask ? "Convene" : isCoordinatingTask ? "Coordinate" : undefined;
-  const isAutopilot = blueprint.executionMode === "autopilot";
+  const isAutopilot = blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd";
   const canRunAll = (blueprint.status === "approved" || blueprint.status === "failed" || blueprint.status === "paused")
     && blueprint.nodes.some((n) => n.status === "pending" || n.status === "failed");
 
@@ -1423,6 +1423,7 @@ export default function BlueprintDetailPage() {
         <PauseBanner
           blueprintId={id}
           pauseReason={blueprint.pauseReason}
+          executionMode={blueprint.executionMode}
           onUpdate={(patch) => setBlueprint((prev) => prev ? { ...prev, ...patch } as typeof prev : prev)}
           onInvalidate={invalidateAll}
           onBroadcast={(type) => broadcastOperation(type as Parameters<typeof broadcastOperation>[0])}

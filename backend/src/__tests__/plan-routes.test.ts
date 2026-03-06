@@ -23,10 +23,13 @@ vi.mock("node:fs", async (importOriginal) => {
       // Allow /test and /test/CLAUDE.md to pass validation
       const np = p.replace(/\\/g, "/");
       if (np === "/test" || np === "/test/CLAUDE.md") return true;
+      // /no-claude-md exists as a directory but has no CLAUDE.md
+      if (np === "/no-claude-md") return true;
       return actual.existsSync(p);
     }),
     statSync: vi.fn((p: string) => {
-      if (p.replace(/\\/g, "/") === "/test") return { isDirectory: (): boolean => true };
+      const np = p.replace(/\\/g, "/");
+      if (np === "/test" || np === "/no-claude-md") return { isDirectory: (): boolean => true };
       return actual.statSync(p);
     }),
   };
@@ -480,6 +483,22 @@ describe("plan-routes", () => {
       );
       expect(res.body.enabledRoles).toEqual(["sde", "qa"]);
       expect(res.body.defaultRole).toBe("qa");
+    });
+
+    it("returns 400 when claude agent and no CLAUDE.md", async () => {
+      const res = await request(app)
+        .post("/api/blueprints")
+        .send({ title: "No Claude MD", projectCwd: "/no-claude-md" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("CLAUDE.md");
+    });
+
+    it("skips CLAUDE.md check for non-claude agent types", async () => {
+      const res = await request(app)
+        .post("/api/blueprints")
+        .send({ title: "OpenClaw BP", projectCwd: "/no-claude-md", agentType: "openclaw" });
+      expect(res.status).toBe(201);
+      expect(res.body.title).toBe("OpenClaw BP");
     });
 
     it("defaults role fields when not provided", async () => {
@@ -2516,6 +2535,80 @@ describe("plan-routes", () => {
       expect(enqueueBlueprintTask).not.toHaveBeenCalled();
     });
 
+    it("clears pauseReason and enqueues autopilot loop when switching to fsd on approved blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: undefined,
+        pauseReason: "Some pause reason",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "fsd" });
+      expect(res.status).toBe(200);
+
+      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", expect.objectContaining({
+        executionMode: "fsd",
+        pauseReason: "",
+      }));
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+
+      const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
+      await enqueueCall[1]();
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("does NOT re-enqueue when already in fsd mode and setting fsd again", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "fsd",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "fsd" });
+      expect(res.status).toBe(200);
+
+      // Already fsd → not switching → no enqueue
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("enqueues autopilot loop when switching from autopilot to fsd", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "autopilot",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "fsd" });
+      expect(res.status).toBe(200);
+
+      // autopilot → fsd: both are autopilot-like, so NOT a switch (isAutopilotMode → isAutopilotMode)
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
     it("returns 400 for invalid executionMode", async () => {
       const res = await request(app)
         .put("/api/blueprints/bp-1")
@@ -2569,6 +2662,31 @@ describe("plan-routes", () => {
       expect(executeAllNodes).not.toHaveBeenCalled();
 
       // Verify the enqueued function calls runAutopilotLoop
+      const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
+      await enqueueCall[1]();
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1", undefined);
+    });
+
+    it("routes to runAutopilotLoop when executionMode is fsd", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "fsd",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app).post("/api/blueprints/bp-1/run-all");
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe("execution started");
+
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+      expect(executeAllNodes).not.toHaveBeenCalled();
+
       const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
       await enqueueCall[1]();
       expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1", undefined);

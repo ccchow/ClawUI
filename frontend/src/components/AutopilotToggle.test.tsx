@@ -86,7 +86,7 @@ describe("AutopilotToggle", () => {
     const btn = screen.getByRole("button");
     expect(btn).toHaveAttribute(
       "title",
-      "Autopilot: AI agent drives execution using all available operations",
+      "Autopilot: AI agent drives execution with safeguards",
     );
   });
 
@@ -110,10 +110,24 @@ describe("AutopilotToggle", () => {
     });
   });
 
-  it("calls onUpdate optimistically and updateBlueprint on click (autopilot -> manual)", async () => {
+  it("calls onUpdate optimistically and updateBlueprint on click (autopilot -> fsd)", async () => {
     const onUpdate = vi.fn();
     render(
       <AutopilotToggle {...defaultProps} executionMode="autopilot" onUpdate={onUpdate} />,
+    );
+
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(onUpdate).toHaveBeenCalledWith({ executionMode: "fsd" });
+    await waitFor(() => {
+      expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { executionMode: "fsd" });
+    });
+  });
+
+  it("calls onUpdate optimistically and updateBlueprint on click (fsd -> manual)", async () => {
+    const onUpdate = vi.fn();
+    render(
+      <AutopilotToggle {...defaultProps} executionMode="fsd" onUpdate={onUpdate} />,
     );
 
     fireEvent.click(screen.getByRole("button"));
@@ -192,6 +206,35 @@ describe("AutopilotToggle", () => {
     expect(btn.className).toContain("bg-bg-tertiary");
   });
 
+  it("renders in FSD state with accent-amber classes", () => {
+    render(<AutopilotToggle {...defaultProps} executionMode="fsd" />);
+
+    const btn = screen.getByRole("button");
+    expect(btn).toHaveTextContent("FSD");
+    expect(btn.className).toContain("accent-amber");
+  });
+
+  it("shows amber pulsing dot when in FSD mode", () => {
+    const { container } = render(
+      <AutopilotToggle {...defaultProps} executionMode="fsd" />,
+    );
+
+    const dot = container.querySelector(".bg-accent-amber.animate-pulse");
+    expect(dot).toBeInTheDocument();
+  });
+
+  it("shows correct tooltip when in FSD mode", () => {
+    render(
+      <AutopilotToggle {...defaultProps} executionMode="fsd" />,
+    );
+
+    const btn = screen.getByRole("button");
+    expect(btn).toHaveAttribute(
+      "title",
+      "FSD: Full Speed Drive — AI runs without safeguards for maximum throughput",
+    );
+  });
+
   describe("ARIA accessibility", () => {
     it("has aria-pressed=false when in manual mode", () => {
       render(<AutopilotToggle {...defaultProps} />);
@@ -201,6 +244,12 @@ describe("AutopilotToggle", () => {
 
     it("has aria-pressed=true when in autopilot mode", () => {
       render(<AutopilotToggle {...defaultProps} executionMode="autopilot" />);
+      const btn = screen.getByRole("button");
+      expect(btn).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("has aria-pressed=true when in FSD mode", () => {
+      render(<AutopilotToggle {...defaultProps} executionMode="fsd" />);
       const btn = screen.getByRole("button");
       expect(btn).toHaveAttribute("aria-pressed", "true");
     });

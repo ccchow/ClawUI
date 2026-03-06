@@ -10,14 +10,38 @@ interface AutopilotToggleProps {
   onUpdate: (patch: { executionMode: ExecutionMode }) => void;
 }
 
+const MODE_CYCLE: ExecutionMode[] = ["manual", "autopilot", "fsd"];
+
+const MODE_CONFIG: Record<ExecutionMode, { label: string; title: string; dotClass: string; activeClass: string }> = {
+  manual: {
+    label: "Manual",
+    title: "Manual: you control execution",
+    dotClass: "bg-text-muted",
+    activeClass: "bg-bg-tertiary text-text-secondary border-border-primary",
+  },
+  autopilot: {
+    label: "Autopilot",
+    title: "Autopilot: AI agent drives execution with safeguards",
+    dotClass: "bg-accent-green animate-pulse",
+    activeClass: "bg-accent-green/15 text-accent-green border-accent-green/30",
+  },
+  fsd: {
+    label: "FSD",
+    title: "FSD: Full Speed Drive — AI runs without safeguards for maximum throughput",
+    dotClass: "bg-accent-amber animate-pulse",
+    activeClass: "bg-accent-amber/15 text-accent-amber border-accent-amber/30",
+  },
+};
+
 export function AutopilotToggle({ blueprintId, executionMode, blueprintStatus, onUpdate }: AutopilotToggleProps) {
-  const active = executionMode === "autopilot";
+  const currentMode = executionMode ?? "manual";
   const disabled = blueprintStatus === "draft";
   const [toggling, setToggling] = useState(false);
 
   const handleToggle = useCallback(async () => {
     if (disabled || toggling) return;
-    const newMode: ExecutionMode = active ? "manual" : "autopilot";
+    const currentIndex = MODE_CYCLE.indexOf(currentMode);
+    const newMode = MODE_CYCLE[(currentIndex + 1) % MODE_CYCLE.length];
     // Optimistic update
     onUpdate({ executionMode: newMode });
     setToggling(true);
@@ -25,30 +49,28 @@ export function AutopilotToggle({ blueprintId, executionMode, blueprintStatus, o
       await updateBlueprint(blueprintId, { executionMode: newMode });
     } catch {
       // Revert on error
-      onUpdate({ executionMode: active ? "autopilot" : "manual" });
+      onUpdate({ executionMode: currentMode });
     } finally {
       setToggling(false);
     }
-  }, [blueprintId, active, disabled, toggling, onUpdate]);
+  }, [blueprintId, currentMode, disabled, toggling, onUpdate]);
+
+  const config = MODE_CONFIG[currentMode];
 
   return (
     <button
       onClick={handleToggle}
       disabled={disabled || toggling}
-      aria-pressed={active}
+      aria-pressed={currentMode !== "manual"}
       title={
         disabled
           ? "Approve blueprint to enable autopilot"
-          : active
-            ? "Autopilot: AI agent drives execution using all available operations"
-            : "Manual: you control execution"
+          : config.title
       }
       className={`inline-flex items-center gap-2 px-3 py-1 rounded-full border text-sm font-medium cursor-pointer transition-all hover:opacity-80 active:scale-[0.98] ${
         disabled || toggling
           ? "opacity-disabled cursor-not-allowed"
-          : active
-            ? "bg-accent-green/15 text-accent-green border-accent-green/30"
-            : "bg-bg-tertiary text-text-secondary border-border-primary"
+          : config.activeClass
       }`}
     >
       {toggling ? (
@@ -58,12 +80,10 @@ export function AutopilotToggle({ blueprintId, executionMode, blueprintStatus, o
         </svg>
       ) : (
         <span
-          className={`w-2 h-2 rounded-full ${
-            active ? "bg-accent-green animate-pulse" : "bg-text-muted"
-          }`}
+          className={`w-2 h-2 rounded-full ${config.dotClass}`}
         />
       )}
-      {active ? "Autopilot" : "Manual"}
+      {config.label}
     </button>
   );
 }

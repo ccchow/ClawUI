@@ -100,7 +100,7 @@ export default function NewBlueprintPage() {
             placeholder="/path/to/project"
             className="w-full px-3 py-2 rounded-lg bg-bg-secondary border border-border-primary text-text-primary placeholder:text-text-muted text-sm focus:outline-none focus:border-accent-blue focus:ring-1 focus:ring-accent-blue/30 font-mono"
           />
-          <p className="text-text-muted text-xs mt-1">Absolute path to the project directory (must contain CLAUDE.md)</p>
+          <p className="text-text-muted text-xs mt-1">Absolute path to the project directory{agentType === "claude" ? " (must contain CLAUDE.md)" : ""}</p>
           {cwdError && <p className="text-accent-red text-sm mt-1">{cwdError}</p>}
         </div>
 

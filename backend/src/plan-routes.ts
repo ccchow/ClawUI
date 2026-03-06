@@ -60,7 +60,7 @@ import { executeConveneSession } from "./plan-convene.js";
 import { getRole, getAllRoles } from "./roles/role-registry.js";
 import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
-import { CLAWUI_DB_DIR } from "./config.js";
+import { CLAWUI_DB_DIR, AGENT_TYPE } from "./config.js";
 import { runAutopilotLoop } from "./autopilot.js";
 import {
   enrichNodeInternal,
@@ -175,6 +175,8 @@ planRouter.post("/api/blueprints", (req, res) => {
       res.status(400).json({ error: "Missing or empty 'title'" });
       return;
     }
+    const { agentType, enabledRoles, defaultRole, agentParams } = req.body as { agentType?: string; enabledRoles?: string[]; defaultRole?: string; agentParams?: string };
+    const effectiveAgent = agentType || AGENT_TYPE;
     if (projectCwd && typeof projectCwd === "string" && projectCwd.trim().length > 0) {
       const cwd = projectCwd.trim();
       if (!existsSync(cwd)) {
@@ -185,12 +187,11 @@ planRouter.post("/api/blueprints", (req, res) => {
         res.status(400).json({ error: `Path is not a directory: ${cwd}` });
         return;
       }
-      if (!existsSync(join(cwd, "CLAUDE.md"))) {
+      if (effectiveAgent === "claude" && !existsSync(join(cwd, "CLAUDE.md"))) {
         res.status(400).json({ error: `No CLAUDE.md found at ${cwd}. A CLAUDE.md file is required to identify a valid Claude Code workspace.` });
         return;
       }
     }
-    const { agentType, enabledRoles, defaultRole, agentParams } = req.body as { agentType?: string; enabledRoles?: string[]; defaultRole?: string; agentParams?: string };
     const blueprint = createBlueprint(title.trim(), description, projectCwd, agentType, enabledRoles, defaultRole, agentParams);
     res.status(201).json(blueprint);
   } catch (err) {
@@ -238,8 +239,8 @@ planRouter.put("/api/blueprints/:id", (req, res) => {
 
     // Validate executionMode if provided
     if (patch.executionMode !== undefined) {
-      if (patch.executionMode !== "manual" && patch.executionMode !== "autopilot") {
-        res.status(400).json({ error: "executionMode must be 'manual' or 'autopilot'" });
+      if (patch.executionMode !== "manual" && patch.executionMode !== "autopilot" && patch.executionMode !== "fsd") {
+        res.status(400).json({ error: "executionMode must be 'manual', 'autopilot', or 'fsd'" });
         return;
       }
     }
@@ -260,12 +261,13 @@ planRouter.put("/api/blueprints/:id", (req, res) => {
       res.status(404).json({ error: "Blueprint not found" });
       return;
     }
+    const isAutopilotMode = (mode: string | undefined) => mode === "autopilot" || mode === "fsd";
     const switchingToAutopilot =
-      patch.executionMode === "autopilot" &&
-      currentBp.executionMode !== "autopilot" &&
+      isAutopilotMode(patch.executionMode as string) &&
+      !isAutopilotMode(currentBp.executionMode) &&
       (currentBp.status === "approved" || currentBp.status === "paused");
 
-    // Clear pause_reason when switching to autopilot
+    // Clear pause_reason when switching to autopilot/fsd
     if (switchingToAutopilot) {
       patch.pauseReason = "";
     }
@@ -1788,7 +1790,7 @@ planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
     }
     // Fire and forget — execution continues in background
     const safeguardGrace = (req.body as { safeguardGrace?: number } | undefined)?.safeguardGrace;
-    if (blueprint.executionMode === "autopilot") {
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       const loopOpts = safeguardGrace ? { safeguardGrace } : undefined;
       enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id, loopOpts)).catch((err) => {
         log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
@@ -2169,7 +2171,7 @@ planRouter.post("/api/plans/:id/run-all", (req, res) => {
       res.status(404).json({ error: "Plan not found" });
       return;
     }
-    if (blueprint.executionMode === "autopilot") {
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
         log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
       });

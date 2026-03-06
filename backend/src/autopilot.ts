@@ -670,6 +670,7 @@ export function buildAutopilotPrompt(
   iteration: number,
   maxIterations: number,
   memory: AutopilotMemory = { blueprint: null, global: null },
+  fsdMode: boolean = false,
 ): string {
   const remaining = maxIterations - iteration;
 
@@ -682,6 +683,40 @@ export function buildAutopilotPrompt(
     memorySections += `\n## Blueprint Memory (your notes from earlier iterations)\n${memory.blueprint}\n`;
   }
 
+  const workflowSection = fsdMode
+    ? `## FSD Mode (Full Speed Drive)
+You are running in FSD mode — no safeguards, no throttling. Execute as fast and efficiently as possible.
+Focus on running nodes to completion. Skip enrichment and coordination overhead unless absolutely necessary.
+Don't hesitate to run nodes back-to-back. Maximize throughput.`
+    : `## Recommended Workflow Rhythm
+Don't just run nodes back-to-back. Follow this quality-aware pattern:
+
+1. **Before running a node**: If its description is short or vague, use enrich_node first to improve the prompt.
+2. **After running a node**: Evaluation runs automatically — you'll see suggestions appear on completed nodes. Review them before moving on.
+3. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
+4. **When suggestions accumulate**: Review them — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
+5. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
+
+A good rhythm: enrich → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.`;
+
+  const guidelinesSection = fsdMode
+    ? `## Guidelines
+- Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
+- If a node failed, try resume with feedback or skip it — don't get stuck on any single node.
+- When all nodes are done, call complete().
+- You have ${remaining} iterations left.`
+    : `## Guidelines
+- Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
+- If a node failed, analyze the error. Consider: resume with feedback, split it, modify its description/prompt, or skip it if non-critical.
+- If a node seems too complex (long description >500 chars, many dependencies), consider split_node first.
+- If a node has been resumed multiple times (check resumeCount), consider splitting or skipping it instead of retrying.
+- When creating nodes from suggestions, set appropriate dependencies and roles.
+- If critical insights exist (severity: "critical"), address them before proceeding with normal execution.
+- If warning insights exist, consider addressing them when convenient but don't block progress.
+- If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason).
+- You have ${remaining} iterations left. Balance quality (coordinate, enrich, suggestion triage) with progress (run_node).
+- When all nodes are done: review any remaining unused suggestions. Use batch_mark_suggestions_used for ones not worth acting on. Use create_node for actionable ones. Then call complete().`;
+
   return `You are the Autopilot agent for a software blueprint. Your goal is to drive this blueprint to completion by choosing the best next action at each step.
 
 ## Current Blueprint State
@@ -692,28 +727,9 @@ ${memorySections}
 ## Available Tools
 ${TOOL_DESCRIPTIONS}
 
-## Recommended Workflow Rhythm
-Don't just run nodes back-to-back. Follow this quality-aware pattern:
+${workflowSection}
 
-1. **Before running a node**: If its description is short or vague, use enrich_node first to improve the prompt.
-2. **After running a node**: Evaluation runs automatically — you'll see suggestions appear on completed nodes. Review them before moving on.
-3. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
-4. **When suggestions accumulate**: Review them — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
-5. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
-
-A good rhythm: enrich → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.
-
-## Guidelines
-- Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
-- If a node failed, analyze the error. Consider: resume with feedback, split it, modify its description/prompt, or skip it if non-critical.
-- If a node seems too complex (long description >500 chars, many dependencies), consider split_node first.
-- If a node has been resumed multiple times (check resumeCount), consider splitting or skipping it instead of retrying.
-- When creating nodes from suggestions, set appropriate dependencies and roles.
-- If critical insights exist (severity: "critical"), address them before proceeding with normal execution.
-- If warning insights exist, consider addressing them when convenient but don't block progress.
-- If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason).
-- You have ${remaining} iterations left. Balance quality (coordinate, enrich, suggestion triage) with progress (run_node).
-- When all nodes are done: review any remaining unused suggestions. Use batch_mark_suggestions_used for ones not worth acting on. Use create_node for actionable ones. Then call complete().
+${guidelinesSection}
 
 ## Decision Format
 Respond with exactly one JSON object:
@@ -1234,7 +1250,8 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
   clearResumeCounts(blueprintId);
   clearSeenSuggestions(blueprintId);
 
-  const maxIterations = blueprint.maxIterations ?? 50;
+  const isFsdAtStart = blueprint.executionMode === "fsd";
+  const maxIterations = blueprint.maxIterations ?? (isFsdAtStart ? 200 : 50);
   let iteration = 0;
 
   // Memory: read existing per-blueprint and global memory at loop start
@@ -1249,7 +1266,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
     graceIterations: options?.safeguardGrace ?? 0,
   };
 
-  log.info(`Autopilot starting for blueprint ${blueprintId.slice(0, 8)} (max ${maxIterations} iterations)`);
+  log.info(`Autopilot starting for blueprint ${blueprintId.slice(0, 8)} (max ${maxIterations} iterations, mode: ${isFsdAtStart ? "fsd" : "autopilot"})`);
 
   try {
     while (iteration < maxIterations) {
@@ -1274,14 +1291,17 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // Check if user switched to manual mode
       const current = getBlueprint(blueprintId);
-      if (!current || current.executionMode !== "autopilot") {
+      const isFsd = current?.executionMode === "fsd";
+      if (!current || (current.executionMode !== "autopilot" && current.executionMode !== "fsd")) {
         logAutopilot(blueprintId, iteration, state.summary, "Mode switched to manual", "paused");
         log.info(`Autopilot stopped for ${blueprintId.slice(0, 8)}: mode switched to manual`);
         break;
       }
 
+      // FSD mode: skip all safeguard checks entirely
       // Safeguard grace period: skip checks when user explicitly resumed from a safeguard pause
       const inGracePeriod = safeguardState.graceIterations > 0;
+      const skipSafeguards = isFsd || inGracePeriod;
       if (inGracePeriod) {
         safeguardState.graceIterations--;
         // Still track state for when grace period ends
@@ -1290,7 +1310,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         safeguardState.noProgressCount = 0;
       }
 
-      if (!inGracePeriod) {
+      if (!skipSafeguards) {
         // Check resume cap safeguard
         const resumeCapReason = checkResumeCapExceeded(blueprintId, state);
         if (resumeCapReason) {
@@ -1323,7 +1343,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       const prompt = buildAutopilotPrompt(state, iteration, maxIterations, {
         blueprint: blueprintMemory,
         global: globalMemory,
-      });
+      }, isFsd);
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);
@@ -1337,8 +1357,8 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       log.info(`Autopilot iteration ${iteration}: ${decision.action} — ${decision.reasoning}`);
 
-      // Check same-action safeguard (also skipped during grace period)
-      if (!inGracePeriod) {
+      // Check same-action safeguard (skipped in FSD mode and during grace period)
+      if (!skipSafeguards) {
         const sameActionReason = checkSameActionRepeat(safeguardState, decision);
         if (sameActionReason) {
           updateBlueprint(blueprintId, {
@@ -1349,8 +1369,8 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
           log.warn(`Autopilot paused: ${sameActionReason}`);
           break;
         }
-      } else {
-        // Still track actions during grace period for post-grace checks
+      } else if (!isFsd) {
+        // Still track actions during grace period for post-grace checks (not needed for FSD)
         checkSameActionRepeat(safeguardState, decision);
       }
 

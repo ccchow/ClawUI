@@ -127,7 +127,7 @@ export function AutopilotLog({ blueprintId, executionMode, blueprintStatus }: Au
   const isLogVisibleRef = useRef(true);
   const prevEntryCountRef = useRef(0);
 
-  const isAutopilotRunning = executionMode === "autopilot" && blueprintStatus === "running";
+  const isAutopilotRunning = (executionMode === "autopilot" || executionMode === "fsd") && blueprintStatus === "running";
 
   const refetchInterval = usePollingInterval(
     useCallback(() => (isAutopilotRunning ? 5000 : false), [isAutopilotRunning]),

@@ -6,6 +6,7 @@ import { type ExecutionMode, updateBlueprint, runAllNodes } from "@/lib/api";
 interface PauseBannerProps {
   blueprintId: string;
   pauseReason: string;
+  executionMode: ExecutionMode | undefined;
   onUpdate: (patch: { executionMode?: ExecutionMode; status?: string }) => void;
   onInvalidate: () => void;
   onBroadcast: (type: string) => void;
@@ -22,6 +23,7 @@ function extractNodeId(reason: string): string | null {
 export function PauseBanner({
   blueprintId,
   pauseReason,
+  executionMode,
   onUpdate,
   onInvalidate,
   onBroadcast,
@@ -30,6 +32,8 @@ export function PauseBanner({
   const [resuming, setResuming] = useState(false);
 
   const relevantNodeId = extractNodeId(pauseReason);
+  const isFsd = executionMode === "fsd";
+  const modeLabel = isFsd ? "FSD" : "Autopilot";
 
   const handleResume = async () => {
     setResuming(true);
@@ -75,7 +79,7 @@ export function PauseBanner({
           <line x1="12" y1="17" x2="12.01" y2="17" />
         </svg>
         <div>
-          <p className="text-sm font-medium text-text-primary">Autopilot Paused</p>
+          <p className="text-sm font-medium text-text-primary">{modeLabel} Paused</p>
           <p className="text-xs text-text-secondary mt-1">{pauseReason}</p>
         </div>
       </div>
@@ -93,7 +97,7 @@ export function PauseBanner({
           disabled={resuming}
           className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green border border-accent-green/30 text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed"
         >
-          {resuming ? "Resuming..." : "Resume Autopilot"}
+          {resuming ? "Resuming..." : `Resume ${modeLabel}`}
         </button>
         <button
           onClick={handleSwitchToManual}

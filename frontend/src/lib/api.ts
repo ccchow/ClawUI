@@ -221,7 +221,7 @@ export function updateAppState(patch: Record<string, unknown>): Promise<void> {
 
 export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
 export type MacroNodeStatus = "pending" | "queued" | "running" | "done" | "failed" | "blocked" | "skipped";
-export type ExecutionMode = "manual" | "autopilot";
+export type ExecutionMode = "manual" | "autopilot" | "fsd";
 
 export interface Artifact {
   id: string;

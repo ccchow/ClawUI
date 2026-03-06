@@ -17,6 +17,7 @@ describe("PauseBanner", () => {
   const defaultProps = {
     blueprintId: "bp-1",
     pauseReason: "Node abc12345 encountered a blocker",
+    executionMode: "autopilot" as const,
     onUpdate: vi.fn(),
     onInvalidate: vi.fn(),
     onBroadcast: vi.fn(),
@@ -157,6 +158,40 @@ describe("PauseBanner", () => {
     const banner = container.firstChild as HTMLElement;
     expect(banner.className).toContain("bg-accent-amber");
     expect(banner.className).toContain("border-accent-amber");
+  });
+
+  describe("FSD mode", () => {
+    it("renders 'FSD Paused' heading when executionMode is fsd", () => {
+      render(<PauseBanner {...defaultProps} executionMode="fsd" />);
+
+      expect(screen.getByText("FSD Paused")).toBeInTheDocument();
+      expect(screen.queryByText("Autopilot Paused")).not.toBeInTheDocument();
+    });
+
+    it("shows 'Resume FSD' button text when in FSD mode", () => {
+      render(<PauseBanner {...defaultProps} executionMode="fsd" />);
+
+      expect(screen.getByText("Resume FSD")).toBeInTheDocument();
+      expect(screen.queryByText("Resume Autopilot")).not.toBeInTheDocument();
+    });
+
+    it("shows 'Resuming...' text while resume is in progress in FSD mode", async () => {
+      let resolveUpdate!: () => void;
+      apiMocks.updateBlueprint.mockImplementationOnce(
+        () => new Promise<object>((res) => { resolveUpdate = () => res({}); }),
+      );
+
+      render(<PauseBanner {...defaultProps} executionMode="fsd" />);
+
+      fireEvent.click(screen.getByText("Resume FSD"));
+
+      expect(screen.getByText("Resuming...")).toBeInTheDocument();
+
+      resolveUpdate();
+      await waitFor(() => {
+        expect(screen.getByText("Resume FSD")).toBeInTheDocument();
+      });
+    });
   });
 
   describe("ARIA accessibility", () => {
