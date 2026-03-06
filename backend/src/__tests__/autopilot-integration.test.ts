@@ -549,7 +549,7 @@ describe("autopilot integration", () => {
   describe("recovery", () => {
     it("resets stuck running blueprint to approved via recoverStaleExecutions", () => {
       const bp = setup("Recovery Test");
-      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
       // Simulate a blueprint stuck in running with no active nodes
       db.updateBlueprint(bp.id, { status: "running" });
@@ -568,7 +568,7 @@ describe("autopilot integration", () => {
       db.updateBlueprint(bp.id, { status: "running" });
 
       // Create a running execution
-      const exec = db.createExecution(nodeA.id, bp.id, "session-xyz", "primary");
+      db.createExecution(nodeA.id, bp.id, "session-xyz", "primary");
 
       db.recoverStaleExecutions();
 
@@ -586,7 +586,7 @@ describe("autopilot integration", () => {
     it("force pauses when same action is repeated 3 times", async () => {
       const bp = setup("Same Action Guard", 10);
       const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
-      const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+      db.createMacroNode(bp.id, { title: "Node B", order: 2 });
 
       // executeNodeDirect does NOT mark as done — simulates stuck node
       mockExecuteNodeDirect.mockImplementation(async () => {});
@@ -657,7 +657,7 @@ describe("autopilot integration", () => {
     it("force pauses when a node is resumed more than 5 times during the loop", async () => {
       const bp = setup("Resume Cap Loop", 20);
       const nodeA = db.createMacroNode(bp.id, { title: "Stubborn Node", order: 1 });
-      const nodeB = db.createMacroNode(bp.id, { title: "Other", order: 2 });
+      db.createMacroNode(bp.id, { title: "Other", order: 2 });
 
       // Node A always fails — resumeNodeSession doesn't mark it done
       mockResumeNodeSession.mockImplementation(async () => {

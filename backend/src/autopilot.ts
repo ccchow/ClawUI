@@ -1233,7 +1233,7 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
 
   // Memory: read existing per-blueprint and global memory at loop start
   let blueprintMemory = getAutopilotMemory(blueprintId);
-  let globalMemory = readGlobalMemory();
+  const globalMemory = readGlobalMemory();
   let lastReflectionIteration = 0;
 
   const safeguardState: LoopSafeguardState = {

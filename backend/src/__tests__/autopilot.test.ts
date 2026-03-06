@@ -118,7 +118,6 @@ import {
   createConveneSession,
   getAutopilotLog,
   setAutopilotMemory,
-  getAutopilotMemory,
 } from "../plan-db.js";
 import type { MacroNodeStatus, Artifact, NodeExecution } from "../plan-db.js";
 import {
