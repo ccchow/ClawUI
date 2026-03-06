@@ -96,23 +96,23 @@ cd ClawUI && npm install && npm run dev
 
 ```
          ┌──────────┐
-    ┌───>│ OBSERVE   │ ── Collect node statuses, insights, suggestions, queue state
+    ┌───>│ OBSERVE  │ ── Collect node statuses, insights, suggestions, queue state
     │    └────┬─────┘
     │         v
     │    ┌──────────┐
-    │    │ REFLECT   │ ── Every N iterations: update per-blueprint + global memory
+    │    │ REFLECT  │ ── Every N iterations: update per-blueprint + global memory
     │    └────┬─────┘
     │         v
     │    ┌──────────┐
-    │    │ DECIDE    │ ── Choose from 19 tools based on state + memory + strategy
+    │    │ DECIDE   │ ── Choose from 19 tools based on state + memory + strategy
     │    └────┬─────┘
     │         v
     │    ┌──────────┐
-    │    │ EXECUTE   │ ── Run the chosen action (execute node, split, enrich, pause...)
+    │    │ EXECUTE  │ ── Run the chosen action (execute node, split, enrich, pause...)
     │    └────┬─────┘
     │         v
     │    ┌──────────┐
-    └────│ EVALUATE  │ ── Check result, update graph, loop or pause
+    └────│ EVALUATE │ ── Check result, update graph, loop or pause
          └──────────┘
 ```
 
