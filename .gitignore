@@ -33,3 +33,5 @@ dashboard-*.png
 # Local environment overrides
 .env.local
 .env.*.local
+.claude.local.md
+.mcp.json

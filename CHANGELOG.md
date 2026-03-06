@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-05
+
+### Added
+
+- **Autopilot mode for blueprints** — Autonomous agent loop that iterates over blueprint nodes, making decisions about which tool to use next (execute, enrich, split, reevaluate, skip, pause, etc.). Configurable via `execution_mode` (manual/autopilot) and `max_iterations` on each blueprint.
+- **Autopilot state snapshot and prompt** — `buildStateSnapshot()` in `backend/src/autopilot.ts` collects node statuses, unused suggestions, undismissed insights, and queue info into a token-efficient prompt for the agent.
+- **19-tool decision palette** — `executeDecision()` maps agent decisions to internal functions: execute_node, skip_node, enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all, add_node, update_node_description, set_node_dependencies, reorder_node, dismiss_insight, pause, mark_done, mark_failed, resume_node, create_insight, triage_suggestion, batch_triage_suggestions.
+- **Infinite-loop safeguards** — Max iteration limit, per-node attempt tracking, idle-iteration detection with auto-pause, JSON parse retry on malformed agent output.
+- **Autopilot memory and reflection** — Per-blueprint `autopilot_memory` column and global memory file. `reflectAndUpdateMemory()` and `globalReflection()` run every N iterations. Tool usage stats (`computeToolUsageStats`) injected into reflection prompt.
+- **Autopilot log** — `autopilot_log` SQLite table with paginated `GET /api/blueprints/:id/autopilot-log` endpoint. Stores iteration number, action, target, reasoning, success flag, and error messages.
+- **AutopilotToggle component** — Pill-shaped toggle in blueprint header with green pulse dot for active state, disabled when blueprint is draft. Loading spinner during mutation.
+- **AutopilotLog component** — Collapsible decision log with 5s polling during active autopilot, descending time order, relative timestamps with absolute tooltip on hover, per-entry and global expand/collapse toggles, duration separators between entries, auto-scroll to newest entry.
+- **PauseBanner component** — Alert banner with `role=alert` and `aria-live=assertive` showing pause reason and resume button.
+- **Mode-aware Run All** — `runAllNodes` checks `execution_mode` and routes to `runAutopilotLoop` for autopilot blueprints.
+- **Startup recovery** — `smartRecoverStaleExecutions` handles autopilot blueprints, pausing with descriptive reason on recovery failure.
+- **ARIA accessibility** — `aria-pressed` on toggle, `aria-expanded`/`aria-label` on log header, `role=alert`/`aria-live=assertive` on pause banner.
+- **`opacity-disabled` semantic token** — New Tailwind token (value 0.4) standardizing all disabled-state opacity.
+- **`plan-operations.ts` extraction** — `enrichNodeInternal`, `reevaluateNodeInternal`, `splitNodeInternal`, `smartDepsInternal`, `reevaluateAllInternal`, and `runWithRelatedSessionDetection` extracted from route handlers for reuse by both `plan-routes.ts` and `autopilot.ts`.
+
+### Fixed
+
+- Hardened `smartRecoverStaleExecutions` error handling for autopilot blueprints.
+- Optimized duplicate `getSuggestionsForNode` calls in `buildStateSnapshot`.
+- Fixed disabled opacity inconsistencies across codebase (standardized to `opacity-disabled` token).
+- Removed dead ternary in Run All button.
+
 ## [0.4.0] - 2026-03-02
 
 ### Added
