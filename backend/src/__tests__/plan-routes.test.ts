@@ -354,6 +354,18 @@ vi.mock("../roles/role-registry.js", () => ({
 
 vi.mock("../roles/load-all-roles.js", () => ({}));
 
+vi.mock("../autopilot.js", () => ({
+  runAutopilotLoop: vi.fn(async () => {}),
+}));
+
+vi.mock("../plan-operations.js", () => ({
+  enrichNodeInternal: vi.fn(async () => {}),
+  reevaluateNodeInternal: vi.fn(async () => {}),
+  splitNodeInternal: vi.fn(async () => {}),
+  smartDepsInternal: vi.fn(async () => {}),
+  reevaluateAllInternal: vi.fn(async () => []),
+}));
+
 vi.mock("../db.js", () => ({
   syncSession: vi.fn(),
 }));
@@ -408,6 +420,7 @@ import {
   executeAllNodes,
   enqueueBlueprintTask,
 } from "../plan-executor.js";
+import { runAutopilotLoop } from "../autopilot.js";
 // getQueueInfo is auto-mocked by vi.mock("../plan-executor.js")
 
 function createApp() {
@@ -2365,6 +2378,225 @@ describe("plan-routes", () => {
       const res = await request(app)
         .post("/api/enrichment-callback/some-id")
         .send({ description: "No title" });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Autopilot mode-switching integration ──────────────────
+
+  describe("PUT /api/blueprints/:id — autopilot mode switching", () => {
+    beforeEach(() => {
+      vi.mocked(updateBlueprint).mockClear();
+      vi.mocked(enqueueBlueprintTask).mockClear();
+      vi.mocked(runAutopilotLoop).mockClear();
+    });
+
+    it("clears pauseReason and enqueues autopilot loop when switching to autopilot on approved blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: undefined,
+        pauseReason: "Some pause reason",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "autopilot" });
+      expect(res.status).toBe(200);
+
+      // pauseReason should be cleared in the update patch
+      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", expect.objectContaining({
+        executionMode: "autopilot",
+        pauseReason: "",
+      }));
+
+      // runAutopilotLoop should be enqueued
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+
+      // Execute the enqueued task to verify it calls runAutopilotLoop
+      const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
+      await enqueueCall[1]();
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("clears pauseReason and enqueues autopilot loop when switching to autopilot on paused blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "paused",
+        executionMode: "manual",
+        pauseReason: "Need human review",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "autopilot" });
+      expect(res.status).toBe(200);
+
+      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", expect.objectContaining({
+        executionMode: "autopilot",
+        pauseReason: "",
+      }));
+      expect(enqueueBlueprintTask).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT enqueue autopilot loop when switching to autopilot on draft blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "draft",
+        executionMode: undefined,
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "autopilot" });
+      expect(res.status).toBe(200);
+
+      // Should NOT enqueue because status is draft (not approved or paused)
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("does NOT enqueue autopilot loop when already in autopilot mode", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "autopilot",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "autopilot" });
+      expect(res.status).toBe(200);
+
+      // Already autopilot → not switching → no enqueue
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("does NOT enqueue autopilot loop when switching to manual", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "autopilot",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "manual" });
+      expect(res.status).toBe(200);
+
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 for invalid executionMode", async () => {
+      const res = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ executionMode: "turbo" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain("executionMode");
+    });
+
+    it("validates maxIterations range", async () => {
+      const res1 = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ maxIterations: 5 });
+      expect(res1.status).toBe(400);
+      expect(res1.body.error).toContain("maxIterations");
+
+      const res2 = await request(app)
+        .put("/api/blueprints/bp-1")
+        .send({ maxIterations: 999 });
+      expect(res2.status).toBe(400);
+    });
+  });
+
+  // ─── run-all mode-aware routing ─────────────────────────────
+
+  describe("POST /api/blueprints/:id/run-all — mode-aware", () => {
+    beforeEach(() => {
+      vi.mocked(executeAllNodes).mockClear();
+      vi.mocked(enqueueBlueprintTask).mockClear();
+      vi.mocked(runAutopilotLoop).mockClear();
+    });
+
+    it("routes to runAutopilotLoop when executionMode is autopilot", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        executionMode: "autopilot",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app).post("/api/blueprints/bp-1/run-all");
+      expect(res.status).toBe(200);
+      expect(res.body.message).toBe("execution started");
+
+      // Should use enqueueBlueprintTask → runAutopilotLoop, NOT executeAllNodes
+      expect(enqueueBlueprintTask).toHaveBeenCalledWith("bp-1", expect.any(Function));
+      expect(executeAllNodes).not.toHaveBeenCalled();
+
+      // Verify the enqueued function calls runAutopilotLoop
+      const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
+      await enqueueCall[1]();
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1");
+    });
+
+    it("routes to executeAllNodes when executionMode is manual/undefined", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "approved",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app).post("/api/blueprints/bp-1/run-all");
+      expect(res.status).toBe(200);
+
+      expect(executeAllNodes).toHaveBeenCalledWith("bp-1");
+      expect(enqueueBlueprintTask).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+
+      const res = await request(app).post("/api/blueprints/missing/run-all");
       expect(res.status).toBe(404);
     });
   });

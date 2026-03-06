@@ -58,14 +58,14 @@ describe("AutopilotToggle", () => {
     expect(dot).toBeInTheDocument();
   });
 
-  it("is disabled (opacity-50) when blueprint status is draft", () => {
+  it("is disabled (opacity-disabled) when blueprint status is draft", () => {
     render(
       <AutopilotToggle {...defaultProps} blueprintStatus="draft" />,
     );
 
     const btn = screen.getByRole("button");
     expect(btn).toBeDisabled();
-    expect(btn.className).toContain("opacity-50");
+    expect(btn.className).toContain("opacity-disabled");
     expect(btn.className).toContain("cursor-not-allowed");
   });
 
@@ -142,6 +142,35 @@ describe("AutopilotToggle", () => {
     });
   });
 
+  it("disables button and shows spinner during toggling", async () => {
+    let resolveApi: () => void;
+    apiMocks.updateBlueprint.mockImplementationOnce(
+      () => new Promise<object>((resolve) => { resolveApi = () => resolve({}); }),
+    );
+    const { container } = render(<AutopilotToggle {...defaultProps} />);
+    const btn = screen.getByRole("button");
+
+    fireEvent.click(btn);
+
+    // Button should be disabled during mutation
+    expect(btn).toBeDisabled();
+    expect(btn.className).toContain("opacity-disabled");
+    // Spinner SVG should be visible
+    const spinner = container.querySelector("svg.animate-spin");
+    expect(spinner).toBeInTheDocument();
+    // Dot should not be visible
+    const dot = container.querySelector(".bg-text-muted");
+    expect(dot).not.toBeInTheDocument();
+
+    // Resolve the API call
+    resolveApi!();
+    await waitFor(() => {
+      expect(btn).not.toBeDisabled();
+    });
+    // Spinner should be gone
+    expect(container.querySelector("svg.animate-spin")).not.toBeInTheDocument();
+  });
+
   it("does not trigger toggle when disabled (draft)", () => {
     render(
       <AutopilotToggle {...defaultProps} blueprintStatus="draft" />,
@@ -161,5 +190,25 @@ describe("AutopilotToggle", () => {
     const btn = screen.getByRole("button");
     expect(btn).toHaveTextContent("Manual");
     expect(btn.className).toContain("bg-bg-tertiary");
+  });
+
+  describe("ARIA accessibility", () => {
+    it("has aria-pressed=false when in manual mode", () => {
+      render(<AutopilotToggle {...defaultProps} />);
+      const btn = screen.getByRole("button");
+      expect(btn).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("has aria-pressed=true when in autopilot mode", () => {
+      render(<AutopilotToggle {...defaultProps} executionMode="autopilot" />);
+      const btn = screen.getByRole("button");
+      expect(btn).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("has aria-pressed=false when executionMode is undefined", () => {
+      render(<AutopilotToggle {...defaultProps} executionMode={undefined} />);
+      const btn = screen.getByRole("button");
+      expect(btn).toHaveAttribute("aria-pressed", "false");
+    });
   });
 });

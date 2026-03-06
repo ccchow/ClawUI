@@ -57,7 +57,7 @@ export function PauseBanner({
   };
 
   return (
-    <div className="bg-accent-amber/10 border border-accent-amber/30 rounded-lg p-4 mb-4">
+    <div role="alert" aria-live="assertive" className="bg-accent-amber/10 border border-accent-amber/30 rounded-lg p-4 mb-4">
       <div className="flex items-start gap-2 mb-3">
         <svg
           className="w-4 h-4 text-accent-amber flex-shrink-0 mt-0.5"
@@ -89,7 +89,7 @@ export function PauseBanner({
         <button
           onClick={handleResume}
           disabled={resuming}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green border border-accent-green/30 text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-green/15 text-accent-green border border-accent-green/30 text-xs font-medium hover:bg-accent-green/25 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed"
         >
           {resuming ? "Resuming..." : "Resume Autopilot"}
         </button>

@@ -1,8 +1,24 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AutopilotLog } from "./AutopilotLog";
 import type { AutopilotLogEntry, BlueprintStatus, ExecutionMode } from "@/lib/api";
+
+// Mock IntersectionObserver (not available in jsdom)
+const mockObserve = vi.fn();
+const mockDisconnect = vi.fn();
+vi.stubGlobal("IntersectionObserver", class {
+  constructor(private cb: IntersectionObserverCallback) {
+    // Immediately report as visible so auto-scroll logic works in tests
+    setTimeout(() => cb([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver), 0);
+  }
+  observe = mockObserve;
+  disconnect = mockDisconnect;
+  unobserve = vi.fn();
+});
+
+// Mock scrollIntoView (not available in jsdom)
+Element.prototype.scrollIntoView = vi.fn();
 
 // Mock API
 const apiMocks = vi.hoisted(() => ({
@@ -75,7 +91,7 @@ describe("AutopilotLog", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders log entries with iteration numbers", async () => {
+  it("renders log entries with relative timestamps instead of iteration numbers", async () => {
     const entries = [
       createEntry({ id: "e1", iteration: 1, action: "run_node", decision: "Starting execution" }),
       createEntry({ id: "e2", iteration: 2, action: "resume_node", decision: "Resuming after pause" }),
@@ -85,9 +101,34 @@ describe("AutopilotLog", () => {
     renderWithQuery();
 
     await waitFor(() => {
-      expect(screen.getByText("#1")).toBeInTheDocument();
+      expect(screen.getByText("run_node")).toBeInTheDocument();
     });
-    expect(screen.getByText("#2")).toBeInTheDocument();
+    // Should show relative time, not #1/#2
+    expect(screen.queryByText("#1")).not.toBeInTheDocument();
+    expect(screen.queryByText("#2")).not.toBeInTheDocument();
+    // Both entries created with Date.now() should show "0s ago"
+    const timeLabels = screen.getAllByText(/ago$/);
+    expect(timeLabels.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("displays entries in descending order (newest first)", async () => {
+    const now = Date.now();
+    const entries = [
+      createEntry({ id: "e1", iteration: 1, action: "first_action", createdAt: new Date(now - 60000).toISOString() }),
+      createEntry({ id: "e2", iteration: 2, action: "second_action", createdAt: new Date(now).toISOString() }),
+    ];
+    apiMocks.fetchAutopilotLog.mockResolvedValue(entries);
+
+    renderWithQuery();
+
+    await waitFor(() => {
+      expect(screen.getByText("first_action")).toBeInTheDocument();
+    });
+
+    const actions = screen.getAllByText(/action$/);
+    // Newest (second_action) should appear before oldest (first_action)
+    expect(actions[0].textContent).toBe("second_action");
+    expect(actions[1].textContent).toBe("first_action");
   });
 
   it("displays action text for each entry", async () => {
@@ -323,6 +364,352 @@ describe("AutopilotLog", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Autopilot Log")).toBeInTheDocument();
+    });
+  });
+
+  describe("per-entry expand/collapse", () => {
+    // jsdom has no layout — mock scrollHeight > clientHeight to simulate overflow
+    beforeEach(() => {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get() { return 100; },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get() { return 20; },
+      });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get() { return 0; },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get() { return 0; },
+      });
+    });
+
+    it("does not show 'Show more' when text does not overflow", async () => {
+      // Temporarily restore no-overflow (scrollHeight === clientHeight)
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get() { return 20; },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get() { return 20; },
+      });
+
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node", decision: "Short" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("run_node")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText("Show more")).not.toBeInTheDocument();
+    });
+
+    it("shows 'Show more' button when decision text overflows", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node", decision: "Some long decision text" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Show more")).toBeInTheDocument();
+      });
+    });
+
+    it("toggles entry between expanded and collapsed on 'Show more'/'Show less' click", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node", decision: "Some decision" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Show more")).toBeInTheDocument();
+      });
+
+      // Expand
+      fireEvent.click(screen.getByText("Show more"));
+      expect(screen.getByText("Show less")).toBeInTheDocument();
+
+      // Collapse
+      fireEvent.click(screen.getByText("Show less"));
+      expect(screen.getByText("Show more")).toBeInTheDocument();
+    });
+
+    it("sets aria-expanded on per-entry toggle button", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node", decision: "Some decision" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Show more")).toBeInTheDocument();
+      });
+
+      const btn = screen.getByText("Show more");
+      expect(btn).toHaveAttribute("aria-expanded", "false");
+
+      fireEvent.click(btn);
+      expect(screen.getByText("Show less")).toHaveAttribute("aria-expanded", "true");
+    });
+  });
+
+  describe("expand-all / collapse-all", () => {
+    // jsdom has no layout — mock overflow for tests that need Show more/less
+    beforeEach(() => {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get() { return 100; },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get() { return 20; },
+      });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+        configurable: true,
+        get() { return 0; },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+        configurable: true,
+        get() { return 0; },
+      });
+    });
+
+    it("does not show 'Expand all' button when only one entry", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Autopilot Log")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText("Expand all")).not.toBeInTheDocument();
+    });
+
+    it("shows 'Expand all' button when multiple entries exist", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1" }),
+        createEntry({ id: "e2" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Expand all")).toBeInTheDocument();
+      });
+    });
+
+    it("expands all entries on 'Expand all' click, then collapses on 'Collapse all'", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", decision: "Decision 1" }),
+        createEntry({ id: "e2", decision: "Decision 2" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Expand all")).toBeInTheDocument();
+      });
+
+      // All entries should show "Show more" initially (overflow is mocked)
+      const showMoreButtons = screen.getAllByText("Show more");
+      expect(showMoreButtons).toHaveLength(2);
+
+      // Expand all
+      fireEvent.click(screen.getByText("Expand all"));
+
+      // All should now show "Show less"
+      const showLessButtons = screen.getAllByText("Show less");
+      expect(showLessButtons).toHaveLength(2);
+      expect(screen.getByText("Collapse all")).toBeInTheDocument();
+
+      // Collapse all
+      fireEvent.click(screen.getByText("Collapse all"));
+
+      // All should show "Show more" again
+      expect(screen.getAllByText("Show more")).toHaveLength(2);
+      expect(screen.getByText("Expand all")).toBeInTheDocument();
+    });
+
+    it("switches to 'Collapse all' when all entries are individually expanded", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", decision: "d1" }),
+        createEntry({ id: "e2", decision: "d2" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Expand all")).toBeInTheDocument();
+      });
+
+      // Expand each entry individually
+      const showMoreButtons = screen.getAllByText("Show more");
+      fireEvent.click(showMoreButtons[0]);
+      fireEvent.click(showMoreButtons[1]);
+
+      // Should now show "Collapse all"
+      expect(screen.getByText("Collapse all")).toBeInTheDocument();
+    });
+  });
+
+  describe("duration between consecutive entries", () => {
+    it("shows duration separator between entries spaced >= 1 second apart", async () => {
+      const now = Date.now();
+      const entries = [
+        createEntry({ id: "e1", action: "second_action", createdAt: new Date(now).toISOString() }),
+        createEntry({ id: "e2", action: "first_action", createdAt: new Date(now - 95000).toISOString() }),
+      ];
+      apiMocks.fetchAutopilotLog.mockResolvedValue(entries);
+
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("second_action")).toBeInTheDocument();
+      });
+
+      // 95 seconds = 1m 35s
+      expect(screen.getByText("1m 35s")).toBeInTheDocument();
+    });
+
+    it("does not show duration when gap is less than 1 second", async () => {
+      const now = Date.now();
+      const entries = [
+        createEntry({ id: "e1", action: "action_a", createdAt: new Date(now).toISOString() }),
+        createEntry({ id: "e2", action: "action_b", createdAt: new Date(now - 500).toISOString() }),
+      ];
+      apiMocks.fetchAutopilotLog.mockResolvedValue(entries);
+
+      const { container } = renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("action_a")).toBeInTheDocument();
+      });
+
+      // No duration separator lines should be rendered
+      const separators = container.querySelectorAll(".border-border-primary\\/50");
+      expect(separators).toHaveLength(0);
+    });
+
+    it("formats hours correctly", async () => {
+      const now = Date.now();
+      const entries = [
+        createEntry({ id: "e1", action: "late_action", createdAt: new Date(now).toISOString() }),
+        createEntry({ id: "e2", action: "early_action", createdAt: new Date(now - 3720000).toISOString() }),
+      ];
+      apiMocks.fetchAutopilotLog.mockResolvedValue(entries);
+
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("late_action")).toBeInTheDocument();
+      });
+
+      // 3720000ms = 1h 2m
+      expect(screen.getByText("1h 2m")).toBeInTheDocument();
+    });
+
+    it("does not show duration after the last entry", async () => {
+      const now = Date.now();
+      const entries = [
+        createEntry({ id: "e1", action: "only_action", createdAt: new Date(now).toISOString() }),
+      ];
+      apiMocks.fetchAutopilotLog.mockResolvedValue(entries);
+
+      const { container } = renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("only_action")).toBeInTheDocument();
+      });
+
+      // No duration separator for a single entry
+      const durationSeparators = container.querySelectorAll(".border-border-primary\\/50");
+      expect(durationSeparators).toHaveLength(0);
+    });
+  });
+
+  it("shows absolute timestamp tooltip on relative time labels", async () => {
+    const fixedDate = "2026-03-05T14:32:07.000Z";
+    apiMocks.fetchAutopilotLog.mockResolvedValue([
+      createEntry({ id: "e1", action: "run_node", createdAt: fixedDate }),
+    ]);
+
+    renderWithQuery();
+
+    await waitFor(() => {
+      expect(screen.getByText("run_node")).toBeInTheDocument();
+    });
+
+    const timeLabel = screen.getAllByText(/ago$/)[0];
+    // title should contain the formatted absolute timestamp (local time)
+    const title = timeLabel.getAttribute("title");
+    expect(title).toBeTruthy();
+    expect(title).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  describe("ARIA accessibility", () => {
+    it("has aria-expanded=true on header button when open (default)", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([createEntry({ id: "e1" })]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("Autopilot Log")).toBeInTheDocument();
+      });
+
+      const btn = screen.getByRole("button", { name: /collapse autopilot log/i });
+      expect(btn).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("has aria-expanded=false on header button after collapsing", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("run_node")).toBeInTheDocument();
+      });
+
+      // Collapse
+      fireEvent.click(screen.getByText("Autopilot Log"));
+
+      const btn = screen.getByRole("button", { name: /expand autopilot log/i });
+      expect(btn).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("updates aria-label when toggling between expanded/collapsed", async () => {
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        createEntry({ id: "e1", action: "run_node" }),
+      ]);
+      renderWithQuery();
+
+      await waitFor(() => {
+        expect(screen.getByText("run_node")).toBeInTheDocument();
+      });
+
+      // Initially expanded
+      let btn = screen.getByRole("button", { name: /collapse autopilot log/i });
+      expect(btn).toBeInTheDocument();
+
+      // Collapse
+      fireEvent.click(btn);
+      btn = screen.getByRole("button", { name: /expand autopilot log/i });
+      expect(btn).toBeInTheDocument();
+
+      // Expand again
+      fireEvent.click(btn);
+      btn = screen.getByRole("button", { name: /collapse autopilot log/i });
+      expect(btn).toBeInTheDocument();
     });
   });
 });

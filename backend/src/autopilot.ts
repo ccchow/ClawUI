@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import {
   getBlueprint,
   getSuggestionsForNode,
@@ -11,7 +13,11 @@ import {
   dismissInsight,
   markSuggestionUsed,
   getExecutionsForNode,
+  getAutopilotLog,
+  setAutopilotMemory,
+  getAutopilotMemory,
 } from "./plan-db.js";
+import { CLAWUI_DB_DIR } from "./config.js";
 import type {
   BlueprintStatus,
   MacroNodeStatus,
@@ -51,6 +57,300 @@ import "./agent-codex.js";
 import "./roles/load-all-roles.js";
 
 const log = createLogger("autopilot");
+
+// ─── Autopilot Memory Constants ──────────────────────────────
+
+export const GLOBAL_MEMORY_PATH = path.join(CLAWUI_DB_DIR, "autopilot-strategy.md");
+export const BLUEPRINT_MEMORY_MAX_CHARS = 2000;
+export const GLOBAL_MEMORY_MAX_CHARS = 3000;
+export const REFLECT_EVERY_N = 5;
+
+// ─── Global Memory File Helpers ──────────────────────────────
+
+export function readGlobalMemory(): string | null {
+  if (!existsSync(GLOBAL_MEMORY_PATH)) return null;
+  return readFileSync(GLOBAL_MEMORY_PATH, "utf-8");
+}
+
+export function writeGlobalMemory(content: string): void {
+  const dir = path.dirname(GLOBAL_MEMORY_PATH);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(GLOBAL_MEMORY_PATH, content, "utf-8");
+}
+
+// ─── Tool Usage Stats ────────────────────────────────────────
+
+/** All known autopilot tool names (derived from TOOL_DESCRIPTIONS). */
+const ALL_TOOL_NAMES = [
+  "run_node", "resume_node", "evaluate_node", "reevaluate_node",
+  "enrich_node", "split_node", "smart_dependencies",
+  "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
+  "coordinate", "convene", "reevaluate_all",
+  "mark_insight_read", "dismiss_insight", "mark_suggestion_used",
+  "batch_mark_suggestions_used", "batch_dismiss_insights",
+  "pause", "complete",
+];
+
+export interface ToolUsageStats {
+  totalIterations: number;
+  actionCounts: Record<string, number>;
+  successRate: Record<string, number>;
+  neverUsedTools: string[];
+  consecutiveRunNodeCount: number;
+  averageIterationsBetweenNonRunActions: number;
+}
+
+/**
+ * Compute tool usage statistics from the autopilot_log table.
+ * Pure SQL computation — no LLM call needed.
+ */
+export function computeToolUsageStats(
+  blueprintId: string,
+  sinceIteration?: number,
+): ToolUsageStats {
+  const db = getDb();
+
+  // Total iterations
+  const iterationFilter = sinceIteration != null ? " AND iteration >= ?" : "";
+  const iterationParams: unknown[] = sinceIteration != null
+    ? [blueprintId, sinceIteration]
+    : [blueprintId];
+
+  const totalRow = db.prepare(
+    `SELECT COUNT(*) as cnt FROM autopilot_log WHERE blueprint_id = ?${iterationFilter}`,
+  ).get(...iterationParams) as { cnt: number } | undefined;
+  const totalIterations = totalRow?.cnt ?? 0;
+
+  // Action counts and success counts
+  const rows = db.prepare(
+    `SELECT action, COUNT(*) as cnt, SUM(CASE WHEN result NOT LIKE 'ERROR%' THEN 1 ELSE 0 END) as success_cnt
+     FROM autopilot_log WHERE blueprint_id = ?${iterationFilter}
+     GROUP BY action`,
+  ).all(...iterationParams) as Array<{ action: string; cnt: number; success_cnt: number }>;
+
+  const actionCounts: Record<string, number> = {};
+  const successRate: Record<string, number> = {};
+  const usedActions = new Set<string>();
+
+  for (const row of rows) {
+    actionCounts[row.action] = row.cnt;
+    successRate[row.action] = row.cnt > 0 ? row.success_cnt / row.cnt : 0;
+    usedActions.add(row.action);
+  }
+
+  // Never-used tools
+  const neverUsedTools = ALL_TOOL_NAMES.filter((t) => !usedActions.has(t));
+
+  // Consecutive run_node count at the end of the log
+  const recentActions = db.prepare(
+    `SELECT action FROM autopilot_log WHERE blueprint_id = ?${iterationFilter}
+     ORDER BY iteration DESC, created_at DESC`,
+  ).all(...iterationParams) as Array<{ action: string }>;
+
+  let consecutiveRunNodeCount = 0;
+  for (const row of recentActions) {
+    if (row.action === "run_node") {
+      consecutiveRunNodeCount++;
+    } else {
+      break;
+    }
+  }
+
+  // Average iterations between non-run_node actions
+  const allActions = db.prepare(
+    `SELECT action, iteration FROM autopilot_log WHERE blueprint_id = ?${iterationFilter}
+     ORDER BY iteration ASC, created_at ASC`,
+  ).all(...iterationParams) as Array<{ action: string; iteration: number }>;
+
+  let lastNonRunIteration: number | null = null;
+  const gaps: number[] = [];
+  for (const row of allActions) {
+    if (row.action !== "run_node") {
+      if (lastNonRunIteration !== null) {
+        gaps.push(row.iteration - lastNonRunIteration);
+      }
+      lastNonRunIteration = row.iteration;
+    }
+  }
+  const averageIterationsBetweenNonRunActions =
+    gaps.length > 0 ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+
+  return {
+    totalIterations,
+    actionCounts,
+    successRate,
+    neverUsedTools,
+    consecutiveRunNodeCount,
+    averageIterationsBetweenNonRunActions,
+  };
+}
+
+// ─── Reflection Functions ───────────────────────────────────
+
+/**
+ * Per-blueprint reflection: analyze recent actions and update memory.
+ * Non-fatal — on failure, logs warning and returns currentMemory unchanged.
+ */
+export async function reflectAndUpdateMemory(
+  blueprintId: string,
+  sinceIteration: number,
+  currentIteration: number,
+  currentMemory: string | null,
+): Promise<string | null> {
+  try {
+    // Fetch recent log entries since last reflection
+    const allLog = getAutopilotLog(blueprintId, 1000, 0);
+    const recentLog = allLog.filter((e) => e.iteration > sinceIteration && e.iteration <= currentIteration);
+
+    // Compute all-time tool stats
+    const toolStats = computeToolUsageStats(blueprintId);
+
+    // Build blueprint summary
+    const blueprint = getBlueprint(blueprintId);
+    const blueprintSummary = blueprint
+      ? `Title: ${blueprint.title}\nDescription: ${blueprint.description}\nStatus: ${blueprint.status}\nNodes: ${blueprint.nodes.length} total (${blueprint.nodes.filter((n) => n.status === "done").length} done, ${blueprint.nodes.filter((n) => n.status === "failed").length} failed, ${blueprint.nodes.filter((n) => n.status === "skipped").length} skipped, ${blueprint.nodes.filter((n) => n.status === "pending").length} pending, ${blueprint.nodes.filter((n) => n.status === "running").length} running)`
+      : `Blueprint ${blueprintId}`;
+
+    // Format recent log as table
+    let recentLogTable = "| Iter | Action | Result |\n|------|--------|--------|\n";
+    for (const entry of recentLog) {
+      const result = entry.result ? entry.result.slice(0, 80) : "—";
+      recentLogTable += `| ${entry.iteration} | ${entry.action} | ${result} |\n`;
+    }
+    if (recentLog.length === 0) {
+      recentLogTable += "| (no actions since last reflection) | | |\n";
+    }
+
+    // Format tool stats
+    const statsLines: string[] = [];
+    for (const [action, count] of Object.entries(toolStats.actionCounts)) {
+      const rate = toolStats.successRate[action];
+      statsLines.push(`- ${action}: ${count} uses, ${(rate * 100).toFixed(0)}% success`);
+    }
+    const toolStatsText = statsLines.length > 0 ? statsLines.join("\n") : "(no actions recorded yet)";
+
+    // Build reflection prompt per spec section 5.4
+    const prompt = `You are reflecting on an autopilot run to update its memory.
+
+## Blueprint Context
+${blueprintSummary}
+
+## Recent Actions (since last reflection)
+${recentLogTable}
+
+## Tool Usage Statistics (all-time for this blueprint)
+Total iterations: ${toolStats.totalIterations}
+Consecutive run_node at end: ${toolStats.consecutiveRunNodeCount}
+Avg iterations between non-run_node actions: ${toolStats.averageIterationsBetweenNonRunActions.toFixed(1)}
+${toolStatsText}
+
+## Tools Never Used
+${toolStats.neverUsedTools.length > 0 ? toolStats.neverUsedTools.join(", ") : "(all tools have been used)"} -- Consider whether any of these could improve outcomes.
+
+## Current Memory
+${currentMemory || "(empty -- first reflection)"}
+
+## Instructions
+Update the memory based on what you've observed. The memory will be injected
+into future autopilot decision prompts, so write actionable guidance.
+
+Rules:
+- Keep total length under 2000 characters.
+- Structure as: Strategy, Tool Effectiveness, Patterns Learned, Avoid.
+- UPDATE existing entries rather than appending -- memory should stay concise.
+- Remove advice that turned out wrong or is no longer relevant.
+- Focus on actionable, specific guidance -- not generic platitudes.
+- If a tool was never used but could help, note when to use it.
+- If a tool was used but ineffective, note when to avoid it.
+
+Respond with ONLY the updated memory markdown. No preamble, no explanation.`;
+
+    const runtime = getActiveRuntime();
+    let updatedMemory = await runtime.runSession(prompt, blueprint?.projectCwd);
+
+    // Truncate if exceeded
+    if (updatedMemory.length > BLUEPRINT_MEMORY_MAX_CHARS) {
+      updatedMemory = updatedMemory.slice(0, BLUEPRINT_MEMORY_MAX_CHARS);
+    }
+
+    // Save to DB
+    setAutopilotMemory(blueprintId, updatedMemory);
+    return updatedMemory;
+  } catch (err) {
+    log.warn("Reflection LLM call failed, keeping existing memory: %s", err);
+    return currentMemory;
+  }
+}
+
+/**
+ * Global reflection: distill cross-blueprint learnings at blueprint completion.
+ * Non-fatal — on failure, logs warning and continues.
+ */
+export async function updateGlobalMemory(
+  blueprintId: string,
+  blueprintMemory: string | null,
+  currentGlobalMemory: string | null,
+): Promise<void> {
+  try {
+    const blueprint = getBlueprint(blueprintId);
+    if (!blueprint) {
+      log.warn("Cannot update global memory: blueprint %s not found", blueprintId);
+      return;
+    }
+
+    // Build outcome summary
+    const doneNodes = blueprint.nodes.filter((n) => n.status === "done").length;
+    const failedNodes = blueprint.nodes.filter((n) => n.status === "failed").length;
+    const skippedNodes = blueprint.nodes.filter((n) => n.status === "skipped").length;
+    const totalNodes = blueprint.nodes.length;
+    const outcome = blueprint.status === "done" ? "done" : "paused";
+
+    // Get iteration count from log
+    const logEntries = getAutopilotLog(blueprintId, 1, 0);
+    const iterations = logEntries.length > 0 ? logEntries[0].iteration : 0;
+
+    // Build global reflection prompt per spec section 5.5
+    const prompt = `You are updating the global autopilot strategy based on a completed blueprint run.
+
+## Completed Blueprint
+Title: ${blueprint.title}
+Outcome: ${outcome} after ${iterations} iterations
+Nodes: ${doneNodes}/${totalNodes} completed, ${failedNodes} failed, ${skippedNodes} skipped
+
+## Per-Blueprint Memory (learnings from this run)
+${blueprintMemory || "(no per-blueprint memory)"}
+
+## Current Global Strategy
+${currentGlobalMemory || "(empty -- first blueprint completion)"}
+
+## Instructions
+Distill cross-blueprint learnings into the global strategy.
+This will be shown to autopilot on ALL future blueprints.
+
+Rules:
+- Keep total length under 3000 characters.
+- Only add patterns that are likely generalizable (not blueprint-specific).
+- Update/refine existing entries based on new evidence.
+- Remove advice contradicted by this run's experience.
+- Structure as: General Patterns, Tool Usage Guidelines, Anti-Patterns.
+
+Respond with ONLY the updated global strategy markdown.`;
+
+    const runtime = getActiveRuntime();
+    let updatedGlobal = await runtime.runSession(prompt, blueprint.projectCwd);
+
+    // Truncate if exceeded
+    if (updatedGlobal.length > GLOBAL_MEMORY_MAX_CHARS) {
+      updatedGlobal = updatedGlobal.slice(0, GLOBAL_MEMORY_MAX_CHARS);
+    }
+
+    writeGlobalMemory(updatedGlobal);
+  } catch (err) {
+    log.warn("Global reflection LLM call failed, continuing: %s", err);
+  }
+}
 
 // ─── State Snapshot Types (spec §4.4) ────────────────────────
 
@@ -352,6 +652,13 @@ const TOOL_DESCRIPTIONS = `### Node Execution
 - **pause(reason)** — Pause autopilot and request human input. Use when you encounter ambiguous requirements, architectural decisions, or external dependencies that need human judgment.
 - **complete()** — Signal that the blueprint is done. Only use when all nodes are done/skipped.`;
 
+// ─── Autopilot Memory for Prompt Injection ───────────────────
+
+export interface AutopilotMemory {
+  blueprint: string | null;
+  global: string | null;
+}
+
 // ─── Autopilot Prompt Builder (spec §4.5) ────────────────────
 
 /**
@@ -362,8 +669,18 @@ export function buildAutopilotPrompt(
   state: AutopilotState,
   iteration: number,
   maxIterations: number,
+  memory: AutopilotMemory = { blueprint: null, global: null },
 ): string {
   const remaining = maxIterations - iteration;
+
+  // Build memory sections to inject between state and tools
+  let memorySections = "";
+  if (memory.global) {
+    memorySections += `\n## Global Strategy (from previous blueprints)\n${memory.global}\n`;
+  }
+  if (memory.blueprint) {
+    memorySections += `\n## Blueprint Memory (your notes from earlier iterations)\n${memory.blueprint}\n`;
+  }
 
   return `You are the Autopilot agent for a software blueprint. Your goal is to drive this blueprint to completion by choosing the best next action at each step.
 
@@ -371,7 +688,7 @@ export function buildAutopilotPrompt(
 ${JSON.stringify(state, null, 2)}
 
 ## Iteration ${iteration} of ${maxIterations}
-
+${memorySections}
 ## Available Tools
 ${TOOL_DESCRIPTIONS}
 
@@ -914,6 +1231,11 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
   const maxIterations = blueprint.maxIterations ?? 50;
   let iteration = 0;
 
+  // Memory: read existing per-blueprint and global memory at loop start
+  let blueprintMemory = getAutopilotMemory(blueprintId);
+  let globalMemory = readGlobalMemory();
+  let lastReflectionIteration = 0;
+
   const safeguardState: LoopSafeguardState = {
     recentActions: [],
     lastNodeStatuses: new Map(),
@@ -979,7 +1301,10 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
       markSuggestionsSeen(blueprintId, unusedSuggestionIds);
 
       // 3. DECIDE — Ask AI what to do next
-      const prompt = buildAutopilotPrompt(state, iteration, maxIterations);
+      const prompt = buildAutopilotPrompt(state, iteration, maxIterations, {
+        blueprint: blueprintMemory,
+        global: globalMemory,
+      });
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);
@@ -1011,6 +1336,22 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
       // 5. LOG
       logAutopilot(blueprintId, iteration, state.summary, decision, result);
 
+      // 5b. REFLECT — Check if reflection should trigger
+      const iterationsSinceReflection = iteration - lastReflectionIteration;
+      const shouldReflect =
+        iterationsSinceReflection >= REFLECT_EVERY_N ||
+        decision.action === "pause" ||
+        (!result.success && result.error);
+      if (shouldReflect) {
+        blueprintMemory = await reflectAndUpdateMemory(
+          blueprintId,
+          lastReflectionIteration,
+          iteration,
+          blueprintMemory,
+        );
+        lastReflectionIteration = iteration;
+      }
+
       // 6. Handle pause/complete decisions
       if (decision.action === "pause") {
         // Already handled by executeDecision — just break
@@ -1022,6 +1363,24 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
         break;
       }
 
+    }
+
+    // Final reflection: always run at loop exit
+    blueprintMemory = await reflectAndUpdateMemory(
+      blueprintId,
+      lastReflectionIteration,
+      iteration,
+      blueprintMemory,
+    );
+
+    // Global memory update: if all nodes done or blueprint completed
+    const finalBlueprint = getBlueprint(blueprintId);
+    if (
+      finalBlueprint &&
+      (finalBlueprint.status === "done" ||
+        finalBlueprint.nodes.every((n) => n.status === "done" || n.status === "skipped"))
+    ) {
+      await updateGlobalMemory(blueprintId, blueprintMemory, readGlobalMemory());
     }
 
     // Safety: max iterations reached

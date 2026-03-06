@@ -535,6 +535,12 @@ export function initPlanTables(): void {
     db.exec("ALTER TABLE blueprints ADD COLUMN pause_reason TEXT DEFAULT NULL");
   }
 
+  // Incremental migration: add autopilot_memory column to blueprints
+  const bpCols7 = db.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+  if (!bpCols7.some((c) => c.name === "autopilot_memory")) {
+    db.exec("ALTER TABLE blueprints ADD COLUMN autopilot_memory TEXT");
+  }
+
   // Incremental migration: create autopilot_log table if not exists
   const autopilotLogTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='autopilot_log'").all();
   if (autopilotLogTables.length === 0) {
@@ -2083,4 +2089,19 @@ export function getConveneSessionCount(blueprintId: string): number {
     "SELECT COUNT(*) as cnt FROM convene_sessions WHERE blueprint_id = ? AND status != 'cancelled'",
   ).get(blueprintId) as { cnt: number };
   return row.cnt;
+}
+
+// ─── Autopilot Memory ────────────────────────────────────────
+
+export function getAutopilotMemory(blueprintId: string): string | null {
+  const db = getDb();
+  const row = db.prepare("SELECT autopilot_memory FROM blueprints WHERE id = ?").get(blueprintId) as
+    | { autopilot_memory: string | null }
+    | undefined;
+  return row?.autopilot_memory ?? null;
+}
+
+export function setAutopilotMemory(blueprintId: string, memory: string | null): void {
+  const db = getDb();
+  db.prepare("UPDATE blueprints SET autopilot_memory = ? WHERE id = ?").run(memory, blueprintId);
 }

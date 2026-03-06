@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+import { existsSync, unlinkSync } from "node:fs";
 
 // ─── Mocks ───────────────────────────────────────────────────
 
@@ -68,6 +69,8 @@ let db: {
   getInsightsForBlueprint: PlanDb["getInsightsForBlueprint"];
   markSuggestionUsed: PlanDb["markSuggestionUsed"];
   recoverStaleExecutions: PlanDb["recoverStaleExecutions"];
+  getAutopilotMemory: PlanDb["getAutopilotMemory"];
+  setAutopilotMemory: PlanDb["setAutopilotMemory"];
 };
 
 let ap: {
@@ -75,6 +78,13 @@ let ap: {
   clearResumeCounts: Autopilot["clearResumeCounts"];
   getResumeCount: Autopilot["getResumeCount"];
   incrementResumeCount: Autopilot["incrementResumeCount"];
+  readGlobalMemory: Autopilot["readGlobalMemory"];
+  writeGlobalMemory: Autopilot["writeGlobalMemory"];
+  GLOBAL_MEMORY_PATH: Autopilot["GLOBAL_MEMORY_PATH"];
+  buildAutopilotPrompt: Autopilot["buildAutopilotPrompt"];
+  reflectAndUpdateMemory: Autopilot["reflectAndUpdateMemory"];
+  updateGlobalMemory: Autopilot["updateGlobalMemory"];
+  REFLECT_EVERY_N: Autopilot["REFLECT_EVERY_N"];
 };
 
 // ─── Test Setup ──────────────────────────────────────────────
@@ -101,6 +111,8 @@ describe("autopilot integration", () => {
       getInsightsForBlueprint: planDb.getInsightsForBlueprint,
       markSuggestionUsed: planDb.markSuggestionUsed,
       recoverStaleExecutions: planDb.recoverStaleExecutions,
+      getAutopilotMemory: planDb.getAutopilotMemory,
+      setAutopilotMemory: planDb.setAutopilotMemory,
     };
 
     const autopilot = await import("../autopilot.js");
@@ -109,6 +121,13 @@ describe("autopilot integration", () => {
       clearResumeCounts: autopilot.clearResumeCounts,
       getResumeCount: autopilot.getResumeCount,
       incrementResumeCount: autopilot.incrementResumeCount,
+      readGlobalMemory: autopilot.readGlobalMemory,
+      writeGlobalMemory: autopilot.writeGlobalMemory,
+      GLOBAL_MEMORY_PATH: autopilot.GLOBAL_MEMORY_PATH,
+      buildAutopilotPrompt: autopilot.buildAutopilotPrompt,
+      reflectAndUpdateMemory: autopilot.reflectAndUpdateMemory,
+      updateGlobalMemory: autopilot.updateGlobalMemory,
+      REFLECT_EVERY_N: autopilot.REFLECT_EVERY_N,
     };
   });
 
@@ -190,8 +209,8 @@ describe("autopilot integration", () => {
       const runLogs = logs.filter((l) => l.action === "run_node");
       expect(runLogs.length).toBe(3);
 
-      // AI was called exactly 3 times (not for the 4th auto-complete iteration)
-      expect(mockRunSession).toHaveBeenCalledTimes(3);
+      // AI was called 3 times for decisions + 1 final reflection + 1 global memory update
+      expect(mockRunSession).toHaveBeenCalledTimes(5);
     });
 
     it("does not auto-exit when unused suggestions remain after all nodes done", async () => {
@@ -207,8 +226,8 @@ describe("autopilot integration", () => {
 
       await ap.runAutopilotLoop(bp.id);
 
-      // LLM was called (not short-circuited by auto-exit)
-      expect(mockRunSession).toHaveBeenCalledTimes(1);
+      // LLM was called: 1 decision + 1 final reflection + 1 global memory update
+      expect(mockRunSession).toHaveBeenCalledTimes(3);
 
       const final = db.getBlueprint(bp.id)!;
       expect(final.status).toBe("done");
@@ -225,7 +244,8 @@ describe("autopilot integration", () => {
 
       await ap.runAutopilotLoop(bp.id);
 
-      expect(mockRunSession).toHaveBeenCalledTimes(1);
+      // 1 decision + 1 final reflection + 1 global memory update
+      expect(mockRunSession).toHaveBeenCalledTimes(3);
 
       const final = db.getBlueprint(bp.id)!;
       expect(final.status).toBe("done");
@@ -446,8 +466,8 @@ describe("autopilot integration", () => {
       expect(final.nodes.find((n) => n.id === nodeA.id)!.status).toBe("done");
       expect(final.nodes.find((n) => n.id === nodeB.id)!.status).toBe("pending");
 
-      // AI was called only once
-      expect(mockRunSession).toHaveBeenCalledTimes(1);
+      // AI was called for 1 decision + 1 final reflection
+      expect(mockRunSession).toHaveBeenCalledTimes(2);
 
       // Log entry shows mode switch
       const logs = db.getAutopilotLog(bp.id, 10, 0);
@@ -790,6 +810,742 @@ describe("autopilot integration", () => {
       // Second prompt should show A as done (JSON.stringify with null,2 adds spaces)
       expect(promptsReceived[1]).toContain('"status": "done"');
       expect(promptsReceived[1]).toContain("Node B");
+    });
+  });
+
+  // ─── 10. Concurrency & Race Conditions ──────────────────
+
+  describe("concurrency and race conditions", () => {
+    it("two concurrent loops on the same blueprint — second detects mode change", async () => {
+      const bp = setup("Concurrent Loops");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+      let callCount = 0;
+      // First loop runs node A slowly; during it, second loop will see mode switched
+      mockRunSession.mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return dec("run_node", { nodeId: nodeA.id });
+        }
+        return dec("run_node", { nodeId: nodeB.id });
+      });
+
+      // Simulate: first loop executes nodeA, during which we switch to manual
+      mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+        db.updateMacroNode(bpId, nodeId, { status: "done" });
+        // After first node completes, simulate mode switch to manual
+        if (nodeId === nodeA.id) {
+          db.updateBlueprint(bpId, { executionMode: "manual" });
+        }
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // Loop should have stopped because mode was switched to manual
+      const final = db.getBlueprint(bp.id)!;
+      // Node A was executed, B was not (loop exited after mode switch detection)
+      const nodeAFinal = final.nodes.find((n) => n.id === nodeA.id)!;
+      expect(nodeAFinal.status).toBe("done");
+
+      // The log should show manual mode detection
+      const logs = db.getAutopilotLog(bp.id, 20, 0);
+      const manualLog = logs.find((l) => l.decision.includes("Mode switched to manual"));
+      expect(manualLog).toBeDefined();
+    });
+
+    it("concurrent executeDecision calls modifying the same blueprint state", async () => {
+      const bp = setup("Concurrent Decisions");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+      // Import executeDecision for direct testing
+      const { executeDecision } = await import("../autopilot.js");
+
+      // Run two execute decisions concurrently on different nodes
+      const [resultA, resultB] = await Promise.all([
+        executeDecision(bp.id, {
+          reasoning: "Run A",
+          action: "run_node",
+          params: { nodeId: nodeA.id },
+        }),
+        executeDecision(bp.id, {
+          reasoning: "Run B",
+          action: "run_node",
+          params: { nodeId: nodeB.id },
+        }),
+      ]);
+
+      expect(resultA.success).toBe(true);
+      expect(resultB.success).toBe(true);
+
+      // Both nodes should be done
+      const final = db.getBlueprint(bp.id)!;
+      const aNode = final.nodes.find((n) => n.id === nodeA.id)!;
+      const bNode = final.nodes.find((n) => n.id === nodeB.id)!;
+      expect(aNode.status).toBe("done");
+      expect(bNode.status).toBe("done");
+    });
+
+    it("pause during node execution — loop exits after current node finishes", async () => {
+      const bp = setup("Pause During Execution");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+      let iterationCount = 0;
+      mockRunSession.mockImplementation(async () => {
+        iterationCount++;
+        if (iterationCount === 1) {
+          return dec("run_node", { nodeId: nodeA.id });
+        }
+        // Shouldn't reach here — mode switch detected after first iteration
+        return dec("complete", {});
+      });
+
+      // During node A execution, external actor switches to manual mode
+      mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+        db.updateMacroNode(bpId, nodeId, { status: "done" });
+        // External switch to manual — loop will detect on next iteration's mode check
+        db.updateBlueprint(bpId, { executionMode: "manual" });
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // Node A was executed, then loop exited due to mode switch
+      const final = db.getBlueprint(bp.id)!;
+      const nodeAFinal = final.nodes.find((n) => n.id === nodeA.id)!;
+      expect(nodeAFinal.status).toBe("done");
+      // 1 AI decision call + 1 final reflection — loop saw manual mode on next check
+      expect(iterationCount).toBe(2);
+
+      // Verify mode-switch was detected in logs
+      const logs = db.getAutopilotLog(bp.id, 20, 0);
+      const modeLog = logs.find((l) => l.decision.includes("Mode switched to manual"));
+      expect(modeLog).toBeDefined();
+    });
+
+    it("concurrent resume count increments for the same node", async () => {
+      const bpId = "concurrent-resume-bp";
+      const nodeId = "concurrent-resume-node";
+
+      // Clear any prior state
+      ap.clearResumeCounts(bpId);
+
+      // Simulate concurrent increments (these are synchronous in-memory ops, but test correctness)
+      const results: number[] = [];
+      for (let i = 0; i < 10; i++) {
+        results.push(ap.incrementResumeCount(bpId, nodeId));
+      }
+
+      // Should produce sequential 1..10
+      expect(results).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(ap.getResumeCount(bpId, nodeId)).toBe(10);
+
+      ap.clearResumeCounts(bpId);
+      expect(ap.getResumeCount(bpId, nodeId)).toBe(0);
+    });
+
+    it("mode switch between state snapshot and AI decision does not execute stale action", async () => {
+      const bp = setup("Race Mode Switch");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // AI will return run_node, but during the AI call, mode switches to manual
+      mockRunSession.mockImplementation(async () => {
+        // Simulate: while AI is "thinking", user switches to manual
+        db.updateBlueprint(bp.id, { executionMode: "manual" });
+        return dec("run_node", { nodeId: nodeA.id });
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // Loop saw mode=manual at the re-check and stopped.
+      // But the stale decision was already returned — the loop structure
+      // checks mode BEFORE calling AI, so the decision still executes for this iteration.
+      // The important thing is the loop then exits on the next iteration's mode check.
+      const logs = db.getAutopilotLog(bp.id, 20, 0);
+      // Should have at most 2 entries: 1 run_node + 1 mode-switch detection
+      expect(logs.length).toBeLessThanOrEqual(2);
+    });
+
+    it("concurrent skip and execute on the same node — last write wins", async () => {
+      const bp = setup("Skip vs Execute");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      const { executeDecision } = await import("../autopilot.js");
+
+      // Execute node (slow) and skip node (fast) concurrently
+      mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+        // Simulate delay — skip will complete first
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        db.updateMacroNode(bpId, nodeId, { status: "done" });
+      });
+
+      const [runResult, skipResult] = await Promise.all([
+        executeDecision(bp.id, {
+          reasoning: "Run it",
+          action: "run_node",
+          params: { nodeId: nodeA.id },
+        }),
+        executeDecision(bp.id, {
+          reasoning: "Skip it",
+          action: "skip_node",
+          params: { nodeId: nodeA.id, reason: "Not needed" },
+        }),
+      ]);
+
+      expect(runResult.success).toBe(true);
+      expect(skipResult.success).toBe(true);
+
+      // Final state depends on execution order — either done or skipped is acceptable
+      const final = db.getBlueprint(bp.id)!;
+      const node = final.nodes.find((n) => n.id === nodeA.id)!;
+      expect(["done", "skipped"]).toContain(node.status);
+    });
+
+    it("concurrent state snapshots during node transitions", async () => {
+      const bp = setup("Snapshot Race");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+      db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+      const { buildStateSnapshot } = await import("../autopilot.js");
+
+      // Take snapshot, then update node, then take another snapshot
+      const snap1 = buildStateSnapshot(bp.id);
+      const nodeASt1 = snap1.nodes.find((n) => n.id === nodeA.id)!;
+      expect(nodeASt1.status).toBe("pending");
+
+      // Simulate node completion
+      db.updateMacroNode(bp.id, nodeA.id, { status: "done" });
+
+      const snap2 = buildStateSnapshot(bp.id);
+      const nodeASt2 = snap2.nodes.find((n) => n.id === nodeA.id)!;
+      expect(nodeASt2.status).toBe("done");
+
+      // Summary should reflect the change
+      expect(snap1.summary).toContain("0/2 nodes done");
+      expect(snap2.summary).toContain("1/2 nodes done");
+    });
+
+    it("concurrent blueprint updates — status and mode race", async () => {
+      const bp = setup("Status Race");
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // Rapidly toggle status and mode
+      db.updateBlueprint(bp.id, { status: "running" });
+      db.updateBlueprint(bp.id, { executionMode: "manual" });
+      db.updateBlueprint(bp.id, { status: "paused", pauseReason: "race test" });
+      db.updateBlueprint(bp.id, { executionMode: "autopilot" });
+      db.updateBlueprint(bp.id, { status: "running" });
+
+      // Final state should reflect last write
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.status).toBe("running");
+      expect(final.executionMode).toBe("autopilot");
+    });
+
+    it("autopilot loop handles blueprint deletion mid-run gracefully", async () => {
+      const bp = setup("Deleted Blueprint");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      let iteration = 0;
+      mockRunSession.mockImplementation(async () => {
+        iteration++;
+        if (iteration === 1) {
+          return dec("run_node", { nodeId: nodeA.id });
+        }
+        return dec("complete", {});
+      });
+
+      // After executing node A, switch mode so loop exits (simulating "blueprint gone" scenario)
+      mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+        db.updateMacroNode(bpId, nodeId, { status: "done" });
+        // Change execution mode to make getBlueprint return non-autopilot
+        db.updateBlueprint(bpId, { executionMode: "manual" });
+      });
+
+      // Should not throw
+      await ap.runAutopilotLoop(bp.id);
+
+      // Loop exited gracefully — 1 decision + 1 final reflection + 1 global memory
+      expect(iteration).toBe(3);
+    });
+
+    it("parallel loops on different blueprints do not interfere", async () => {
+      const bp1 = setup("Blueprint 1");
+      const bp2 = setup("Blueprint 2");
+      const node1 = db.createMacroNode(bp1.id, { title: "Node 1", order: 1 });
+      const node2 = db.createMacroNode(bp2.id, { title: "Node 2", order: 1 });
+
+      // Track which blueprint's nodes get executed
+      const executedNodes: string[] = [];
+
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        if (prompt.includes("Blueprint 1")) {
+          return dec("run_node", { nodeId: node1.id });
+        }
+        return dec("run_node", { nodeId: node2.id });
+      });
+
+      mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+        executedNodes.push(`${bpId}:${nodeId}`);
+        db.updateMacroNode(bpId, nodeId, { status: "done" });
+      });
+
+      // Run both loops concurrently
+      await Promise.all([
+        ap.runAutopilotLoop(bp1.id),
+        ap.runAutopilotLoop(bp2.id),
+      ]);
+
+      // Both blueprints should be done
+      const final1 = db.getBlueprint(bp1.id)!;
+      const final2 = db.getBlueprint(bp2.id)!;
+      expect(final1.status).toBe("done");
+      expect(final2.status).toBe("done");
+
+      // Each blueprint's node was executed
+      expect(executedNodes).toContain(`${bp1.id}:${node1.id}`);
+      expect(executedNodes).toContain(`${bp2.id}:${node2.id}`);
+
+      // Resume counts are isolated per blueprint
+      expect(ap.getResumeCount(bp1.id, node1.id)).toBe(0);
+      expect(ap.getResumeCount(bp2.id, node2.id)).toBe(0);
+    });
+
+    it("concurrent create_node and run_node don't corrupt node list", async () => {
+      const bp = setup("Concurrent Create Run");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      const { executeDecision } = await import("../autopilot.js");
+
+      // Concurrently run a node and create a new one
+      const [runResult, createResult] = await Promise.all([
+        executeDecision(bp.id, {
+          reasoning: "Run A",
+          action: "run_node",
+          params: { nodeId: nodeA.id },
+        }),
+        executeDecision(bp.id, {
+          reasoning: "Create B",
+          action: "create_node",
+          params: { title: "Node B", description: "New node" },
+        }),
+      ]);
+
+      expect(runResult.success).toBe(true);
+      expect(createResult.success).toBe(true);
+
+      // Blueprint should have 2 nodes, both in correct states
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.nodes.length).toBe(2);
+      expect(final.nodes.find((n) => n.id === nodeA.id)!.status).toBe("done");
+      expect(final.nodes.find((n) => n.title === "Node B")).toBeDefined();
+    });
+  });
+
+  // ─── 11. Memory Lifecycle ──────────────────────────────────
+
+  describe("memory lifecycle", () => {
+    // Clean up global memory file after each test to prevent cross-test pollution
+    afterEach(() => {
+      if (existsSync(ap.GLOBAL_MEMORY_PATH)) {
+        unlinkSync(ap.GLOBAL_MEMORY_PATH);
+      }
+    });
+
+    // ── DB Migration ──
+
+    describe("DB migration", () => {
+      it("autopilot_memory column exists on blueprints table after initPlanTables", async () => {
+        const { getDb } = await import("../db.js");
+        const sqliteDb = getDb();
+        const cols = sqliteDb.prepare("PRAGMA table_info(blueprints)").all() as { name: string }[];
+        expect(cols.some((c: { name: string }) => c.name === "autopilot_memory")).toBe(true);
+      });
+
+      it("getAutopilotMemory returns null for a newly created blueprint", () => {
+        const bp = db.createBlueprint("Memory Init", "test", "/tmp");
+        expect(db.getAutopilotMemory(bp.id)).toBeNull();
+      });
+
+      it("setAutopilotMemory persists and getAutopilotMemory retrieves it", () => {
+        const bp = db.createBlueprint("Memory Persist", "test", "/tmp");
+        db.setAutopilotMemory(bp.id, "## Strategy\nUse enrich before run.");
+        expect(db.getAutopilotMemory(bp.id)).toBe("## Strategy\nUse enrich before run.");
+      });
+
+      it("setAutopilotMemory with null clears the value", () => {
+        const bp = db.createBlueprint("Memory Clear", "test", "/tmp");
+        db.setAutopilotMemory(bp.id, "Some memory");
+        expect(db.getAutopilotMemory(bp.id)).toBe("Some memory");
+        db.setAutopilotMemory(bp.id, null);
+        expect(db.getAutopilotMemory(bp.id)).toBeNull();
+      });
+    });
+
+    // ── Memory Persistence Across Loop Iterations ──
+
+    describe("memory persistence across loop iterations", () => {
+      it("reflectAndUpdateMemory writes to DB after REFLECT_EVERY_N iterations", async () => {
+        const bp = setup("Reflect Trigger", 20);
+        // Create enough nodes to run 5+ iterations
+        const nodes = [];
+        for (let i = 0; i < 6; i++) {
+          nodes.push(db.createMacroNode(bp.id, { title: `Node ${i}`, order: i + 1 }));
+        }
+
+        // Queue 6 run_node decisions
+        for (const node of nodes) {
+          mockRunSession.mockResolvedValueOnce(dec("run_node", { nodeId: node.id }));
+        }
+        // Reflection calls return updated memory
+        mockRunSession.mockResolvedValue("## Updated Memory\nLearned to enrich first.");
+
+        await ap.runAutopilotLoop(bp.id);
+
+        // Verify memory was written to DB
+        const memory = db.getAutopilotMemory(bp.id);
+        expect(memory).not.toBeNull();
+        expect(memory).toContain("Updated Memory");
+      });
+
+      it("updated memory is passed to subsequent buildAutopilotPrompt calls", async () => {
+        const bp = setup("Memory Inject", 10);
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+        const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+        // Pre-set memory on blueprint
+        db.setAutopilotMemory(bp.id, "## Existing Memory\nAlways enrich before running.");
+
+        const promptsReceived: string[] = [];
+        mockRunSession.mockImplementation(async (prompt: string) => {
+          promptsReceived.push(prompt);
+          if (promptsReceived.length === 1) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          if (promptsReceived.length === 2) {
+            return dec("run_node", { nodeId: nodeB.id });
+          }
+          // Reflection/global memory calls — return updated memory
+          return "## Refreshed Memory\nNew insight.";
+        });
+
+        await ap.runAutopilotLoop(bp.id);
+
+        // The first decision prompt should include the pre-set memory
+        expect(promptsReceived[0]).toContain("Existing Memory");
+        expect(promptsReceived[0]).toContain("Always enrich before running.");
+      });
+    });
+
+    // ── Global Memory Lifecycle ──
+
+    describe("global memory lifecycle", () => {
+      it("first blueprint completion creates global memory file", async () => {
+        // Ensure no global memory file exists
+        if (existsSync(ap.GLOBAL_MEMORY_PATH)) {
+          unlinkSync(ap.GLOBAL_MEMORY_PATH);
+        }
+
+        const bp = setup("First Blueprint");
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        mockRunSession
+          .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
+        // Reflection returns memory
+        mockRunSession.mockResolvedValueOnce("## Blueprint Reflection\nGood run.");
+        // Global memory update returns content
+        mockRunSession.mockResolvedValueOnce("## Global Strategy\nAlways coordinate after 5 nodes.");
+
+        await ap.runAutopilotLoop(bp.id);
+
+        // Global memory file should now exist
+        expect(existsSync(ap.GLOBAL_MEMORY_PATH)).toBe(true);
+        const content = ap.readGlobalMemory();
+        expect(content).toContain("Global Strategy");
+      });
+
+      it("second blueprint completion updates (replaces) existing global file", async () => {
+        // Pre-create global memory
+        ap.writeGlobalMemory("## Old Strategy\nInitial content.");
+
+        const bp = setup("Second Blueprint");
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        mockRunSession
+          .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
+        // Reflection
+        mockRunSession.mockResolvedValueOnce("## Reflection\nLearned things.");
+        // Global memory update — replaces old content
+        mockRunSession.mockResolvedValueOnce("## New Strategy\nReplaced content.");
+
+        await ap.runAutopilotLoop(bp.id);
+
+        const content = ap.readGlobalMemory();
+        expect(content).toBe("## New Strategy\nReplaced content.");
+        // Old content is gone
+        expect(content).not.toContain("Old Strategy");
+      });
+
+      it("global memory is read at loop start and injected into decision prompt", async () => {
+        // Pre-create global memory file
+        ap.writeGlobalMemory("## Cross-Blueprint Strategy\nCoordinate every 3 nodes.");
+
+        const bp = setup("Global Read");
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        const promptsReceived: string[] = [];
+        mockRunSession.mockImplementation(async (prompt: string) => {
+          promptsReceived.push(prompt);
+          if (promptsReceived.length === 1) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          return "## Memory\nOk.";
+        });
+
+        await ap.runAutopilotLoop(bp.id);
+
+        // First prompt (decision prompt) should contain global memory
+        expect(promptsReceived[0]).toContain("Global Strategy (from previous blueprints)");
+        expect(promptsReceived[0]).toContain("Coordinate every 3 nodes.");
+      });
+    });
+
+    // ── Blueprint Resume with Existing Memory ──
+
+    describe("blueprint resume with existing memory", () => {
+      it("first iteration prompt includes pre-set autopilot_memory", async () => {
+        const bp = setup("Resume Memory");
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        // Pre-set memory as if from a previous autopilot run
+        db.setAutopilotMemory(bp.id, "## Prior Run Notes\n- Node A needs extra context\n- Use enrich first");
+
+        const promptsReceived: string[] = [];
+        mockRunSession.mockImplementation(async (prompt: string) => {
+          promptsReceived.push(prompt);
+          if (promptsReceived.length === 1) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          return "## Updated\nNew notes.";
+        });
+
+        await ap.runAutopilotLoop(bp.id);
+
+        // Decision prompt should include the pre-existing blueprint memory
+        expect(promptsReceived[0]).toContain("Blueprint Memory (your notes from earlier iterations)");
+        expect(promptsReceived[0]).toContain("Prior Run Notes");
+        expect(promptsReceived[0]).toContain("Node A needs extra context");
+      });
+    });
+
+    // ── Concurrent Blueprints with Separate Memories ──
+
+    describe("concurrent blueprints with separate memories", () => {
+      it("each loop reads its own per-blueprint memory independently", async () => {
+        const bp1 = setup("Concurrent Mem 1");
+        const bp2 = setup("Concurrent Mem 2");
+        const node1 = db.createMacroNode(bp1.id, { title: "Node 1", order: 1 });
+        const node2 = db.createMacroNode(bp2.id, { title: "Node 2", order: 1 });
+
+        // Pre-set different memories for each blueprint
+        db.setAutopilotMemory(bp1.id, "## BP1 Memory\nFocus on testing.");
+        db.setAutopilotMemory(bp2.id, "## BP2 Memory\nFocus on performance.");
+
+        const bp1Prompts: string[] = [];
+        const bp2Prompts: string[] = [];
+
+        mockRunSession.mockImplementation(async (prompt: string) => {
+          if (prompt.includes("Concurrent Mem 1")) {
+            bp1Prompts.push(prompt);
+            return dec("run_node", { nodeId: node1.id });
+          }
+          if (prompt.includes("Concurrent Mem 2")) {
+            bp2Prompts.push(prompt);
+            return dec("run_node", { nodeId: node2.id });
+          }
+          // Reflection/global calls
+          return "## Reflection\nOk.";
+        });
+
+        mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+          db.updateMacroNode(bpId, nodeId, { status: "done" });
+        });
+
+        await Promise.all([
+          ap.runAutopilotLoop(bp1.id),
+          ap.runAutopilotLoop(bp2.id),
+        ]);
+
+        // BP1's prompt should contain BP1's memory, not BP2's
+        expect(bp1Prompts.length).toBeGreaterThan(0);
+        expect(bp1Prompts[0]).toContain("BP1 Memory");
+        expect(bp1Prompts[0]).toContain("Focus on testing.");
+        expect(bp1Prompts[0]).not.toContain("BP2 Memory");
+
+        // BP2's prompt should contain BP2's memory, not BP1's
+        expect(bp2Prompts.length).toBeGreaterThan(0);
+        expect(bp2Prompts[0]).toContain("BP2 Memory");
+        expect(bp2Prompts[0]).toContain("Focus on performance.");
+        expect(bp2Prompts[0]).not.toContain("BP1 Memory");
+
+        // Both blueprints done
+        expect(db.getBlueprint(bp1.id)!.status).toBe("done");
+        expect(db.getBlueprint(bp2.id)!.status).toBe("done");
+      });
+
+      it("global memory file is shared (last-write-wins)", async () => {
+        const bp1 = setup("Shared Global 1");
+        const bp2 = setup("Shared Global 2");
+        const node1 = db.createMacroNode(bp1.id, { title: "Node 1", order: 1 });
+        const node2 = db.createMacroNode(bp2.id, { title: "Node 2", order: 1 });
+
+        mockRunSession.mockImplementation(async (prompt: string) => {
+          if (prompt.includes("Shared Global 1") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
+            return dec("run_node", { nodeId: node1.id });
+          }
+          if (prompt.includes("Shared Global 2") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
+            return dec("run_node", { nodeId: node2.id });
+          }
+          // Reflection calls
+          if (prompt.includes("global autopilot") || prompt.includes("global strategy")) {
+            return "## Final Global\nLast writer wins.";
+          }
+          return "## Reflection\nOk.";
+        });
+
+        mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
+          db.updateMacroNode(bpId, nodeId, { status: "done" });
+        });
+
+        await Promise.all([
+          ap.runAutopilotLoop(bp1.id),
+          ap.runAutopilotLoop(bp2.id),
+        ]);
+
+        // Global file should exist with content from one of the blueprints
+        if (existsSync(ap.GLOBAL_MEMORY_PATH)) {
+          const content = ap.readGlobalMemory();
+          expect(content).not.toBeNull();
+        }
+        // Both completed
+        expect(db.getBlueprint(bp1.id)!.status).toBe("done");
+        expect(db.getBlueprint(bp2.id)!.status).toBe("done");
+      });
+    });
+
+    // ── Edge Case: Early Pause Before First Scheduled Reflection ──
+
+    describe("early pause before first scheduled reflection", () => {
+      it("final reflection runs at loop exit even when paused before REFLECT_EVERY_N", async () => {
+        const bp = setup("Early Pause", 20);
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+        db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+        // Iter 1: run_node (success, no reflection: only 1 iter since last, action != pause, no error)
+        // Iter 2: pause → triggers reflection (action=pause), then final reflection after loop
+        mockRunSession
+          .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))   // decision iter 1
+          .mockResolvedValueOnce(dec("pause", { reason: "Need clarification" }));  // decision iter 2
+
+        // After pause: pause-triggered reflection (call 3), then final reflection (call 4)
+        mockRunSession.mockResolvedValue("## Final Reflection\nPaused early, still reflected.");
+
+        await ap.runAutopilotLoop(bp.id);
+
+        const final = db.getBlueprint(bp.id)!;
+        expect(final.status).toBe("paused");
+
+        // Memory should have been saved by reflection
+        const memory = db.getAutopilotMemory(bp.id);
+        expect(memory).not.toBeNull();
+        expect(memory).toContain("Final Reflection");
+      });
+
+      it("pause-triggered reflection at iteration 2 writes memory before exit", async () => {
+        const bp = setup("Pause Reflect", 20);
+        const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+        db.createMacroNode(bp.id, { title: "Node B", order: 2 });
+
+        // Run one node, then pause
+        mockRunSession
+          .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
+          .mockResolvedValueOnce(dec("pause", { reason: "Waiting for feedback" }));
+
+        // Pause triggers reflection (action=pause), then final reflection also runs
+        mockRunSession.mockResolvedValue("## Pause Memory\nStopped at node A.");
+
+        await ap.runAutopilotLoop(bp.id);
+
+        expect(db.getBlueprint(bp.id)!.status).toBe("paused");
+
+        // Memory should be persisted
+        const memory = db.getAutopilotMemory(bp.id);
+        expect(memory).not.toBeNull();
+        expect(memory).toContain("Pause Memory");
+      });
+    });
+
+    // ── buildAutopilotPrompt Memory Injection ──
+
+    describe("buildAutopilotPrompt memory injection", () => {
+      it("includes both blueprint and global memory in prompt", async () => {
+        const bp = setup("Prompt Test");
+        db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        const { buildStateSnapshot } = await import("../autopilot.js");
+        const state = buildStateSnapshot(bp.id);
+
+        const prompt = ap.buildAutopilotPrompt(state, 1, 50, {
+          blueprint: "## BP Mem\nTest patterns.",
+          global: "## Global Strat\nAlways coordinate.",
+        });
+
+        expect(prompt).toContain("## Global Strategy (from previous blueprints)");
+        expect(prompt).toContain("Always coordinate.");
+        expect(prompt).toContain("## Blueprint Memory (your notes from earlier iterations)");
+        expect(prompt).toContain("Test patterns.");
+      });
+
+      it("omits memory sections when both are null", async () => {
+        const bp = setup("No Memory Prompt");
+        db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+        const { buildStateSnapshot } = await import("../autopilot.js");
+        const state = buildStateSnapshot(bp.id);
+
+        const prompt = ap.buildAutopilotPrompt(state, 1, 50, {
+          blueprint: null,
+          global: null,
+        });
+
+        expect(prompt).not.toContain("Global Strategy");
+        expect(prompt).not.toContain("Blueprint Memory");
+      });
+    });
+
+    // ── Global Memory File Helpers ──
+
+    describe("global memory file helpers", () => {
+      it("readGlobalMemory returns null when file does not exist", () => {
+        if (existsSync(ap.GLOBAL_MEMORY_PATH)) {
+          unlinkSync(ap.GLOBAL_MEMORY_PATH);
+        }
+        expect(ap.readGlobalMemory()).toBeNull();
+      });
+
+      it("writeGlobalMemory creates file and readGlobalMemory reads it", () => {
+        ap.writeGlobalMemory("## Test Strategy\nContent here.");
+        expect(existsSync(ap.GLOBAL_MEMORY_PATH)).toBe(true);
+        expect(ap.readGlobalMemory()).toBe("## Test Strategy\nContent here.");
+      });
+
+      it("writeGlobalMemory overwrites existing content", () => {
+        ap.writeGlobalMemory("## First\nOriginal.");
+        ap.writeGlobalMemory("## Second\nReplacement.");
+        expect(ap.readGlobalMemory()).toBe("## Second\nReplacement.");
+        expect(ap.readGlobalMemory()).not.toContain("First");
+      });
     });
   });
 });

@@ -5,6 +5,9 @@ const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      opacity: {
+        disabled: "0.4",
+      },
       colors: {
         bg: {
           primary: "rgb(var(--bg-primary) / <alpha-value>)",

@@ -93,7 +93,8 @@ Full lists: [`docs/CODING-GOTCHAS.md`](docs/CODING-GOTCHAS.md), [`docs/TESTING-G
 - **CLI output echo**: Claude CLI echoes the full prompt. Use depth-counting brace extraction.
 - **In-memory queue vs SQLite**: `workspaceQueues`/`workspacePendingTasks` are in-memory only.
 - **Autopilot runs inside workspace queue**: `runAutopilotLoop` is wrapped in `enqueueBlueprintTask` at call sites. Inside the loop, use `executeNodeDirect` (not `executeNode`) to avoid nested enqueue deadlock. `resumeNodeSession()` requires an `executionId` — look up latest execution with a session via `getExecutionsForNode()`.
-- **BlueprintStatus vs MacroNodeStatus naming**: `BlueprintStatus` uses `"draft"/"approved"`, `MacroNodeStatus` uses `"pending"`.
+- **BlueprintStatus vs MacroNodeStatus naming**: `BlueprintStatus` uses `"draft"/"approved"`, `MacroNodeStatus` uses `"pending"/"queued"/"running"/"done"/"failed"/"blocked"/"skipped"` (notably `"running"` not `"in_progress"`).
+- **AI operations in plan-operations.ts**: `enrichNodeInternal`, `reevaluateNodeInternal`, `splitNodeInternal`, `smartDepsInternal`, `reevaluateAllInternal` are extracted from route handlers. Both `plan-routes.ts` and `autopilot.ts` call these directly. `runWithRelatedSessionDetection` helper also lives here.
 - **Circular dependency: autopilot ↔ plan-executor**: `autopilot.ts` imports from `plan-executor.ts`. If `plan-executor.ts` needs to call autopilot (e.g. recovery), use dynamic `import("./autopilot.js")` to avoid circular import.
 
 ## Environment Variables

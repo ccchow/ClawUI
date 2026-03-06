@@ -472,7 +472,7 @@ export function MacroNodeCard({
                   disabled={!!blueprintBusy}
                   title={blueprintBusy ? busyTip : "Edit node"}
                   aria-label="Edit node"
-                  className="p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
+                  className="p-1.5 rounded-md text-text-muted hover:text-accent-blue hover:bg-accent-blue/10 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm1.414 1.06a.25.25 0 0 0-.354 0L3.463 11.098a.25.25 0 0 0-.064.108l-.631 2.208 2.208-.63a.25.25 0 0 0 .108-.064l8.609-8.61a.25.25 0 0 0 0-.353l-1.086-1.086-.18.18Z" />
@@ -484,7 +484,7 @@ export function MacroNodeCard({
                     disabled={skipping || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
                     title={blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot skip while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot skip while AI re-evaluation is in progress" : skipping ? "Updating node status..." : node.status === "skipped" ? "Unskip node" : "Skip node"}
                     aria-label={node.status === "skipped" ? "Unskip node" : "Skip node"}
-                    className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
+                    className="p-1.5 rounded-md text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed hidden sm:block"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                       <path d="M4.5 2a.5.5 0 0 1 .5.5v11a.5.5 0 0 1-1 0v-11a.5.5 0 0 1 .5-.5Zm7.5.5a.5.5 0 0 0-.83-.38l-5 4.5a.5.5 0 0 0 0 .74l5 4.5A.5.5 0 0 0 12 11.5v-9Z" transform="scale(-1,1) translate(-16,0)" />
@@ -496,7 +496,7 @@ export function MacroNodeCard({
                   disabled={enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
                   title={blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot delete while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot delete while AI re-evaluation is in progress" : "Delete node"}
                   aria-label="Delete node"
-                  className="p-1.5 rounded-md text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:block"
+                  className="p-1.5 rounded-md text-text-muted hover:text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed hidden sm:block"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M6.5 1.75a.25.25 0 0 1 .25-.25h2.5a.25.25 0 0 1 .25.25V3h-3V1.75ZM11 3V1.75A1.75 1.75 0 0 0 9.25 0h-2.5A1.75 1.75 0 0 0 5 1.75V3H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 14h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11Zm-5.47 1.5.7 7h-1.46l-.7-7h1.46Zm2.97 7V4.5h-1v7h1Zm2.97 0-.7-7h1.46l.7 7h-1.46Z" />
@@ -511,7 +511,7 @@ export function MacroNodeCard({
                 disabled={reevaluating || reevaluateQueued || !!blueprintBusy}
                 title={reevaluateQueued ? "AI re-evaluation queued, waiting..." : reevaluating ? "AI is re-evaluating this node..." : blueprintBusy ? busyTip : "AI reads your codebase and updates this node's title, description, and status"}
                 aria-label={reevaluateQueued ? "Re-evaluation queued" : reevaluating ? "Re-evaluating node" : "Re-evaluate node with AI"}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-50 hidden sm:inline-flex"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-text-muted hover:text-accent-amber hover:bg-accent-amber/10 text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-disabled hidden sm:inline-flex"
               >
                 {reevaluating || reevaluateQueued ? (
                   <><AISparkle size="xs" /> Re-eval</>
@@ -545,26 +545,26 @@ export function MacroNodeCard({
                   <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-lg border border-border-primary bg-bg-secondary shadow-lg py-1" onClick={(e) => e.stopPropagation()}>
                     {canManage && (
                       <>
-                        <button onClick={(e) => { handleEditStart(e); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
+                        <button onClick={(e) => { handleEditStart(e); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-disabled">
                           Edit
                         </button>
                         {(node.status === "pending" || node.status === "skipped") && (
-                          <button onClick={(e) => { handleSkip(e); setMobileMenuOpen(false); }} disabled={skipping || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-50">
+                          <button onClick={(e) => { handleSkip(e); setMobileMenuOpen(false); }} disabled={skipping || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-text-secondary hover:bg-bg-tertiary transition-colors disabled:opacity-disabled">
                             {node.status === "skipped" ? "Unskip" : "Skip"}
                           </button>
                         )}
-                        <button onClick={(e) => { handleDeleteClick(e); setMobileMenuOpen(false); }} disabled={enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-50">
+                        <button onClick={(e) => { handleDeleteClick(e); setMobileMenuOpen(false); }} disabled={enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-red hover:bg-accent-red/10 transition-colors disabled:opacity-disabled">
                           Delete
                         </button>
                       </>
                     )}
                     {node.status !== "running" && node.status !== "queued" && (
-                      <button onClick={(e) => { handleReevaluate(e); setMobileMenuOpen(false); }} disabled={reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
+                      <button onClick={(e) => { handleReevaluate(e); setMobileMenuOpen(false); }} disabled={reevaluating || reevaluateQueued || !!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-disabled">
                         {reevaluating || reevaluateQueued ? "Re-evaluating..." : "Re-evaluate"}
                       </button>
                     )}
                     {canResetToPending && (
-                      <button onClick={(e) => { e.stopPropagation(); setShowResetConfirm(true); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-50">
+                      <button onClick={(e) => { e.stopPropagation(); setShowResetConfirm(true); setMobileMenuOpen(false); }} disabled={!!blueprintBusy} className="w-full text-left px-3 py-2 text-xs text-accent-amber hover:bg-accent-amber/10 transition-colors disabled:opacity-disabled">
                         Reset to Pending
                       </button>
                     )}
@@ -621,7 +621,7 @@ export function MacroNodeCard({
                   disabled={running || enriching || enrichQueued || reevaluating || reevaluateQueued || !!blueprintBusy}
                   aria-label={running ? "AI is running this node" : "Run node"}
                   title={running ? "AI is executing this node in an agent session..." : blueprintBusy ? busyTip : enriching || enrichQueued ? "Cannot run while AI enrichment is in progress" : reevaluating || reevaluateQueued ? "Cannot run while AI re-evaluation is in progress" : hasRunningNodes ? "Queues for execution after current node finishes" : "Execute this node using the selected agent"}
-                  className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1"
+                  className="px-2 sm:px-2.5 py-2 sm:py-1 rounded-lg bg-accent-green/20 text-accent-green text-xs font-medium hover:bg-accent-green/30 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed flex items-center gap-1"
                 >
                   {running ? (
                     <>
@@ -674,7 +674,7 @@ export function MacroNodeCard({
                   disabled={!!blueprintBusy}
                   title={blueprintBusy ? busyTip : "Reset this completed node back to Pending for re-execution"}
                   aria-label="Reset node to pending"
-                  className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-amber/15 text-accent-amber text-xs font-medium hover:bg-accent-amber/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed hidden sm:inline-flex items-center gap-1"
+                  className="px-2 sm:px-2.5 py-1 rounded-lg bg-accent-amber/15 text-accent-amber text-xs font-medium hover:bg-accent-amber/25 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed hidden sm:inline-flex items-center gap-1"
                 >
                   <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z" />
@@ -711,7 +711,7 @@ export function MacroNodeCard({
                 onClick={handleDeleteConfirm}
                 disabled={deleting}
                 title={deleting ? "Deleting node..." : undefined}
-                className="px-3 py-1 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 transition-colors disabled:opacity-50"
+                className="px-3 py-1 rounded-md bg-accent-red text-white text-xs font-medium hover:bg-accent-red/90 transition-colors disabled:opacity-disabled"
               >
                 {deleting ? "Deleting..." : "Delete"}
               </button>
@@ -739,7 +739,7 @@ export function MacroNodeCard({
                     onClick={handleEditSave}
                     disabled={!editTitle.trim() || saving || enriching || enrichQueued || reevaluating || reevaluateQueued}
                     title={saving ? "Saving changes..." : !editTitle.trim() ? "Enter a title first" : enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot save while AI operation is in progress" : "Save changes"}
-                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-blue text-white text-[11px] font-medium hover:bg-accent-blue/90 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed"
                   >
                     {saving ? "Saving..." : "Save"}
                   </button>
@@ -747,7 +747,7 @@ export function MacroNodeCard({
                     onClick={handleEnrich}
                     disabled={!editTitle.trim() || enriching || enrichQueued || reevaluating || reevaluateQueued}
                     title={enriching || enrichQueued ? "AI is enriching the title and description..." : !editTitle.trim() ? "Enter a title first" : reevaluating || reevaluateQueued ? "Cannot enrich while AI re-evaluation is in progress" : "AI enhances the title and description with implementation details from your codebase"}
-                    className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1 whitespace-nowrap px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md bg-accent-purple text-white text-[11px] font-medium hover:bg-accent-purple/90 transition-colors disabled:opacity-disabled disabled:cursor-not-allowed"
                   >
                     {enriching || enrichQueued ? (<><AISparkle size="xs" /> Enriching...</>) : "✨ Smart Enrich"}
                   </button>
@@ -755,7 +755,7 @@ export function MacroNodeCard({
                     onClick={handleEditCancel}
                     disabled={enriching || enrichQueued || reevaluating || reevaluateQueued}
                     title={enriching || enrichQueued || reevaluating || reevaluateQueued ? "Cannot cancel while AI operation is in progress" : "Cancel editing"}
-                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-3 py-1.5 sm:px-2 sm:py-0.5 rounded-md border border-border-primary text-text-secondary text-[11px] hover:bg-bg-tertiary transition-colors disabled:opacity-disabled disabled:cursor-not-allowed"
                   >
                     Cancel
                   </button>
@@ -900,7 +900,7 @@ export function MacroNodeCard({
                                   .catch(() => setResumingExecId(null));
                               }}
                               disabled={resumingExecId === exec.id || running || !!blueprintBusy}
-                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors text-xs font-medium disabled:opacity-disabled disabled:cursor-not-allowed"
                               title={resumingExecId === exec.id ? "AI is resuming the failed session..." : blueprintBusy ? busyTip : running ? "Cannot resume while node is running" : "Resume this failed session — AI continues with full context from the previous attempt"}
                               aria-label={resumingExecId === exec.id ? "Resuming session" : "Resume failed session"}
                             >

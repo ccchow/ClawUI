@@ -2002,11 +2002,19 @@ export function smartRecoverStaleExecutions(): void {
       for (const bp of autopilotBlueprints) {
         recoveryLog.info(`Re-entering autopilot loop for blueprint ${bp.id.slice(0, 8)} after recovery`);
         enqueueBlueprintTask(bp.id, () => runAutopilotLoop(bp.id)).catch((err) => {
-          recoveryLog.error(`Autopilot recovery failed for ${bp.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+          recoveryLog.error(`Autopilot recovery failed for blueprint ${bp.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+          // Pause the specific blueprint so it doesn't stay stuck in running state
+          updateBlueprint(bp.id, { status: "paused", pauseReason: `Autopilot recovery failed after server restart: ${err instanceof Error ? err.message : String(err)}` });
+          recoveryLog.warn(`Blueprint ${bp.id.slice(0, 8)} paused due to autopilot recovery failure`);
         });
       }
     }).catch((err) => {
       recoveryLog.error(`Failed to load autopilot module for recovery: ${err instanceof Error ? err.message : err}`);
+      // Module import failed — pause all autopilot blueprints so they don't stay stuck in running state
+      for (const bp of autopilotBlueprints) {
+        updateBlueprint(bp.id, { status: "paused", pauseReason: `Autopilot module failed to load: ${err instanceof Error ? err.message : String(err)}` });
+        recoveryLog.warn(`Blueprint ${bp.id.slice(0, 8)} paused due to autopilot module load failure`);
+      }
     });
   }
 

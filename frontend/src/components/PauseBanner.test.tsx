@@ -158,4 +158,24 @@ describe("PauseBanner", () => {
     expect(banner.className).toContain("bg-accent-amber");
     expect(banner.className).toContain("border-accent-amber");
   });
+
+  describe("ARIA accessibility", () => {
+    it("has role=alert on the banner container", () => {
+      render(<PauseBanner {...defaultProps} />);
+      const alert = screen.getByRole("alert");
+      expect(alert).toBeInTheDocument();
+    });
+
+    it("has aria-live=assertive on the banner container", () => {
+      render(<PauseBanner {...defaultProps} />);
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveAttribute("aria-live", "assertive");
+    });
+
+    it("alert region contains the pause reason text", () => {
+      render(<PauseBanner {...defaultProps} />);
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("Node abc12345 encountered a blocker");
+    });
+  });
 });

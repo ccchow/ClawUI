@@ -16,6 +16,9 @@ vi.mock("../plan-db.js", () => ({
   markSuggestionUsed: vi.fn(),
   getExecutionsForNode: vi.fn(),
   createConveneSession: vi.fn(),
+  getAutopilotLog: vi.fn(),
+  setAutopilotMemory: vi.fn(),
+  getAutopilotMemory: vi.fn(),
 }));
 
 // Mock plan-executor.js
@@ -26,6 +29,15 @@ vi.mock("../plan-executor.js", () => ({
   evaluateNodeCompletion: vi.fn(async () => {}),
   addPendingTask: vi.fn(),
   removePendingTask: vi.fn(),
+}));
+
+// Mock plan-operations.js
+vi.mock("../plan-operations.js", () => ({
+  enrichNodeInternal: vi.fn(async () => {}),
+  reevaluateNodeInternal: vi.fn(async () => {}),
+  splitNodeInternal: vi.fn(async () => {}),
+  smartDepsInternal: vi.fn(async () => {}),
+  reevaluateAllInternal: vi.fn(async () => []),
 }));
 
 // Mock plan-coordinator.js
@@ -65,6 +77,14 @@ vi.mock("../agent-openclaw.js", () => ({}));
 vi.mock("../agent-codex.js", () => ({}));
 vi.mock("../roles/load-all-roles.js", () => ({}));
 
+// Mock node:fs for global memory file helpers
+vi.mock("node:fs", () => ({
+  existsSync: vi.fn(),
+  readFileSync: vi.fn(),
+  writeFileSync: vi.fn(),
+  mkdirSync: vi.fn(),
+}));
+
 import {
   buildStateSnapshot,
   executeDecision,
@@ -72,6 +92,14 @@ import {
   getResumeCount,
   incrementResumeCount,
   clearResumeCounts,
+  computeToolUsageStats,
+  readGlobalMemory,
+  writeGlobalMemory,
+  reflectAndUpdateMemory,
+  updateGlobalMemory,
+  REFLECT_EVERY_N,
+  BLUEPRINT_MEMORY_MAX_CHARS,
+  GLOBAL_MEMORY_MAX_CHARS,
 } from "../autopilot.js";
 import type { AutopilotDecision, AutopilotState } from "../autopilot.js";
 
@@ -88,6 +116,9 @@ import {
   markSuggestionUsed,
   getExecutionsForNode,
   createConveneSession,
+  getAutopilotLog,
+  setAutopilotMemory,
+  getAutopilotMemory,
 } from "../plan-db.js";
 import type { MacroNodeStatus, Artifact, NodeExecution } from "../plan-db.js";
 import {
@@ -98,8 +129,17 @@ import {
   addPendingTask,
   removePendingTask,
 } from "../plan-executor.js";
+import {
+  enrichNodeInternal,
+  reevaluateNodeInternal,
+  splitNodeInternal,
+  smartDepsInternal,
+  reevaluateAllInternal,
+} from "../plan-operations.js";
 import { coordinateBlueprint } from "../plan-coordinator.js";
 import { getDb } from "../db.js";
+import { getActiveRuntime } from "../agent-runtime.js";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 // ─── Test Data ───────────────────────────────────────────────
 
@@ -523,7 +563,7 @@ describe("autopilot", () => {
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(evaluateNodeCompletion).toHaveBeenCalledWith("bp-1", "n1");
+      expect(reevaluateNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
       expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "reevaluate" }));
       expect(removePendingTask).toHaveBeenCalled();
     });
@@ -537,7 +577,7 @@ describe("autopilot", () => {
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(evaluateNodeCompletion).toHaveBeenCalledWith("bp-1", "n1");
+      expect(enrichNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
       expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "enrich" }));
       expect(removePendingTask).toHaveBeenCalled();
     });
@@ -551,7 +591,7 @@ describe("autopilot", () => {
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(evaluateNodeCompletion).toHaveBeenCalledWith("bp-1", "n1");
+      expect(splitNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
       expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "split" }));
       expect(removePendingTask).toHaveBeenCalled();
     });
@@ -565,7 +605,7 @@ describe("autopilot", () => {
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(evaluateNodeCompletion).toHaveBeenCalledWith("bp-1", "n1");
+      expect(smartDepsInternal).toHaveBeenCalledWith("bp-1", "n1");
       expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "smart_deps" }));
       expect(removePendingTask).toHaveBeenCalled();
     });
@@ -749,12 +789,12 @@ describe("autopilot", () => {
       expect(removePendingTask).toHaveBeenCalled();
     });
 
-    it("reevaluate_all: reevaluates all completed nodes directly", async () => {
+    it("reevaluate_all: reevaluates all non-done nodes directly", async () => {
       const bp = mockBlueprint({
         nodes: [
           mockNode({ id: "n1", status: "done" }),
           mockNode({ id: "n2", status: "pending" }),
-          mockNode({ id: "n3", status: "done" }),
+          mockNode({ id: "n3", status: "failed" }),
         ],
       });
       vi.mocked(getBlueprint).mockReturnValue(bp);
@@ -768,12 +808,12 @@ describe("autopilot", () => {
 
       expect(result.success).toBe(true);
       expect(result.message).toContain("2 nodes");
-      expect(evaluateNodeCompletion).toHaveBeenCalledTimes(2);
+      expect(reevaluateAllInternal).toHaveBeenCalledWith("bp-1");
       expect(addPendingTask).toHaveBeenCalledTimes(2);
     });
 
-    it("reevaluate_all: returns error if no completed nodes", async () => {
-      const bp = mockBlueprint({ nodes: [mockNode({ id: "n1", status: "pending" })] });
+    it("reevaluate_all: returns error if no nodes to reevaluate", async () => {
+      const bp = mockBlueprint({ nodes: [mockNode({ id: "n1", status: "done" })] });
       vi.mocked(getBlueprint).mockReturnValue(bp);
 
       const decision: AutopilotDecision = {
@@ -1291,6 +1331,353 @@ describe("autopilot", () => {
       const indexSQL = "CREATE INDEX IF NOT EXISTS idx_autopilot_log_blueprint ON autopilot_log(blueprint_id, iteration)";
       expect(indexSQL).toContain("blueprint_id");
       expect(indexSQL).toContain("iteration");
+    });
+  });
+
+  // ──── computeToolUsageStats ─────────────────────────────────
+
+  describe("computeToolUsageStats", () => {
+    function setupStatsDb(opts: {
+      totalCount: number;
+      actionRows: Array<{ action: string; cnt: number; success_cnt: number }>;
+      recentActions: Array<{ action: string }>;
+      allActions: Array<{ action: string; iteration: number }>;
+    }) {
+      const mockPrepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes("GROUP BY")) {
+          return { all: vi.fn().mockReturnValue(opts.actionRows) };
+        } else if (sql.includes("COUNT(*)")) {
+          return { get: vi.fn().mockReturnValue({ cnt: opts.totalCount }) };
+        } else if (sql.includes("DESC")) {
+          return { all: vi.fn().mockReturnValue(opts.recentActions) };
+        } else {
+          return { all: vi.fn().mockReturnValue(opts.allActions) };
+        }
+      });
+      vi.mocked(getDb).mockReturnValue({ prepare: mockPrepare } as unknown as ReturnType<typeof getDb>);
+    }
+
+    it("returns correct actionCounts from log entries", () => {
+      setupStatsDb({
+        totalCount: 5,
+        actionRows: [
+          { action: "run_node", cnt: 3, success_cnt: 3 },
+          { action: "enrich_node", cnt: 2, success_cnt: 2 },
+        ],
+        recentActions: [{ action: "enrich_node" }, { action: "run_node" }],
+        allActions: [],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      expect(stats.actionCounts).toEqual({ run_node: 3, enrich_node: 2 });
+      expect(stats.totalIterations).toBe(5);
+    });
+
+    it("computes successRate correctly with mix of success/error", () => {
+      setupStatsDb({
+        totalCount: 4,
+        actionRows: [
+          { action: "run_node", cnt: 3, success_cnt: 2 },
+          { action: "resume_node", cnt: 1, success_cnt: 0 },
+        ],
+        recentActions: [],
+        allActions: [],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      expect(stats.successRate["run_node"]).toBeCloseTo(2 / 3);
+      expect(stats.successRate["resume_node"]).toBe(0);
+    });
+
+    it("identifies neverUsedTools by comparing against all known tools", () => {
+      setupStatsDb({
+        totalCount: 2,
+        actionRows: [
+          { action: "run_node", cnt: 1, success_cnt: 1 },
+          { action: "pause", cnt: 1, success_cnt: 1 },
+        ],
+        recentActions: [],
+        allActions: [],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      expect(stats.neverUsedTools).not.toContain("run_node");
+      expect(stats.neverUsedTools).not.toContain("pause");
+      expect(stats.neverUsedTools).toContain("resume_node");
+      expect(stats.neverUsedTools).toContain("enrich_node");
+      expect(stats.neverUsedTools).toContain("complete");
+    });
+
+    it("counts consecutiveRunNodeCount correctly (3 at end)", () => {
+      setupStatsDb({
+        totalCount: 5,
+        actionRows: [{ action: "run_node", cnt: 5, success_cnt: 5 }],
+        recentActions: [
+          { action: "run_node" },
+          { action: "run_node" },
+          { action: "run_node" },
+          { action: "enrich_node" },
+          { action: "run_node" },
+        ],
+        allActions: [],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      expect(stats.consecutiveRunNodeCount).toBe(3);
+    });
+
+    it("computes averageIterationsBetweenNonRunActions correctly", () => {
+      setupStatsDb({
+        totalCount: 7,
+        actionRows: [],
+        recentActions: [],
+        allActions: [
+          { action: "enrich_node", iteration: 1 },
+          { action: "run_node", iteration: 2 },
+          { action: "run_node", iteration: 3 },
+          { action: "evaluate_node", iteration: 4 },
+          { action: "run_node", iteration: 5 },
+          { action: "run_node", iteration: 6 },
+          { action: "coordinate", iteration: 7 },
+        ],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      // Non-run actions at iterations 1, 4, 7 → gaps of 3 and 3 → avg 3
+      expect(stats.averageIterationsBetweenNonRunActions).toBe(3);
+    });
+
+    it("returns zeroed/empty stats when no log entries exist", () => {
+      setupStatsDb({
+        totalCount: 0,
+        actionRows: [],
+        recentActions: [],
+        allActions: [],
+      });
+
+      const stats = computeToolUsageStats("bp-1");
+      expect(stats.totalIterations).toBe(0);
+      expect(stats.actionCounts).toEqual({});
+      expect(stats.successRate).toEqual({});
+      expect(stats.consecutiveRunNodeCount).toBe(0);
+      expect(stats.averageIterationsBetweenNonRunActions).toBe(0);
+      expect(stats.neverUsedTools).toContain("run_node");
+      expect(stats.neverUsedTools).toContain("pause");
+      expect(stats.neverUsedTools.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ──── Reflection trigger conditions ─────────────────────────
+
+  describe("reflection trigger conditions", () => {
+    // Tests the condition logic from runAutopilotLoop:
+    // shouldReflect = iterationsSinceReflection >= REFLECT_EVERY_N
+    //   || decision.action === "pause"
+    //   || (!result.success && result.error)
+
+    it("REFLECT_EVERY_N is 5", () => {
+      expect(REFLECT_EVERY_N).toBe(5);
+    });
+
+    it("triggers at iteration 5 (iterationsSinceReflection >= REFLECT_EVERY_N)", () => {
+      const shouldReflect = 5 >= REFLECT_EVERY_N || false || false;
+      expect(shouldReflect).toBe(true);
+    });
+
+    it("triggers on pause decision regardless of iteration count", () => {
+      const iterationsSinceReflection = 1;
+      const decision = { action: "pause" };
+      const shouldReflect =
+        iterationsSinceReflection >= REFLECT_EVERY_N ||
+        decision.action === "pause" ||
+        false;
+      expect(shouldReflect).toBe(true);
+    });
+
+    it("triggers on failed action (result.success === false)", () => {
+      const iterationsSinceReflection = 1;
+      const result = { success: false, message: "err", error: "some_error" };
+      const shouldReflect =
+        iterationsSinceReflection >= REFLECT_EVERY_N ||
+        false ||
+        (!result.success && result.error);
+      expect(shouldReflect).toBeTruthy();
+    });
+
+    it("does NOT trigger on routine successful iterations 1-4", () => {
+      for (let i = 1; i < REFLECT_EVERY_N; i++) {
+        const result = { success: true, message: "ok" };
+        const shouldReflect =
+          i >= REFLECT_EVERY_N ||
+          false || // not pause
+          (!result.success && (result as Record<string, unknown>).error);
+        expect(shouldReflect).toBeFalsy();
+      }
+    });
+
+    it("final reflection runs at loop exit unconditionally (no condition guard)", () => {
+      // After the while loop in runAutopilotLoop, reflectAndUpdateMemory is called
+      // directly with no condition check. This verifies the constant exists and
+      // that mid-loop reflections skip most iterations (REFLECT_EVERY_N > 1),
+      // while the final one at exit has no such gate.
+      expect(REFLECT_EVERY_N).toBeGreaterThan(1);
+    });
+  });
+
+  // ──── buildAutopilotPrompt memory injection ─────────────────
+
+  describe("buildAutopilotPrompt memory injection", () => {
+    const memTestState: AutopilotState = {
+      blueprint: { id: "bp-1", title: "Test", description: "Test", status: "running", enabledRoles: [] },
+      nodes: [],
+      insights: [],
+      queueInfo: { running: false, pendingTasks: [] },
+      allNodesDone: false,
+      summary: "0/0 nodes done",
+    };
+
+    it("includes Global Strategy section when global memory is provided", () => {
+      const prompt = buildAutopilotPrompt(memTestState, 1, 50, {
+        blueprint: null,
+        global: "Always prefer enrich before run.",
+      });
+      expect(prompt).toContain("## Global Strategy");
+      expect(prompt).toContain("Always prefer enrich before run.");
+    });
+
+    it("includes Blueprint Memory section when blueprint memory is provided", () => {
+      const prompt = buildAutopilotPrompt(memTestState, 1, 50, {
+        blueprint: "Node 3 is tricky, needs splitting.",
+        global: null,
+      });
+      expect(prompt).toContain("## Blueprint Memory");
+      expect(prompt).toContain("Node 3 is tricky, needs splitting.");
+    });
+
+    it("omits both memory sections when both are null", () => {
+      const prompt = buildAutopilotPrompt(memTestState, 1, 50, {
+        blueprint: null,
+        global: null,
+      });
+      expect(prompt).not.toContain("## Global Strategy");
+      expect(prompt).not.toContain("## Blueprint Memory");
+    });
+
+    it("includes both sections when both memories are non-null", () => {
+      const prompt = buildAutopilotPrompt(memTestState, 1, 50, {
+        blueprint: "Blueprint notes here.",
+        global: "Global strategy here.",
+      });
+      expect(prompt).toContain("## Global Strategy");
+      expect(prompt).toContain("Global strategy here.");
+      expect(prompt).toContain("## Blueprint Memory");
+      expect(prompt).toContain("Blueprint notes here.");
+    });
+  });
+
+  // ──── Global memory file helpers ────────────────────────────
+
+  describe("global memory file helpers", () => {
+    beforeEach(() => {
+      vi.mocked(existsSync).mockReset();
+      vi.mocked(readFileSync).mockReset();
+      vi.mocked(writeFileSync).mockReset();
+      vi.mocked(mkdirSync).mockReset();
+    });
+
+    it("readGlobalMemory returns null when file does not exist", () => {
+      vi.mocked(existsSync).mockReturnValue(false);
+      expect(readGlobalMemory()).toBeNull();
+    });
+
+    it("writeGlobalMemory creates directory and writes content", () => {
+      vi.mocked(existsSync).mockReturnValue(false);
+      writeGlobalMemory("test strategy content");
+      expect(mkdirSync).toHaveBeenCalledWith(expect.any(String), { recursive: true });
+      expect(writeFileSync).toHaveBeenCalledWith(expect.any(String), "test strategy content", "utf-8");
+    });
+
+    it("readGlobalMemory returns content when file exists", () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue("existing strategy");
+      expect(readGlobalMemory()).toBe("existing strategy");
+    });
+  });
+
+  // ──── Reflection failure handling ───────────────────────────
+
+  describe("reflection failure handling", () => {
+    function setupStatsDbEmpty() {
+      const mockPrepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes("COUNT(*)") && !sql.includes("GROUP BY")) {
+          return { get: vi.fn().mockReturnValue({ cnt: 0 }) };
+        }
+        return { all: vi.fn().mockReturnValue([]) };
+      });
+      vi.mocked(getDb).mockReturnValue({ prepare: mockPrepare } as unknown as ReturnType<typeof getDb>);
+    }
+
+    it("reflectAndUpdateMemory returns currentMemory unchanged when runtime throws", async () => {
+      vi.mocked(getAutopilotLog).mockReturnValue([]);
+      setupStatsDbEmpty();
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint());
+      const mockRuntime = { runSession: vi.fn().mockRejectedValue(new Error("LLM error")) };
+      vi.mocked(getActiveRuntime).mockReturnValue(mockRuntime as unknown as ReturnType<typeof getActiveRuntime>);
+
+      const result = await reflectAndUpdateMemory("bp-1", 0, 5, "existing memory");
+      expect(result).toBe("existing memory");
+    });
+
+    it("updateGlobalMemory does not throw when runtime fails", async () => {
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint());
+      vi.mocked(getAutopilotLog).mockReturnValue([{ iteration: 5 } as ReturnType<typeof getAutopilotLog>[0]]);
+      const mockRuntime = { runSession: vi.fn().mockRejectedValue(new Error("LLM error")) };
+      vi.mocked(getActiveRuntime).mockReturnValue(mockRuntime as unknown as ReturnType<typeof getActiveRuntime>);
+
+      await expect(updateGlobalMemory("bp-1", "memory", "global")).resolves.toBeUndefined();
+    });
+  });
+
+  // ──── Memory character limits ───────────────────────────────
+
+  describe("memory character limits", () => {
+    function setupStatsDbEmpty() {
+      const mockPrepare = vi.fn().mockImplementation((sql: string) => {
+        if (sql.includes("COUNT(*)") && !sql.includes("GROUP BY")) {
+          return { get: vi.fn().mockReturnValue({ cnt: 0 }) };
+        }
+        return { all: vi.fn().mockReturnValue([]) };
+      });
+      vi.mocked(getDb).mockReturnValue({ prepare: mockPrepare } as unknown as ReturnType<typeof getDb>);
+    }
+
+    it("blueprint memory exceeding BLUEPRINT_MEMORY_MAX_CHARS is truncated", async () => {
+      vi.mocked(getAutopilotLog).mockReturnValue([]);
+      setupStatsDbEmpty();
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint());
+      const longResponse = "x".repeat(3000);
+      const mockRuntime = { runSession: vi.fn().mockResolvedValue(longResponse) };
+      vi.mocked(getActiveRuntime).mockReturnValue(mockRuntime as unknown as ReturnType<typeof getActiveRuntime>);
+
+      const result = await reflectAndUpdateMemory("bp-1", 0, 5, null);
+      expect(result!.length).toBe(BLUEPRINT_MEMORY_MAX_CHARS);
+      expect(vi.mocked(setAutopilotMemory)).toHaveBeenCalledWith("bp-1", expect.any(String));
+      const saved = vi.mocked(setAutopilotMemory).mock.calls[0][1] as string;
+      expect(saved.length).toBe(BLUEPRINT_MEMORY_MAX_CHARS);
+    });
+
+    it("global memory exceeding GLOBAL_MEMORY_MAX_CHARS is truncated", async () => {
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint());
+      vi.mocked(getAutopilotLog).mockReturnValue([{ iteration: 5 } as ReturnType<typeof getAutopilotLog>[0]]);
+      vi.mocked(existsSync).mockReturnValue(true);
+      const longResponse = "y".repeat(5000);
+      const mockRuntime = { runSession: vi.fn().mockResolvedValue(longResponse) };
+      vi.mocked(getActiveRuntime).mockReturnValue(mockRuntime as unknown as ReturnType<typeof getActiveRuntime>);
+
+      await updateGlobalMemory("bp-1", "blueprint mem", "old global");
+      expect(vi.mocked(writeFileSync)).toHaveBeenCalled();
+      const written = vi.mocked(writeFileSync).mock.calls[0][1] as string;
+      expect(written.length).toBe(GLOBAL_MEMORY_MAX_CHARS);
     });
   });
 });

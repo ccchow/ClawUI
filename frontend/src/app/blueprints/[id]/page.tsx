@@ -1023,7 +1023,7 @@ export default function BlueprintDetailPage() {
                 onClick={handleApprove}
                 disabled={approving}
                 title={approving ? "Approving blueprint..." : "Mark this blueprint as approved and ready for execution"}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-blue/15 text-accent-blue text-xs font-medium hover:bg-accent-blue/25 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-accent-blue/15 text-accent-blue text-xs font-medium hover:bg-accent-blue/25 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
               >
                 <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
                 {approving ? "Approving..." : "Approve"}
@@ -1043,10 +1043,10 @@ export default function BlueprintDetailPage() {
                   onClick={handleRunAll}
                   disabled={isRunning || isRunningTask}
                   title={isRunning || isRunningTask ? "AI is executing nodes — check progress in the node cards below" : isAutopilot ? "Execute all pending nodes via autopilot agent loop" : "Execute all pending nodes in dependency order using the selected agent"}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap ${
                     isAutopilot
                       ? "bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
-                      : "bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
+                      : "bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25"
                   }`}
                 >
                   {isRunning || isRunningTask ? (
@@ -1077,7 +1077,7 @@ export default function BlueprintDetailPage() {
                     ? "Wait for current operation to complete"
                     : "Start a multi-role discussion to plan new nodes"
               }
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium bg-accent-purple/15 text-accent-purple border-accent-purple/30 hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium bg-accent-purple/15 text-accent-purple border-accent-purple/30 hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
             >
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -1222,7 +1222,7 @@ export default function BlueprintDetailPage() {
                     onClick={handleReevaluateAll}
                     disabled={isRunning || reevaluating || generateCooldown || isReevaluatingTask}
                     title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || isReevaluatingTask ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-amber text-xs font-medium hover:bg-accent-amber/10 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-amber text-xs font-medium hover:bg-accent-amber/10 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
                   >
                     {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
                       <><AISparkle size="xs" /> Reevaluating...</>
@@ -1254,7 +1254,7 @@ export default function BlueprintDetailPage() {
                   disabled={generating || isGeneratingTask}
                   title={generating || isGeneratingTask ? "AI is generating task nodes..." : `Use AI to decompose the blueprint into executable task nodes (${navigator?.userAgent?.includes("Mac") ? "⌘" : "Ctrl"}+Enter)`}
                   aria-label="Generate nodes"
-                  className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed ${
+                  className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed ${
                     generating || isGeneratingTask
                       ? "px-3 py-1.5 bg-accent-purple/20 text-accent-purple"
                       : blueprint.nodes.length === 0
@@ -1394,7 +1394,7 @@ export default function BlueprintDetailPage() {
                 onClick={handleStartConvene}
                 disabled={!conveneTopic.trim() || conveneRoles.length < 2}
                 title={!conveneTopic.trim() ? "Enter a topic" : conveneRoles.length < 2 ? "Select at least 2 roles" : "Start discussion"}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent-purple/15 text-accent-purple border border-accent-purple/30 text-xs font-medium hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent-purple/15 text-accent-purple border border-accent-purple/30 text-xs font-medium hover:bg-accent-purple/25 active:scale-[0.97] transition-all disabled:opacity-disabled disabled:cursor-not-allowed"
               >
                 <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -1484,7 +1484,7 @@ export default function BlueprintDetailPage() {
                 onClick={(e) => { e.stopPropagation(); handleCoordinate(); }}
                 disabled={isRunning || isCoordinatingTask || unreadInsightCount === 0}
                 title={isCoordinatingTask ? "Coordinator is analyzing insights..." : unreadInsightCount === 0 ? "No unread insights to analyze" : "Agent analyzes unread insights and creates/updates nodes"}
-                className="text-[11px] text-accent-purple hover:text-accent-purple/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-purple/10 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
+                className="text-[11px] text-accent-purple hover:text-accent-purple/80 transition-colors px-1.5 py-0.5 rounded hover:bg-accent-purple/10 disabled:opacity-disabled disabled:cursor-not-allowed flex items-center gap-1"
               >
                 {isCoordinatingTask ? (<><AISparkle size="xs" /> Analyzing...</>) : "Analyze"}
               </button>
@@ -1867,7 +1867,7 @@ export default function BlueprintDetailPage() {
                 disabled={!nodeTitle.trim() || addingNode}
                 title={addingNode ? "Adding node..." : !nodeTitle.trim() ? "Enter a node title first" : "Add node to blueprint"}
                 aria-label="Add node"
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-text-muted text-xs font-medium hover:bg-bg-tertiary hover:text-text-secondary transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {addingNode ? (
                   <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" strokeOpacity="0.25" /><path d="M12 2a10 10 0 0 1 10 10" /></svg>
@@ -1881,7 +1881,7 @@ export default function BlueprintDetailPage() {
                 disabled={!nodeTitle.trim() || enriching}
                 onClick={handleSmartCreate}
                 title={enriching ? "AI is enriching the node..." : !nodeTitle.trim() ? "Enter a node title first" : "AI enriches the title and description, then creates the node"}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-purple text-xs font-medium hover:bg-accent-purple/10 transition-all active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-purple text-xs font-medium hover:bg-accent-purple/10 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
               >
                 {enriching ? (<><AISparkle size="xs" /> Enriching...</>) : (<><AISparkle size="xs" className="opacity-70" /> Smart Create</>)}
               </button>

@@ -2526,6 +2526,149 @@ describe("smartRecoverStaleExecutions logic", () => {
     const shouldSkip = existing && existing.id !== "e2";
     expect(shouldSkip).toBe(true);
   });
+
+  describe("autopilot recovery error handling", () => {
+    // Extended schema with execution_mode and pause_reason columns for autopilot tests
+    const AUTOPILOT_SCHEMA = `
+      CREATE TABLE IF NOT EXISTS blueprints (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
+        status TEXT DEFAULT 'draft', project_cwd TEXT,
+        execution_mode TEXT DEFAULT 'manual', max_iterations INTEGER DEFAULT 10,
+        pause_reason TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS macro_nodes (
+        id TEXT PRIMARY KEY,
+        blueprint_id TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        "order" INTEGER NOT NULL, title TEXT NOT NULL, description TEXT,
+        status TEXT DEFAULT 'pending', dependencies TEXT, prompt TEXT,
+        estimated_minutes REAL, actual_minutes REAL, error TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+    `;
+
+    let apDb: Database.Database;
+
+    beforeEach(() => {
+      apDb = new Database(":memory:");
+      apDb.pragma("journal_mode = WAL");
+      apDb.pragma("foreign_keys = ON");
+      apDb.exec(AUTOPILOT_SCHEMA);
+    });
+    afterEach(() => { apDb.close(); });
+
+    it("pauses all autopilot blueprints when dynamic import fails", () => {
+      const now = new Date().toISOString();
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-1", "Auto BP 1", "/tmp/p1", now, now);
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-2", "Auto BP 2", "/tmp/p2", now, now);
+      // Non-autopilot blueprint should not be affected
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'manual', ?, ?)").run("bp-3", "Manual BP", "/tmp/p3", now, now);
+
+      // Simulate: find autopilot blueprints in running state
+      const autopilotBlueprints = apDb
+        .prepare("SELECT id FROM blueprints WHERE execution_mode = 'autopilot' AND status = 'running'")
+        .all() as { id: string }[];
+
+      expect(autopilotBlueprints).toHaveLength(2);
+
+      // Simulate: dynamic import failure — pause all autopilot blueprints
+      const importError = new Error("Cannot find module './autopilot.js'");
+      for (const bp of autopilotBlueprints) {
+        apDb.prepare("UPDATE blueprints SET status = 'paused', pause_reason = ?, updated_at = ? WHERE id = ?")
+          .run(`Autopilot module failed to load: ${importError.message}`, new Date().toISOString(), bp.id);
+      }
+
+      // Verify autopilot blueprints are paused with reason
+      const bp1 = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-1") as { status: string; pause_reason: string };
+      expect(bp1.status).toBe("paused");
+      expect(bp1.pause_reason).toContain("Cannot find module");
+      expect(bp1.pause_reason).toContain("Autopilot module failed to load");
+
+      const bp2 = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-2") as { status: string; pause_reason: string };
+      expect(bp2.status).toBe("paused");
+      expect(bp2.pause_reason).toContain("Autopilot module failed to load");
+
+      // Manual blueprint should NOT be affected
+      const bp3 = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-3") as { status: string; pause_reason: string | null };
+      expect(bp3.status).toBe("running");
+      expect(bp3.pause_reason).toBeNull();
+    });
+
+    it("pauses specific blueprint when autopilot loop start fails", () => {
+      const now = new Date().toISOString();
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-1", "Good BP", "/tmp/p1", now, now);
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-2", "Bad BP", "/tmp/p2", now, now);
+
+      const autopilotBlueprints = apDb
+        .prepare("SELECT id FROM blueprints WHERE execution_mode = 'autopilot' AND status = 'running'")
+        .all() as { id: string }[];
+
+      expect(autopilotBlueprints).toHaveLength(2);
+
+      // Simulate: loop start succeeds for bp-1 but fails for bp-2
+      const failedBpId = "bp-2";
+      const loopError = new Error("Queue deadlock: workspace already processing");
+
+      apDb.prepare("UPDATE blueprints SET status = 'paused', pause_reason = ?, updated_at = ? WHERE id = ?")
+        .run(`Autopilot recovery failed after server restart: ${loopError.message}`, new Date().toISOString(), failedBpId);
+
+      // bp-1 should still be running (loop started successfully)
+      const bp1 = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-1") as { status: string; pause_reason: string | null };
+      expect(bp1.status).toBe("running");
+      expect(bp1.pause_reason).toBeNull();
+
+      // bp-2 should be paused with error context
+      const bp2 = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-2") as { status: string; pause_reason: string };
+      expect(bp2.status).toBe("paused");
+      expect(bp2.pause_reason).toContain("Autopilot recovery failed after server restart");
+      expect(bp2.pause_reason).toContain("Queue deadlock");
+    });
+
+    it("handles non-Error objects in import failure gracefully", () => {
+      const now = new Date().toISOString();
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-1", "BP", "/tmp/p1", now, now);
+
+      // Simulate: import rejects with a string instead of Error
+      const err: unknown = "module not found";
+      const pauseReason = `Autopilot module failed to load: ${err instanceof Error ? err.message : String(err)}`;
+
+      apDb.prepare("UPDATE blueprints SET status = 'paused', pause_reason = ?, updated_at = ? WHERE id = ?")
+        .run(pauseReason, new Date().toISOString(), "bp-1");
+
+      const bp = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-1") as { status: string; pause_reason: string };
+      expect(bp.status).toBe("paused");
+      expect(bp.pause_reason).toBe("Autopilot module failed to load: module not found");
+    });
+
+    it("handles non-Error objects in loop start failure gracefully", () => {
+      const now = new Date().toISOString();
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'autopilot', ?, ?)").run("bp-1", "BP", "/tmp/p1", now, now);
+
+      // Simulate: enqueueBlueprintTask rejects with a non-Error
+      const err: unknown = 42;
+      const pauseReason = `Autopilot recovery failed after server restart: ${err instanceof Error ? err.message : String(err)}`;
+
+      apDb.prepare("UPDATE blueprints SET status = 'paused', pause_reason = ?, updated_at = ? WHERE id = ?")
+        .run(pauseReason, new Date().toISOString(), "bp-1");
+
+      const bp = apDb.prepare("SELECT status, pause_reason FROM blueprints WHERE id = ?").get("bp-1") as { status: string; pause_reason: string };
+      expect(bp.status).toBe("paused");
+      expect(bp.pause_reason).toBe("Autopilot recovery failed after server restart: 42");
+    });
+
+    it("does not touch non-autopilot running blueprints during recovery", () => {
+      const now = new Date().toISOString();
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'running', ?, 'manual', ?, ?)").run("bp-manual", "Manual", "/tmp/p", now, now);
+      apDb.prepare("INSERT INTO blueprints (id, title, status, project_cwd, execution_mode, created_at, updated_at) VALUES (?, ?, 'approved', ?, 'autopilot', ?, ?)").run("bp-approved", "Approved Auto", "/tmp/p", now, now);
+
+      const autopilotBlueprints = apDb
+        .prepare("SELECT id FROM blueprints WHERE execution_mode = 'autopilot' AND status = 'running'")
+        .all() as { id: string }[];
+
+      // Neither should be found: one is manual, other is approved (not running)
+      expect(autopilotBlueprints).toHaveLength(0);
+    });
+  });
 });
 
 // ─── parseAgentParams ─────────────────────────────────────────

@@ -46,7 +46,7 @@ Detailed frontend UI conventions for ClawUI. Referenced from [CLAUDE.md](../CLAU
 
 - **AI loading indicators**: AI-triggered buttons (Run, Reevaluate, Smart Enrich, Generate Nodes) use `<AISparkle>` component with `animate-ai-sparkle` (pulse+rotate). Non-AI loading states keep standard `animate-spin` spinners. Custom keyframes in `globals.css`.
 - **Overlay/modal animations**: `globals.css` provides `animate-fade-in` (opacity transition) and `animate-slide-up` (bottom-sheet entrance). Node switcher: bottom sheet on mobile (`rounded-t-2xl`, `animate-slide-up`), centered modal on desktop (`sm:rounded-2xl`, `sm:animate-fade-in`).
-- **Button press feedback**: All interactive buttons use `active:scale-[0.98] transition-all` (smaller elements use `0.97`, card-level items use `0.995`). Disabled buttons use `disabled:opacity-40 disabled:cursor-not-allowed` consistently.
+- **Button press feedback**: All interactive buttons use `active:scale-[0.98] transition-all` (smaller elements use `0.97`, card-level items use `0.995`). Disabled buttons use `disabled:opacity-disabled disabled:cursor-not-allowed` consistently (`opacity-disabled` = 0.4, defined in `tailwind.config.ts`). For conditional disabled styling (non-`disabled:` prefix), use `opacity-disabled cursor-not-allowed`.
 
 ## Interaction Patterns
 
@@ -60,6 +60,8 @@ Detailed frontend UI conventions for ClawUI. Referenced from [CLAUDE.md](../CLAU
 
 - **ARIA labels on icon-only buttons**: Every `<button>` with only an icon must have `aria-label`. Dynamic labels for toggles (e.g., `aria-label={starred ? "Unstar session" : "Star session"}`).
 - **`aria-expanded` on collapse controls**: All expand/collapse toggles must include `aria-expanded={isExpanded}`.
+- **`aria-pressed` on toggle buttons**: Toggle buttons (e.g., AutopilotToggle) must include `aria-pressed={active}` to convey on/off state.
+- **Alert banners**: Dynamic alert components (e.g., PauseBanner) use `role="alert"` + `aria-live="assertive"` for screen reader announcements.
 - **Focus trapping in overlays**: Modal overlays use `role="dialog"` + `aria-modal="true"` + `aria-label`. A `useEffect` traps Tab key within the dialog and closes on Escape, returning focus to the trigger button via a ref.
 - **`focus-visible` global styles**: `globals.css` provides `*:focus-visible { outline: 2px solid rgb(var(--accent-blue)); outline-offset: 2px; }` for keyboard navigation. No `:focus` styles — only `:focus-visible`.
 - **StatusIndicator**: Uses `role="img"` and `aria-label={label}` with full status label mapping (Pending, Running, Completed, Failed, Blocked, Skipped, Waiting in queue, Draft, Approved, Paused).
