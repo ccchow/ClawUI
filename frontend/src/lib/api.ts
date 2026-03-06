@@ -589,11 +589,16 @@ export function runNextNode(
 }
 
 export function runAllNodes(
-  blueprintId: string
+  blueprintId: string,
+  options?: { safeguardGrace?: number }
 ): Promise<{ message: string; blueprintId: string }> {
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/run-all`,
-    { method: "POST" }
+    {
+      method: "POST",
+      headers: options ? { "Content-Type": "application/json" } : undefined,
+      body: options ? JSON.stringify(options) : undefined,
+    }
   );
 }
 

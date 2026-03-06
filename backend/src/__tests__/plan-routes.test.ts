@@ -2571,7 +2571,7 @@ describe("plan-routes", () => {
       // Verify the enqueued function calls runAutopilotLoop
       const enqueueCall = vi.mocked(enqueueBlueprintTask).mock.calls[0];
       await enqueueCall[1]();
-      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1");
+      expect(runAutopilotLoop).toHaveBeenCalledWith("bp-1", undefined);
     });
 
     it("routes to executeAllNodes when executionMode is manual/undefined", async () => {

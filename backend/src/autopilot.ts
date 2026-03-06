@@ -1146,6 +1146,7 @@ interface LoopSafeguardState {
   recentActions: Array<{ action: string; params: string }>;
   lastNodeStatuses: Map<string, MacroNodeStatus>;
   noProgressCount: number;
+  graceIterations: number;
 }
 
 function checkSameActionRepeat(state: LoopSafeguardState, decision: AutopilotDecision): string | null {
@@ -1216,14 +1217,19 @@ function checkResumeCapExceeded(blueprintId: string, state: AutopilotState): str
 
 // ─── Main Autopilot Loop (spec §4.3) ─────────────────────────
 
-export async function runAutopilotLoop(blueprintId: string): Promise<void> {
+export interface AutopilotLoopOptions {
+  /** Skip safeguard checks for this many iterations (used when user resumes from safeguard pause) */
+  safeguardGrace?: number;
+}
+
+export async function runAutopilotLoop(blueprintId: string, options?: AutopilotLoopOptions): Promise<void> {
   const blueprint = getBlueprint(blueprintId);
   if (!blueprint) {
     log.error(`Autopilot: Blueprint ${blueprintId} not found`);
     return;
   }
 
-  updateBlueprint(blueprintId, { status: "running" as BlueprintStatus });
+  updateBlueprint(blueprintId, { status: "running" as BlueprintStatus, pauseReason: "" });
   addPendingTask(blueprintId, { type: "autopilot" as PendingTask["type"], queuedAt: new Date().toISOString() });
   clearResumeCounts(blueprintId);
   clearSeenSuggestions(blueprintId);
@@ -1240,6 +1246,7 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
     recentActions: [],
     lastNodeStatuses: new Map(),
     noProgressCount: 0,
+    graceIterations: options?.safeguardGrace ?? 0,
   };
 
   log.info(`Autopilot starting for blueprint ${blueprintId.slice(0, 8)} (max ${maxIterations} iterations)`);
@@ -1273,28 +1280,40 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
         break;
       }
 
-      // Check resume cap safeguard
-      const resumeCapReason = checkResumeCapExceeded(blueprintId, state);
-      if (resumeCapReason) {
-        updateBlueprint(blueprintId, {
-          status: "paused" as BlueprintStatus,
-          pauseReason: resumeCapReason,
-        });
-        logAutopilot(blueprintId, iteration, state.summary, "safeguard:resume_cap", resumeCapReason);
-        log.warn(`Autopilot paused: ${resumeCapReason}`);
-        break;
+      // Safeguard grace period: skip checks when user explicitly resumed from a safeguard pause
+      const inGracePeriod = safeguardState.graceIterations > 0;
+      if (inGracePeriod) {
+        safeguardState.graceIterations--;
+        // Still track state for when grace period ends
+        checkNoProgress(safeguardState, state);
+        // Reset the count so it doesn't trigger immediately after grace ends
+        safeguardState.noProgressCount = 0;
       }
 
-      // Check no-progress safeguard
-      const noProgressReason = checkNoProgress(safeguardState, state);
-      if (noProgressReason) {
-        updateBlueprint(blueprintId, {
-          status: "paused" as BlueprintStatus,
-          pauseReason: noProgressReason,
-        });
-        logAutopilot(blueprintId, iteration, state.summary, "safeguard:no_progress", noProgressReason);
-        log.warn(`Autopilot paused: ${noProgressReason}`);
-        break;
+      if (!inGracePeriod) {
+        // Check resume cap safeguard
+        const resumeCapReason = checkResumeCapExceeded(blueprintId, state);
+        if (resumeCapReason) {
+          updateBlueprint(blueprintId, {
+            status: "paused" as BlueprintStatus,
+            pauseReason: resumeCapReason,
+          });
+          logAutopilot(blueprintId, iteration, state.summary, "safeguard:resume_cap", resumeCapReason);
+          log.warn(`Autopilot paused: ${resumeCapReason}`);
+          break;
+        }
+
+        // Check no-progress safeguard
+        const noProgressReason = checkNoProgress(safeguardState, state);
+        if (noProgressReason) {
+          updateBlueprint(blueprintId, {
+            status: "paused" as BlueprintStatus,
+            pauseReason: noProgressReason,
+          });
+          logAutopilot(blueprintId, iteration, state.summary, "safeguard:no_progress", noProgressReason);
+          log.warn(`Autopilot paused: ${noProgressReason}`);
+          break;
+        }
       }
 
       // Mark suggestions as seen (after exit check, so first sight blocks exit)
@@ -1318,16 +1337,21 @@ export async function runAutopilotLoop(blueprintId: string): Promise<void> {
 
       log.info(`Autopilot iteration ${iteration}: ${decision.action} — ${decision.reasoning}`);
 
-      // Check same-action safeguard
-      const sameActionReason = checkSameActionRepeat(safeguardState, decision);
-      if (sameActionReason) {
-        updateBlueprint(blueprintId, {
-          status: "paused" as BlueprintStatus,
-          pauseReason: sameActionReason,
-        });
-        logAutopilot(blueprintId, iteration, state.summary, decision, { success: false, message: sameActionReason, error: "safeguard" });
-        log.warn(`Autopilot paused: ${sameActionReason}`);
-        break;
+      // Check same-action safeguard (also skipped during grace period)
+      if (!inGracePeriod) {
+        const sameActionReason = checkSameActionRepeat(safeguardState, decision);
+        if (sameActionReason) {
+          updateBlueprint(blueprintId, {
+            status: "paused" as BlueprintStatus,
+            pauseReason: sameActionReason,
+          });
+          logAutopilot(blueprintId, iteration, state.summary, decision, { success: false, message: sameActionReason, error: "safeguard" });
+          log.warn(`Autopilot paused: ${sameActionReason}`);
+          break;
+        }
+      } else {
+        // Still track actions during grace period for post-grace checks
+        checkSameActionRepeat(safeguardState, decision);
       }
 
       // 4. EXECUTE — Carry out the AI's decision

@@ -46,12 +46,12 @@ describe("PauseBanner", () => {
     fireEvent.click(screen.getByText("Resume Autopilot"));
 
     await waitFor(() => {
-      expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { executionMode: "autopilot" });
+      expect(apiMocks.updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "running", pauseReason: "" });
     });
-    expect(defaultProps.onUpdate).toHaveBeenCalledWith({ executionMode: "autopilot" });
+    expect(defaultProps.onUpdate).toHaveBeenCalledWith({ status: "running" });
 
     await waitFor(() => {
-      expect(apiMocks.runAllNodes).toHaveBeenCalledWith("bp-1");
+      expect(apiMocks.runAllNodes).toHaveBeenCalledWith("bp-1", { safeguardGrace: 5 });
     });
     expect(defaultProps.onBroadcast).toHaveBeenCalledWith("autopilot_resume");
     expect(defaultProps.onInvalidate).toHaveBeenCalled();

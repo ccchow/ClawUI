@@ -1787,8 +1787,10 @@ planRouter.post("/api/blueprints/:id/run-all", (req, res) => {
       return;
     }
     // Fire and forget — execution continues in background
+    const safeguardGrace = (req.body as { safeguardGrace?: number } | undefined)?.safeguardGrace;
     if (blueprint.executionMode === "autopilot") {
-      enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id)).catch((err) => {
+      const loopOpts = safeguardGrace ? { safeguardGrace } : undefined;
+      enqueueBlueprintTask(req.params.id, () => runAutopilotLoop(req.params.id, loopOpts)).catch((err) => {
         log.error(`Autopilot loop failed for ${req.params.id}: ${err instanceof Error ? err.message : err}`);
       });
     } else {

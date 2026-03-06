@@ -34,9 +34,11 @@ export function PauseBanner({
   const handleResume = async () => {
     setResuming(true);
     try {
-      await updateBlueprint(blueprintId, { executionMode: "autopilot" });
-      onUpdate({ executionMode: "autopilot" });
-      await runAllNodes(blueprintId);
+      // Clear pause state and set status to running optimistically
+      await updateBlueprint(blueprintId, { status: "running", pauseReason: "" });
+      onUpdate({ status: "running" });
+      // Grace period: skip safeguard checks for 5 iterations after user-initiated resume
+      await runAllNodes(blueprintId, { safeguardGrace: 5 });
       onBroadcast("autopilot_resume");
       onInvalidate();
     } catch {
