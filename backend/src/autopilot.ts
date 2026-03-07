@@ -761,11 +761,17 @@ Do NOT call complete() while unacknowledged messages exist — the user may be r
 
 ${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
 
-**Required**: For each message, follow this order:
-1. Take action FIRST: create_node/batch_create_nodes for feature requests, run_node for tasks, etc.
-2. acknowledge_message(messageId) — mark as handled ONLY AFTER you have taken action.
-3. Optionally use send_message(content) to answer questions or explain decisions that don't require creating nodes.
-IMPORTANT: The message stays visible in your prompt until acknowledged, preserving context. Do NOT acknowledge before acting. Do NOT call send_message repeatedly — one reply per user message is enough.
+**Required action order** (NEVER acknowledge before acting):
+1. **ACT FIRST**: Use create_node to create a task for the user's request. Every request can be handled by creating a node — each node runs a FULL agent session that can execute shell commands, git operations, file edits, deployments, etc.
+2. **THEN run_node**: If the node has no blocking dependencies, run it immediately.
+3. **THEN acknowledge_message(messageId)**: Mark as handled ONLY AFTER you have created/run a node.
+4. Optionally use send_message(content) to answer questions that don't need a node.
+
+CRITICAL RULES:
+- NEVER call acknowledge_message before creating a node. The message stays in your prompt until acknowledged — this is by design so you keep context.
+- NEVER call send_message as your first action on a user request — take action first.
+- NEVER pause because you think you "can't" do something. You CAN do anything by creating a node — the node's agent session has full system access.
+- If multiple messages request the same thing, create ONE node and acknowledge ALL of them.
 
 `;
   }
