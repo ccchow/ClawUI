@@ -1448,8 +1448,9 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       // 4. EXECUTE — Carry out the AI's decision
       const result = await executeDecision(blueprintId, decision);
 
-      // Track message-related actions to prevent premature auto-exit
-      if (decision.action === "acknowledge_message" || decision.action === "send_message" || decision.action === "read_user_messages") {
+      // Track message-handling actions to prevent premature auto-exit.
+      // Only acknowledge/send count — read_user_messages is a passive read that shouldn't defer exit.
+      if (decision.action === "acknowledge_message" || decision.action === "send_message") {
         lastIterationHandledMessage = true;
       }
 
