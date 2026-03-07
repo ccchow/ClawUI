@@ -873,6 +873,15 @@ export interface AutopilotLogEntry {
   createdAt: string;
 }
 
+export interface AutopilotMessage {
+  id: string;
+  blueprintId: string;
+  role: "user" | "system";
+  content: string;
+  acknowledged: boolean;
+  createdAt: string;
+}
+
 export function fetchAutopilotLog(
   blueprintId: string,
   limit = 20,
@@ -883,6 +892,33 @@ export function fetchAutopilotLog(
   if (offset > 0) params.set("offset", String(offset));
   return fetchJSON(
     `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/autopilot-log?${params}`,
+  );
+}
+
+export function sendBlueprintMessage(
+  blueprintId: string,
+  content: string,
+): Promise<AutopilotMessage> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+}
+
+export function getBlueprintMessages(
+  blueprintId: string,
+  limit = 50,
+  offset = 0,
+): Promise<{ messages: AutopilotMessage[]; total: number }> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (offset > 0) params.set("offset", String(offset));
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/messages?${params}`,
   );
 }
 

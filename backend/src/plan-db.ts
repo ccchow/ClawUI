@@ -4,6 +4,27 @@ import { createLogger } from "./logger.js";
 
 const log = createLogger("plan-db");
 
+// SQLite has a default limit of 999 variables per query.
+// Use a safe chunk size below that limit for IN (...) queries.
+const SQLITE_IN_CHUNK_SIZE = 500;
+
+/** Run a query with an IN (...) clause in chunks to avoid SQLite's variable limit. */
+function queryInChunks<T>(
+  buildSql: (placeholders: string) => string,
+  inParams: unknown[],
+): T[] {
+  if (inParams.length === 0) return [];
+  const db = getDb();
+  const results: T[] = [];
+  for (let i = 0; i < inParams.length; i += SQLITE_IN_CHUNK_SIZE) {
+    const chunk = inParams.slice(i, i + SQLITE_IN_CHUNK_SIZE);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db.prepare(buildSql(placeholders)).all(...chunk) as T[];
+    results.push(...rows);
+  }
+  return results;
+}
+
 // ─── PRD v3 Types ────────────────────────────────────────────
 
 export type BlueprintStatus = "draft" | "approved" | "running" | "paused" | "done" | "failed";
@@ -163,6 +184,15 @@ export interface AutopilotLogEntry {
   action: string;
   actionParams?: string;
   result?: string;
+  createdAt: string;
+}
+
+export interface AutopilotMessage {
+  id: string;
+  blueprintId: string;
+  role: "user" | "system";
+  content: string;
+  acknowledged: boolean;
   createdAt: string;
 }
 
@@ -560,6 +590,22 @@ export function initPlanTables(): void {
     `);
   }
 
+  // Incremental migration: create autopilot_messages table if not exists
+  const autopilotMsgTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='autopilot_messages'").all();
+  if (autopilotMsgTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS autopilot_messages (
+        id              TEXT PRIMARY KEY,
+        blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        role            TEXT NOT NULL DEFAULT 'user',
+        content         TEXT NOT NULL,
+        acknowledged    INTEGER DEFAULT 0,
+        created_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_autopilot_messages_blueprint ON autopilot_messages(blueprint_id, acknowledged, created_at);
+    `);
+  }
+
   if (currentVersion < CURRENT_SCHEMA_VERSION) {
     db.prepare("INSERT OR REPLACE INTO schema_version (key, version) VALUES (?, ?)").run(
       "plan_schema",
@@ -773,11 +819,10 @@ function getArtifactsForNodeInternal(nodeId: string): { input: Artifact[]; outpu
   const seenSources = new Set(targetedRows.map(r => r.source_node_id));
   let untargetedFromDeps: ArtifactRow[] = [];
   if (depIds.length > 0) {
-    const placeholders = depIds.map(() => "?").join(",");
-    untargetedFromDeps = (db
-      .prepare(`SELECT * FROM artifacts WHERE source_node_id IN (${placeholders}) AND target_node_id IS NULL AND type = 'handoff_summary' ORDER BY created_at ASC`)
-      .all(...depIds) as ArtifactRow[])
-      .filter(r => !seenSources.has(r.source_node_id));
+    untargetedFromDeps = queryInChunks<ArtifactRow>(
+      (ph) => `SELECT * FROM artifacts WHERE source_node_id IN (${ph}) AND target_node_id IS NULL AND type = 'handoff_summary' ORDER BY created_at ASC`,
+      depIds,
+    ).filter(r => !seenSources.has(r.source_node_id));
   }
 
   const inputRows = [...targetedRows, ...untargetedFromDeps];
@@ -808,7 +853,6 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
   if (rows.length === 0) return [];
 
   const nodeIds = rows.map((r) => r.id);
-  const placeholders = nodeIds.map(() => "?").join(",");
 
   // Batch-load all artifacts for these nodes (P1/P11 fix — eliminates N+1)
   const allArtifacts = db
@@ -835,10 +879,11 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
     artifactsBySource.set(art.source_node_id, srcList);
   }
 
-  // Batch-load all executions for these nodes (P1 fix)
-  const allExecs = db
-    .prepare(`SELECT * FROM node_executions WHERE node_id IN (${placeholders}) ORDER BY started_at ASC`)
-    .all(...nodeIds) as ExecutionRow[];
+  // Batch-load all executions for these nodes (P1 fix, chunked to avoid SQLite variable limit)
+  const allExecs = queryInChunks<ExecutionRow>(
+    (ph) => `SELECT * FROM node_executions WHERE node_id IN (${ph}) ORDER BY started_at ASC`,
+    nodeIds,
+  );
 
   const execsByNode = new Map<string, ExecutionRow[]>();
   for (const exec of allExecs) {
@@ -848,9 +893,10 @@ function getNodesForBlueprint(blueprintId: string): MacroNode[] {
   }
 
   // Batch-load suggestion counts for these nodes
-  const sugCounts = db
-    .prepare(`SELECT node_id, COUNT(*) as cnt FROM node_suggestions WHERE node_id IN (${placeholders}) GROUP BY node_id`)
-    .all(...nodeIds) as { node_id: string; cnt: number }[];
+  const sugCounts = queryInChunks<{ node_id: string; cnt: number }>(
+    (ph) => `SELECT node_id, COUNT(*) as cnt FROM node_suggestions WHERE node_id IN (${ph}) GROUP BY node_id`,
+    nodeIds,
+  );
   const sugCountByNode = new Map<string, number>();
   for (const { node_id, cnt } of sugCounts) {
     sugCountByNode.set(node_id, cnt);
@@ -954,14 +1000,14 @@ export function listBlueprints(filters?: { status?: string; projectCwd?: string;
     .prepare(sql)
     .all(...params) as BlueprintRow[];
 
-  // Batch-load convene session counts to avoid N+1
+  // Batch-load convene session counts to avoid N+1 (chunked to avoid SQLite variable limit)
   const bpIds = rows.map((r) => r.id);
   const conveneCountMap = new Map<string, number>();
   if (bpIds.length > 0) {
-    const ph = bpIds.map(() => "?").join(",");
-    const counts = db.prepare(
-      `SELECT blueprint_id, COUNT(*) as cnt FROM convene_sessions WHERE blueprint_id IN (${ph}) AND status != 'cancelled' GROUP BY blueprint_id`,
-    ).all(...bpIds) as { blueprint_id: string; cnt: number }[];
+    const counts = queryInChunks<{ blueprint_id: string; cnt: number }>(
+      (ph) => `SELECT blueprint_id, COUNT(*) as cnt FROM convene_sessions WHERE blueprint_id IN (${ph}) AND status != 'cancelled' GROUP BY blueprint_id`,
+      bpIds,
+    );
     for (const { blueprint_id, cnt } of counts) {
       conveneCountMap.set(blueprint_id, cnt);
     }
@@ -1097,12 +1143,14 @@ export function createMacroNode(
     prompt?: string;
     estimatedMinutes?: number;
     agentType?: string;
+    roles?: string[];
   },
 ): MacroNode {
   const db = getDb();
   const id = randomUUID();
   const now = new Date().toISOString();
   const depsJson = data.dependencies?.length ? JSON.stringify(data.dependencies) : null;
+  const rolesJson = data.roles?.length ? JSON.stringify(data.roles) : null;
 
   // Atomic: shift + insert + allocate seq + touch parent (P6 fix)
   let seq: number;
@@ -1118,8 +1166,8 @@ export function createMacroNode(
     db.prepare("UPDATE blueprints SET next_node_seq = ? WHERE id = ?").run(seq + 1, blueprintId);
 
     db.prepare(`
-      INSERT INTO macro_nodes (id, blueprint_id, "order", seq, title, description, status, dependencies, parallel_group, prompt, estimated_minutes, agent_type, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO macro_nodes (id, blueprint_id, "order", seq, title, description, status, dependencies, parallel_group, prompt, estimated_minutes, agent_type, roles, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       blueprintId,
@@ -1132,6 +1180,7 @@ export function createMacroNode(
       data.prompt ?? null,
       data.estimatedMinutes ?? null,
       data.agentType ?? null,
+      rolesJson,
       now,
       now,
     );
@@ -1157,6 +1206,7 @@ export function createMacroNode(
     ...(data.prompt ? { prompt: data.prompt } : {}),
     ...(data.estimatedMinutes != null ? { estimatedMinutes: data.estimatedMinutes } : {}),
     ...(data.agentType ? { agentType: data.agentType } : {}),
+    ...(data.roles?.length ? { roles: data.roles } : {}),
     inputArtifacts,
     outputArtifacts: [],
     executions: [],
@@ -1490,14 +1540,13 @@ export function reorderNodes(blueprintId: string, ordering: { id: string; seq: n
  */
 export function getNodeInfoForSessions(sessionIds: string[]): Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }> {
   if (sessionIds.length === 0) return new Map();
-  const db = getDb();
-  const placeholders = sessionIds.map(() => "?").join(", ");
-  const rows = db.prepare(`
-    SELECT ne.session_id, mn.title, mn.description, mn.blueprint_id
+  const rows = queryInChunks<{ session_id: string; title: string; description: string | null; blueprint_id: string }>(
+    (ph) => `SELECT ne.session_id, mn.title, mn.description, mn.blueprint_id
     FROM node_executions ne
     JOIN macro_nodes mn ON ne.node_id = mn.id
-    WHERE ne.session_id IN (${placeholders})
-  `).all(...sessionIds) as { session_id: string; title: string; description: string | null; blueprint_id: string }[];
+    WHERE ne.session_id IN (${ph})`,
+    sessionIds,
+  );
 
   const result = new Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }>();
   for (const row of rows) {
@@ -2104,4 +2153,96 @@ export function getAutopilotMemory(blueprintId: string): string | null {
 export function setAutopilotMemory(blueprintId: string, memory: string | null): void {
   const db = getDb();
   db.prepare("UPDATE blueprints SET autopilot_memory = ? WHERE id = ?").run(memory, blueprintId);
+}
+
+// ─── Autopilot Messages ──────────────────────────────────────
+
+export function createAutopilotMessage(
+  blueprintId: string,
+  role: "user" | "system",
+  content: string,
+): AutopilotMessage {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO autopilot_messages (id, blueprint_id, role, content, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, blueprintId, role, content, now);
+  return { id, blueprintId, role, content, acknowledged: false, createdAt: now };
+}
+
+export function getUnacknowledgedMessages(blueprintId: string): AutopilotMessage[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, blueprint_id, role, content, acknowledged, created_at
+       FROM autopilot_messages
+       WHERE blueprint_id = ? AND acknowledged = 0
+       ORDER BY created_at ASC`,
+    )
+    .all(blueprintId) as Array<{
+    id: string;
+    blueprint_id: string;
+    role: string;
+    content: string;
+    acknowledged: number;
+    created_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    role: row.role as "user" | "system",
+    content: row.content,
+    acknowledged: row.acknowledged === 1,
+    createdAt: row.created_at,
+  }));
+}
+
+export function acknowledgeMessage(messageId: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("UPDATE autopilot_messages SET acknowledged = 1 WHERE id = ?")
+    .run(messageId);
+  return result.changes > 0;
+}
+
+export function getMessageHistory(
+  blueprintId: string,
+  limit = 50,
+  offset = 0,
+): AutopilotMessage[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, blueprint_id, role, content, acknowledged, created_at
+       FROM autopilot_messages
+       WHERE blueprint_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(blueprintId, limit, offset) as Array<{
+    id: string;
+    blueprint_id: string;
+    role: string;
+    content: string;
+    acknowledged: number;
+    created_at: string;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    role: row.role as "user" | "system",
+    content: row.content,
+    acknowledged: row.acknowledged === 1,
+    createdAt: row.created_at,
+  }));
+}
+
+export function getMessageCount(blueprintId: string): number {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(*) as cnt FROM autopilot_messages WHERE blueprint_id = ?")
+    .get(blueprintId) as { cnt: number };
+  return row.cnt;
 }

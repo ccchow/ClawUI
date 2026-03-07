@@ -6,6 +6,9 @@
  */
 
 import type { SessionAnalysis } from "./jsonl-parser.js";
+import { createLogger } from "./logger.js";
+
+const runtimeLog = createLogger("agent-runtime");
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -123,7 +126,7 @@ export function getActiveRuntime(): AgentRuntime {
     throw new Error(`No agent runtime registered for type "${agentType}". Available: ${[...runtimeRegistry.keys()].join(", ")}`);
   }
 
-  activeRuntime = factory();
+  activeRuntime = new LoggingRuntimeWrapper(factory());
   return activeRuntime;
 }
 
@@ -152,4 +155,160 @@ export function getRuntimeByType(type: AgentType): AgentRuntime | null {
  */
 export function resetActiveRuntime(): void {
   activeRuntime = null;
+}
+
+// ─── Prompt Token Estimation ────────────────────────────────
+
+/**
+ * Estimate token count from a prompt string.
+ * Uses ~4 characters per token as a rough approximation (standard for English + code).
+ */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// ─── Agent Call Stats (in-memory accumulator) ────────────────
+
+export interface AgentCallRecord {
+  method: "runSession" | "runSessionInteractive" | "resumeSession";
+  promptChars: number;
+  estimatedTokens: number;
+  durationMs: number;
+  agentType: AgentType;
+  timestamp: string;
+}
+
+const agentCallHistory: AgentCallRecord[] = [];
+let totalPromptTokens = 0;
+let totalCalls = 0;
+let totalDurationMs = 0;
+
+function recordAgentCall(record: AgentCallRecord): void {
+  agentCallHistory.push(record);
+  totalPromptTokens += record.estimatedTokens;
+  totalCalls++;
+  totalDurationMs += record.durationMs;
+
+  runtimeLog.info(
+    `[${record.method}] prompt=${record.promptChars} chars (~${record.estimatedTokens} tokens), ` +
+    `duration=${(record.durationMs / 1000).toFixed(1)}s, ` +
+    `agent=${record.agentType}, ` +
+    `cumulative: ${totalCalls} calls, ~${totalPromptTokens} tokens total`,
+  );
+}
+
+export interface AgentCallStats {
+  totalCalls: number;
+  totalPromptTokens: number;
+  totalDurationMs: number;
+  /** Per-method breakdown */
+  byMethod: Record<string, { calls: number; promptTokens: number; durationMs: number }>;
+  /** Last N calls for debugging */
+  recentCalls: AgentCallRecord[];
+}
+
+/**
+ * Get aggregate stats about agent calls since process start.
+ */
+export function getAgentCallStats(recentCount = 20): AgentCallStats {
+  const byMethod: Record<string, { calls: number; promptTokens: number; durationMs: number }> = {};
+  for (const record of agentCallHistory) {
+    if (!byMethod[record.method]) {
+      byMethod[record.method] = { calls: 0, promptTokens: 0, durationMs: 0 };
+    }
+    byMethod[record.method].calls++;
+    byMethod[record.method].promptTokens += record.estimatedTokens;
+    byMethod[record.method].durationMs += record.durationMs;
+  }
+
+  return {
+    totalCalls,
+    totalPromptTokens,
+    totalDurationMs,
+    byMethod,
+    recentCalls: agentCallHistory.slice(-recentCount),
+  };
+}
+
+/**
+ * Reset agent call stats (for testing).
+ */
+export function resetAgentCallStats(): void {
+  agentCallHistory.length = 0;
+  totalPromptTokens = 0;
+  totalCalls = 0;
+  totalDurationMs = 0;
+}
+
+// ─── Logging Runtime Wrapper ─────────────────────────────────
+
+/**
+ * Wraps an AgentRuntime to automatically log prompt token counts
+ * and call duration for runSession, runSessionInteractive, and resumeSession.
+ */
+class LoggingRuntimeWrapper implements AgentRuntime {
+  constructor(private inner: AgentRuntime) {}
+
+  get type() { return this.inner.type; }
+  get capabilities() { return this.inner.capabilities; }
+
+  getSessionsDir() { return this.inner.getSessionsDir(); }
+  encodeProjectCwd(cwd: string) { return this.inner.encodeProjectCwd(cwd); }
+  detectNewSession(projectCwd: string, beforeTimestamp: Date) { return this.inner.detectNewSession(projectCwd, beforeTimestamp); }
+  cleanEnv() { return this.inner.cleanEnv(); }
+  analyzeSessionHealth(sessionId: string, knownFilePath?: string) { return this.inner.analyzeSessionHealth(sessionId, knownFilePath); }
+
+  async runSession(prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
+    const start = Date.now();
+    const tokens = estimateTokens(prompt);
+    runtimeLog.debug(`[runSession] starting: ~${tokens} tokens (${prompt.length} chars)`);
+    try {
+      return await this.inner.runSession(prompt, cwd, onPid, extraArgs);
+    } finally {
+      recordAgentCall({
+        method: "runSession",
+        promptChars: prompt.length,
+        estimatedTokens: tokens,
+        durationMs: Date.now() - start,
+        agentType: this.inner.type,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  async runSessionInteractive(prompt: string, cwd?: string, extraArgs?: string[]): Promise<string> {
+    const start = Date.now();
+    const tokens = estimateTokens(prompt);
+    runtimeLog.debug(`[runSessionInteractive] starting: ~${tokens} tokens (${prompt.length} chars)`);
+    try {
+      return await this.inner.runSessionInteractive(prompt, cwd, extraArgs);
+    } finally {
+      recordAgentCall({
+        method: "runSessionInteractive",
+        promptChars: prompt.length,
+        estimatedTokens: tokens,
+        durationMs: Date.now() - start,
+        agentType: this.inner.type,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  async resumeSession(sessionId: string, prompt: string, cwd?: string, onPid?: (pid: number) => void, extraArgs?: string[]): Promise<string> {
+    const start = Date.now();
+    const tokens = estimateTokens(prompt);
+    runtimeLog.debug(`[resumeSession] starting: ~${tokens} tokens (${prompt.length} chars), session=${sessionId}`);
+    try {
+      return await this.inner.resumeSession(sessionId, prompt, cwd, onPid, extraArgs);
+    } finally {
+      recordAgentCall({
+        method: "resumeSession",
+        promptChars: prompt.length,
+        estimatedTokens: tokens,
+        durationMs: Date.now() - start,
+        agentType: this.inner.type,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
 }

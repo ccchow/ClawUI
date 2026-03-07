@@ -1736,11 +1736,6 @@ export async function executeNextNode(
   });
 
   if (!candidate) {
-    // Check if all nodes are done
-    const allDone = blueprint.nodes.every((n) => n.status === "done" || n.status === "skipped");
-    if (allDone) {
-      updateBlueprint(blueprintId, { status: "done" });
-    }
     return null;
   }
 

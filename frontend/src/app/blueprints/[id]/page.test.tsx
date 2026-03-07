@@ -40,6 +40,8 @@ const apiMocks = vi.hoisted(() => ({
     { id: "uxd", label: "UXD", description: "UX Designer", builtin: true, artifactTypes: [], blockerTypes: [] },
   ])),
   fetchAutopilotLog: vi.fn((): Promise<AutopilotLogEntry[]> => Promise.resolve([])),
+  getBlueprintMessages: vi.fn(() => Promise.resolve({ messages: [], total: 0 })),
+  sendBlueprintMessage: vi.fn(() => Promise.resolve({ id: "msg-1", blueprintId: "bp-1", role: "user", content: "", acknowledged: false, createdAt: new Date().toISOString() })),
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -209,21 +211,19 @@ describe("BlueprintDetailPage", () => {
     });
   });
 
-  it("calls generatePlan when Generate button is clicked", async () => {
+  it("renders BlueprintChat for approved blueprints", async () => {
     const bp = makeMockBlueprint({ id: "bp-1", status: "approved", nodes: [] });
     apiMocks.getBlueprint.mockResolvedValue(bp);
 
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Generate nodes")).toBeInTheDocument();
+      expect(screen.getByText("Blueprint Chat")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByLabelText("Generate nodes"));
-
-    await waitFor(() => {
-      expect(apiMocks.generatePlan).toHaveBeenCalledWith("bp-1", undefined);
-    });
+    // Chat input should be present
+    expect(screen.getByPlaceholderText(/Ask autopilot/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Send message")).toBeInTheDocument();
   });
 
   it("shows Run All button for approved blueprints with pending nodes", async () => {
@@ -261,7 +261,7 @@ describe("BlueprintDetailPage", () => {
     });
   });
 
-  it("calls reevaluateAllNodes with confirmation flow", async () => {
+  it("calls reevaluateAllNodes when Reevaluate button is clicked", async () => {
     setupBlueprintWithNodes({ status: "approved" });
 
     renderPage();
@@ -271,17 +271,9 @@ describe("BlueprintDetailPage", () => {
       expect(screen.getByText("My Blueprint")).toBeInTheDocument();
     });
 
-    // Find the Reevaluate button — first click shows confirmation
+    // Find the Reevaluate button in BlueprintChat header — now executes directly
     const reevalBtn = screen.getByText("Reevaluate");
     fireEvent.click(reevalBtn);
-
-    // Confirmation: "Reevaluate?" with Yes/No
-    await waitFor(() => {
-      expect(screen.getByText("Reevaluate?")).toBeInTheDocument();
-    });
-
-    // Click Yes to confirm
-    fireEvent.click(screen.getByText("Yes"));
 
     await waitFor(() => {
       expect(apiMocks.reevaluateAllNodes).toHaveBeenCalledWith("bp-1");
@@ -1886,6 +1878,70 @@ describe("BlueprintDetailPage", () => {
   });
 
   // ─── Autopilot: Run All button label & styling ──────────────────
+
+  describe("BlueprintChat integration", () => {
+    it("renders BlueprintChat instead of old generator textarea for approved blueprints", async () => {
+      setupBlueprintWithNodes({ status: "approved" });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Blueprint Chat")).toBeInTheDocument();
+      });
+
+      // Chat input present, old generator textarea placeholder absent
+      expect(screen.getByPlaceholderText(/Ask autopilot/)).toBeInTheDocument();
+      // Old generator elements should not exist
+      expect(screen.queryByPlaceholderText(/Describe what you want/i)).not.toBeInTheDocument();
+    });
+
+    it("shows pause message inline in chat when autopilot is paused", async () => {
+      const bp = makeMockBlueprint({
+        id: "bp-1",
+        status: "paused",
+        executionMode: "autopilot",
+        pauseReason: "Safeguard: review needed",
+        nodes: [],
+      });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Blueprint Chat")).toBeInTheDocument();
+      });
+
+      // Pause message appears inside the chat, not as a standalone banner
+      await waitFor(() => {
+        expect(screen.getByText("Autopilot Paused")).toBeInTheDocument();
+      });
+      expect(screen.getByText("Safeguard: review needed")).toBeInTheDocument();
+      expect(screen.getByText(/Resume Autopilot/)).toBeInTheDocument();
+    });
+
+    it("does not render a standalone AutopilotLog section on the blueprint detail page", async () => {
+      const bp = makeMockBlueprint({
+        id: "bp-1",
+        status: "running",
+        executionMode: "autopilot",
+        nodes: [makeMockNode({ id: "n-1", seq: 1, status: "running" })],
+      });
+      apiMocks.getBlueprint.mockResolvedValue(bp);
+      apiMocks.fetchAutopilotLog.mockResolvedValue([
+        { id: "log-1", blueprintId: "bp-1", iteration: 1, decision: "Test", action: "run_node", createdAt: "2025-06-01T12:00:00Z" } as AutopilotLogEntry,
+      ]);
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Blueprint Chat")).toBeInTheDocument();
+      });
+
+      // The log entry is visible (rendered inside BlueprintChat)
+      // But there should be no separate "Autopilot Log" header/section
+      expect(screen.queryByText("Autopilot Log")).not.toBeInTheDocument();
+    });
+  });
 
   describe("Autopilot Run All button", () => {
     it("shows 'Run All (Autopilot)' label when executionMode is autopilot", async () => {

@@ -7,7 +7,7 @@ import { acquireSessionLock, releaseSessionLock, isSessionRunning } from "./sess
 import { getProjects, getSessions, getTimeline, getLastMessage, syncAll, syncSession, getAvailableAgents, getSessionAgentType, getSessionCwdFromDb } from "./db.js";
 import { getEnrichments, updateSessionMeta, updateNodeMeta, getAllTags } from "./enrichment.js";
 import type { AgentType } from "./agent-runtime.js";
-import { getRegisteredRuntimes, getRuntimeByType } from "./agent-runtime.js";
+import { getRegisteredRuntimes, getRuntimeByType, getAgentCallStats } from "./agent-runtime.js";
 // Side-effect imports: ensure all agent runtimes are registered before getRegisteredRuntimes() is called
 import "./agent-claude.js";
 import "./agent-pimono.js";
@@ -364,6 +364,12 @@ router.get("/api/sessions/:id/health", (req, res) => {
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
+});
+
+// GET /api/agent-stats — prompt token usage and performance stats for agent calls
+router.get("/api/agent-stats", (_req, res) => {
+  const stats = getAgentCallStats();
+  res.json(stats);
 });
 
 // ─── Agent Discovery ────────────────────────────────────────────

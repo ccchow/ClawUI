@@ -19,6 +19,9 @@ vi.mock("../plan-db.js", () => ({
   getAutopilotLog: vi.fn(),
   setAutopilotMemory: vi.fn(),
   getAutopilotMemory: vi.fn(),
+  getUnacknowledgedMessages: vi.fn(),
+  acknowledgeMessage: vi.fn(),
+  getArtifactsForNode: vi.fn(),
 }));
 
 // Mock plan-executor.js
@@ -118,6 +121,9 @@ import {
   createConveneSession,
   getAutopilotLog,
   setAutopilotMemory,
+  getUnacknowledgedMessages,
+  acknowledgeMessage,
+  getArtifactsForNode,
 } from "../plan-db.js";
 import type { MacroNodeStatus, Artifact, NodeExecution } from "../plan-db.js";
 import {
@@ -128,13 +134,6 @@ import {
   addPendingTask,
   removePendingTask,
 } from "../plan-executor.js";
-import {
-  enrichNodeInternal,
-  reevaluateNodeInternal,
-  splitNodeInternal,
-  smartDepsInternal,
-  reevaluateAllInternal,
-} from "../plan-operations.js";
 import { coordinateBlueprint } from "../plan-coordinator.js";
 import { getDb } from "../db.js";
 import { getActiveRuntime } from "../agent-runtime.js";
@@ -234,42 +233,34 @@ describe("autopilot", () => {
       expect(state.nodes[3].error).toBe("Some error");
     });
 
-    it("truncates descriptions to 200 chars", () => {
+    it("does not include description or suggestions in node snapshots (fetched on-demand via read tools)", () => {
       const longDesc = "a".repeat(250);
-      const nodes = [mockNode({ id: "n1", description: longDesc })];
-      const bp = mockBlueprint({ nodes });
-      vi.mocked(getBlueprint).mockReturnValue(bp);
-      vi.mocked(getSuggestionsForNode).mockReturnValue([]);
-      vi.mocked(getInsightsForBlueprint).mockReturnValue([]);
-      vi.mocked(getQueueInfo).mockReturnValue({ running: false, pendingTasks: [], queueLength: 0 });
-
-      const state = buildStateSnapshot("bp-1");
-
-      expect(state.nodes[0].description.length).toBe(200);
-      expect(state.nodes[0].description.endsWith("...")).toBe(true);
-    });
-
-    it("does not truncate descriptions <= 200 chars", () => {
-      const desc = "a".repeat(200);
-      const nodes = [mockNode({ id: "n1", description: desc })];
-      const bp = mockBlueprint({ nodes });
-      vi.mocked(getBlueprint).mockReturnValue(bp);
-      vi.mocked(getSuggestionsForNode).mockReturnValue([]);
-      vi.mocked(getInsightsForBlueprint).mockReturnValue([]);
-      vi.mocked(getQueueInfo).mockReturnValue({ running: false, pendingTasks: [], queueLength: 0 });
-
-      const state = buildStateSnapshot("bp-1");
-
-      expect(state.nodes[0].description.length).toBe(200);
-      expect(state.nodes[0].description).toBe(desc);
-    });
-
-    it("filters out used suggestions and truncates suggestion descriptions to 150 chars", () => {
-      const longSugDesc = "s".repeat(200);
       const suggestions = [
         { id: "s1", nodeId: "n1", blueprintId: "bp-1", title: "Fix A", description: "short", used: false, createdAt: "" },
         { id: "s2", nodeId: "n1", blueprintId: "bp-1", title: "Fix B", description: "used one", used: true, createdAt: "" },
-        { id: "s3", nodeId: "n1", blueprintId: "bp-1", title: "Fix C", description: longSugDesc, used: false, roles: ["qa"], createdAt: "" },
+      ];
+      const nodes = [mockNode({ id: "n1", description: longDesc })];
+      const bp = mockBlueprint({ nodes });
+      vi.mocked(getBlueprint).mockReturnValue(bp);
+      vi.mocked(getSuggestionsForNode).mockReturnValue(suggestions);
+      vi.mocked(getInsightsForBlueprint).mockReturnValue([]);
+      vi.mocked(getQueueInfo).mockReturnValue({ running: false, pendingTasks: [], queueLength: 0 });
+
+      const state = buildStateSnapshot("bp-1");
+
+      // Node snapshots should not have description or suggestions
+      expect(state.nodes[0]).not.toHaveProperty("description");
+      expect(state.nodes[0]).not.toHaveProperty("suggestions");
+      // But should have core fields
+      expect(state.nodes[0].id).toBe("n1");
+      expect(state.nodes[0].title).toBeDefined();
+      expect(state.nodes[0].status).toBeDefined();
+    });
+
+    it("counts unused suggestions in summary even though they are not on node objects", () => {
+      const suggestions = [
+        { id: "s1", nodeId: "n1", blueprintId: "bp-1", title: "Fix A", description: "short", used: false, createdAt: "" },
+        { id: "s2", nodeId: "n1", blueprintId: "bp-1", title: "Fix B", description: "used one", used: true, createdAt: "" },
       ];
       const bp = mockBlueprint({ nodes: [mockNode({ id: "n1" })] });
       vi.mocked(getBlueprint).mockReturnValue(bp);
@@ -279,17 +270,8 @@ describe("autopilot", () => {
 
       const state = buildStateSnapshot("bp-1");
 
-      // Only unused suggestions
-      expect(state.nodes[0].suggestions).toHaveLength(2);
-      expect(state.nodes[0].suggestions[0].id).toBe("s1");
-      expect(state.nodes[0].suggestions[1].id).toBe("s3");
-
-      // Truncated to 150 chars
-      expect(state.nodes[0].suggestions[1].description.length).toBe(150);
-      expect(state.nodes[0].suggestions[1].description.endsWith("...")).toBe(true);
-
-      // Roles included
-      expect(state.nodes[0].suggestions[1].roles).toEqual(["qa"]);
+      // Summary should mention 1 unused suggestion
+      expect(state.summary).toContain("1 unused suggestion");
     });
 
     it("only includes unread, undismissed insights and auto-marks them as read", () => {
@@ -553,60 +535,183 @@ describe("autopilot", () => {
       expect(removePendingTask).toHaveBeenCalled();
     });
 
-    it("reevaluate_node: reevaluates node directly", async () => {
+    it("get_node_titles: returns all nodes with summary fields only (no descriptions)", async () => {
+      const nodes = [
+        mockNode({ id: "n1", seq: 1, title: "Setup", status: "done" }),
+        mockNode({ id: "n2", seq: 2, title: "Build", status: "pending", dependencies: ["n1"], roles: ["sde"] }),
+      ];
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint({ nodes }));
+
       const decision: AutopilotDecision = {
-        reasoning: "Re-check",
-        action: "reevaluate_node",
-        params: { nodeId: "n1" },
+        reasoning: "Check plan structure",
+        action: "get_node_titles",
+        params: {},
       };
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(reevaluateNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
-      expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "reevaluate" }));
-      expect(removePendingTask).toHaveBeenCalled();
+      const titles = JSON.parse(result.message);
+      expect(titles).toHaveLength(2);
+      expect(titles[0].id).toBe("n1");
+      expect(titles[1].deps).toEqual(["n1"]);
     });
 
-    it("enrich_node: enriches node directly", async () => {
+    it("get_node_details: returns full node context", async () => {
+      const nodes = [
+        mockNode({ id: "dep-1", seq: 1, title: "Dep", status: "done" }),
+        mockNode({ id: "n1", seq: 2, title: "Main", status: "pending", dependencies: ["dep-1"], description: "Full desc" }),
+      ];
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint({ nodes }));
+      vi.mocked(getArtifactsForNode).mockReturnValue([]);
+      vi.mocked(getSuggestionsForNode).mockReturnValue([]);
+
       const decision: AutopilotDecision = {
-        reasoning: "Needs details",
-        action: "enrich_node",
+        reasoning: "Need context",
+        action: "get_node_details",
         params: { nodeId: "n1" },
       };
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(enrichNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
-      expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "enrich" }));
-      expect(removePendingTask).toHaveBeenCalled();
+      const details = JSON.parse(result.message);
+      expect(details.title).toBe("Main");
+      expect(details.description).toBe("Full desc");
+      expect(details.dependencies[0].title).toBe("Dep");
     });
 
-    it("split_node: splits node directly", async () => {
+    it("get_node_handoff: returns latest handoff content", async () => {
+      vi.mocked(getArtifactsForNode).mockReturnValue([
+        { id: "a1", blueprintId: "bp-1", type: "handoff_summary", content: "Result data", createdAt: "2024-01-01", sourceNodeId: "n1" },
+      ] as ReturnType<typeof getArtifactsForNode>);
+
       const decision: AutopilotDecision = {
-        reasoning: "Too complex",
-        action: "split_node",
+        reasoning: "Need output",
+        action: "get_node_handoff",
         params: { nodeId: "n1" },
       };
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(splitNodeInternal).toHaveBeenCalledWith("bp-1", "n1");
-      expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "split" }));
-      expect(removePendingTask).toHaveBeenCalled();
+      const handoff = JSON.parse(result.message);
+      expect(handoff.handoff).toBe("Result data");
     });
 
-    it("smart_dependencies: runs smart deps directly", async () => {
+    it("get_node_handoff: returns null when no handoff exists", async () => {
+      vi.mocked(getArtifactsForNode).mockReturnValue([]);
+
       const decision: AutopilotDecision = {
-        reasoning: "Auto-detect deps",
-        action: "smart_dependencies",
+        reasoning: "Check handoff",
+        action: "get_node_handoff",
         params: { nodeId: "n1" },
       };
       const result = await executeDecision("bp-1", decision);
 
       expect(result.success).toBe(true);
-      expect(smartDepsInternal).toHaveBeenCalledWith("bp-1", "n1");
-      expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "smart_deps" }));
-      expect(removePendingTask).toHaveBeenCalled();
+      const handoff = JSON.parse(result.message);
+      expect(handoff.nodeId).toBe("n1");
+      expect(handoff.handoff).toBeNull();
+    });
+
+    it("get_node_details: includes resolved deps, handoff, and suggestions", async () => {
+      const nodes = [
+        mockNode({ id: "dep-1", seq: 1, title: "Dep Node", status: "done" }),
+        mockNode({ id: "n1", seq: 2, title: "Main", status: "pending", dependencies: ["dep-1"], description: "Full desc", prompt: "Do X" }),
+      ];
+      vi.mocked(getBlueprint).mockReturnValue(mockBlueprint({ nodes }));
+      vi.mocked(getArtifactsForNode).mockReturnValue([
+        { id: "a1", blueprintId: "bp-1", type: "handoff_summary", content: "Handoff content", createdAt: "2024-01-01", sourceNodeId: "n1" },
+      ] as ReturnType<typeof getArtifactsForNode>);
+      vi.mocked(getSuggestionsForNode).mockReturnValue([
+        { id: "s1", nodeId: "n1", blueprintId: "bp-1", title: "Add tests", description: "Cover edge cases", used: false, createdAt: "" },
+        { id: "s2", nodeId: "n1", blueprintId: "bp-1", title: "Used one", description: "Already done", used: true, createdAt: "" },
+      ]);
+
+      const decision: AutopilotDecision = {
+        reasoning: "Need full context",
+        action: "get_node_details",
+        params: { nodeId: "n1" },
+      };
+      const result = await executeDecision("bp-1", decision);
+
+      expect(result.success).toBe(true);
+      const details = JSON.parse(result.message);
+      expect(details.description).toBe("Full desc");
+      expect(details.prompt).toBe("Do X");
+      expect(details.dependencies[0].title).toBe("Dep Node");
+      expect(details.dependencies[0].status).toBe("done");
+      expect(details.latestHandoff).toBe("Handoff content");
+      // Only unused suggestions included
+      expect(details.unusedSuggestions).toHaveLength(1);
+      expect(details.unusedSuggestions[0].title).toBe("Add tests");
+    });
+
+    it("acknowledge_message: returns error for non-existent message", async () => {
+      vi.mocked(acknowledgeMessage).mockReturnValue(false);
+
+      const decision: AutopilotDecision = {
+        reasoning: "Ack unknown",
+        action: "acknowledge_message",
+        params: { messageId: "non-existent" },
+      };
+      const result = await executeDecision("bp-1", decision);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("not_found");
+    });
+
+    it("removed tools (enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all) return unknown_action error", async () => {
+      const removedTools = [
+        "enrich_node",
+        "split_node",
+        "smart_dependencies",
+        "reevaluate_node",
+        "reevaluate_all",
+      ];
+
+      for (const toolName of removedTools) {
+        const decision: AutopilotDecision = {
+          reasoning: "Try removed tool",
+          action: toolName,
+          params: { nodeId: "n1" },
+        };
+        const result = await executeDecision("bp-1", decision);
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("unknown_action");
+        expect(result.message).toContain(toolName);
+      }
+    });
+
+    it("read_user_messages: returns unacknowledged messages", async () => {
+      vi.mocked(getUnacknowledgedMessages).mockReturnValue([
+        { id: "m1", blueprintId: "bp-1", role: "user", content: "Please focus on tests", acknowledged: false, createdAt: "2024-01-01" },
+      ]);
+
+      const decision: AutopilotDecision = {
+        reasoning: "Check messages",
+        action: "read_user_messages",
+        params: {},
+      };
+      const result = await executeDecision("bp-1", decision);
+
+      expect(result.success).toBe(true);
+      const messages = JSON.parse(result.message);
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe("Please focus on tests");
+    });
+
+    it("acknowledge_message: marks message as acknowledged", async () => {
+      vi.mocked(acknowledgeMessage).mockReturnValue(true);
+
+      const decision: AutopilotDecision = {
+        reasoning: "Ack message",
+        action: "acknowledge_message",
+        params: { messageId: "m1" },
+      };
+      const result = await executeDecision("bp-1", decision);
+
+      expect(result.success).toBe(true);
+      expect(acknowledgeMessage).toHaveBeenCalledWith("m1");
     });
 
     it("create_node: creates a new node with dependencies and roles", async () => {
@@ -788,43 +893,6 @@ describe("autopilot", () => {
       expect(removePendingTask).toHaveBeenCalled();
     });
 
-    it("reevaluate_all: reevaluates all non-done nodes directly", async () => {
-      const bp = mockBlueprint({
-        nodes: [
-          mockNode({ id: "n1", status: "done" }),
-          mockNode({ id: "n2", status: "pending" }),
-          mockNode({ id: "n3", status: "failed" }),
-        ],
-      });
-      vi.mocked(getBlueprint).mockReturnValue(bp);
-
-      const decision: AutopilotDecision = {
-        reasoning: "Quality check",
-        action: "reevaluate_all",
-        params: {},
-      };
-      const result = await executeDecision("bp-1", decision);
-
-      expect(result.success).toBe(true);
-      expect(result.message).toContain("2 nodes");
-      expect(reevaluateAllInternal).toHaveBeenCalledWith("bp-1");
-      expect(addPendingTask).toHaveBeenCalledTimes(2);
-    });
-
-    it("reevaluate_all: returns error if no nodes to reevaluate", async () => {
-      const bp = mockBlueprint({ nodes: [mockNode({ id: "n1", status: "done" })] });
-      vi.mocked(getBlueprint).mockReturnValue(bp);
-
-      const decision: AutopilotDecision = {
-        reasoning: "Check all",
-        action: "reevaluate_all",
-        params: {},
-      };
-      const result = await executeDecision("bp-1", decision);
-      expect(result.success).toBe(false);
-      expect(result.error).toBe("no_nodes");
-    });
-
     it("mark_insight_read: marks insight as read", async () => {
       vi.mocked(markInsightRead).mockReturnValue({ id: "i1" } as ReturnType<typeof markInsightRead>);
       const decision: AutopilotDecision = {
@@ -885,7 +953,7 @@ describe("autopilot", () => {
       expect(result.success).toBe(false);
     });
 
-    it("pause: pauses the blueprint with reason", async () => {
+    it("pause: sets pauseReason without changing blueprint status", async () => {
       const decision: AutopilotDecision = {
         reasoning: "Need input",
         action: "pause",
@@ -895,9 +963,10 @@ describe("autopilot", () => {
 
       expect(result.success).toBe(true);
       expect(updateBlueprint).toHaveBeenCalledWith("bp-1", {
-        status: "paused",
         pauseReason: "Architecture decision needed",
       });
+      // Status should NOT be changed — user-managed only
+      expect(updateBlueprint).not.toHaveBeenCalledWith("bp-1", expect.objectContaining({ status: expect.anything() }));
     });
 
     it("pause: uses default reason if none provided", async () => {
@@ -909,21 +978,8 @@ describe("autopilot", () => {
       const result = await executeDecision("bp-1", decision);
       expect(result.success).toBe(true);
       expect(updateBlueprint).toHaveBeenCalledWith("bp-1", {
-        status: "paused",
         pauseReason: "Autopilot paused by AI decision",
       });
-    });
-
-    it("complete: marks blueprint as done", async () => {
-      const decision: AutopilotDecision = {
-        reasoning: "All finished",
-        action: "complete",
-        params: {},
-      };
-      const result = await executeDecision("bp-1", decision);
-
-      expect(result.success).toBe(true);
-      expect(updateBlueprint).toHaveBeenCalledWith("bp-1", { status: "done" });
     });
 
     it("unknown action: returns error", async () => {
@@ -1195,6 +1251,40 @@ describe("autopilot", () => {
         }
         expect(iteration >= maxIterations).toBe(true);
       });
+
+      it("FSD mode defaults to Infinity (no iteration limit)", () => {
+        // FSD mode should not have a hard-coded iteration limit.
+        // The default maxIterations for FSD is Infinity, so the loop never
+        // triggers the max-iterations safeguard unless user explicitly sets one.
+        const isFsd = true;
+        const userMaxIterations = undefined;
+        const maxIterations = userMaxIterations ?? (isFsd ? Infinity : 50);
+        expect(maxIterations).toBe(Infinity);
+
+        // The while loop condition still works with Infinity
+        let iteration = 0;
+        const exitAt = 500; // simulate 500 iterations without hitting a limit
+        while (iteration < maxIterations && iteration < exitAt) {
+          iteration++;
+        }
+        expect(iteration).toBe(exitAt);
+        // Max iterations safeguard should NOT trigger
+        expect(maxIterations !== Infinity && iteration >= maxIterations).toBe(false);
+      });
+
+      it("FSD mode respects user-set maxIterations when provided", () => {
+        const isFsd = true;
+        const userMaxIterations = 100;
+        const maxIterations = userMaxIterations ?? (isFsd ? Infinity : 50);
+        expect(maxIterations).toBe(100);
+      });
+
+      it("autopilot mode still defaults to 50 iterations", () => {
+        const isFsd = false;
+        const userMaxIterations = undefined;
+        const maxIterations = userMaxIterations ?? (isFsd ? Infinity : 50);
+        expect(maxIterations).toBe(50);
+      });
     });
   });
 
@@ -1263,10 +1353,79 @@ describe("autopilot", () => {
       expect(prompt).toContain("resume_node");
       expect(prompt).toContain("create_node");
       expect(prompt).toContain("pause");
-      expect(prompt).toContain("complete");
       expect(prompt).toContain("Decision Format");
       expect(prompt).toContain('"reasoning"');
       expect(prompt).toContain('"action"');
+    });
+
+    it("FSD mode with Infinity shows no iteration limit in prompt", () => {
+      const state: AutopilotState = {
+        blueprint: {
+          id: "bp-1",
+          title: "Test",
+          description: "Test",
+          status: "running",
+          enabledRoles: [],
+        },
+        nodes: [],
+        insights: [],
+        queueInfo: { running: false, pendingTasks: [] },
+        allNodesDone: false,
+        summary: "0/0 nodes done",
+      };
+
+      const prompt = buildAutopilotPrompt(state, 10, Infinity, { blueprint: null, global: null }, true);
+
+      // Should NOT show "Iteration 10 of Infinity" or "Infinity iterations left"
+      expect(prompt).toContain("Iteration 10");
+      expect(prompt).not.toContain("Iteration 10 of");
+      expect(prompt).not.toContain("Infinity");
+      // Should show FSD-specific guidelines
+      expect(prompt).toContain("No iteration limit");
+      expect(prompt).toContain("FSD Mode");
+    });
+  });
+
+  describe("buildAutopilotPrompt user message injection", () => {
+    const baseState: AutopilotState = {
+      blueprint: { id: "bp-1", title: "Test", description: "Test", status: "running", enabledRoles: [] },
+      nodes: [],
+      insights: [],
+      queueInfo: { running: false, pendingTasks: [] },
+      allNodesDone: false,
+      summary: "0/0 nodes done",
+    };
+
+    it("includes user messages section when messages are provided", () => {
+      const messages = [
+        { id: "m1", blueprintId: "bp-1", role: "user" as const, content: "Please focus on testing", acknowledged: false, createdAt: "2024-01-01" },
+        { id: "m2", blueprintId: "bp-1", role: "user" as const, content: "Skip node 3", acknowledged: false, createdAt: "2024-01-02" },
+      ];
+
+      const prompt = buildAutopilotPrompt(baseState, 1, 50, { blueprint: null, global: null }, false, messages);
+
+      expect(prompt).toContain("## User Messages (HIGHEST PRIORITY");
+      expect(prompt).toContain("[m1] Please focus on testing");
+      expect(prompt).toContain("[m2] Skip node 3");
+      expect(prompt).toContain("acknowledge_message(messageId)");
+    });
+
+    it("omits user messages injection section when no messages provided", () => {
+      const prompt = buildAutopilotPrompt(baseState, 1, 50, { blueprint: null, global: null }, false, []);
+
+      // The "## User Messages" section should NOT be present
+      expect(prompt).not.toContain("## User Messages (HIGHEST PRIORITY");
+      expect(prompt).not.toContain("acknowledge_message(messageId) to mark it as handled");
+    });
+
+    it("includes read tools (get_node_titles, get_node_details, get_node_handoff) in tool descriptions", () => {
+      const prompt = buildAutopilotPrompt(baseState, 1, 50);
+
+      expect(prompt).toContain("get_node_titles");
+      expect(prompt).toContain("get_node_details");
+      expect(prompt).toContain("get_node_handoff");
+      expect(prompt).toContain("read_user_messages");
+      expect(prompt).toContain("acknowledge_message");
     });
   });
 
@@ -1403,8 +1562,8 @@ describe("autopilot", () => {
       expect(stats.neverUsedTools).not.toContain("run_node");
       expect(stats.neverUsedTools).not.toContain("pause");
       expect(stats.neverUsedTools).toContain("resume_node");
-      expect(stats.neverUsedTools).toContain("enrich_node");
-      expect(stats.neverUsedTools).toContain("complete");
+      expect(stats.neverUsedTools).toContain("get_node_titles");
+      expect(stats.neverUsedTools).toContain("coordinate");
     });
 
     it("counts consecutiveRunNodeCount correctly (3 at end)", () => {

@@ -174,7 +174,7 @@ describe("autopilot integration", () => {
   // ─── 1. Full Lifecycle ───────────────────────────────────
 
   describe("full lifecycle", () => {
-    it("runs nodes in dependency order and auto-completes blueprint", async () => {
+    it("runs nodes in dependency order and exits loop when all done", async () => {
       const bp = setup("Lifecycle");
       const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
       const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2, dependencies: [nodeA.id] });
@@ -189,21 +189,22 @@ describe("autopilot integration", () => {
 
       // Blueprint is done
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
 
       // All nodes are done
       for (const node of final.nodes) {
         expect(node.status).toBe("done");
       }
 
-      // 4 log entries: 3 run_node + 1 auto-complete
+      // 4 log entries: 3 run_node + 1 loop_exit
       const logs = db.getAutopilotLog(bp.id, 10, 0);
       expect(logs.length).toBe(4);
 
-      // Auto-complete entry
-      const completionLog = logs.find((l) => l.decision.includes("All nodes complete"));
-      expect(completionLog).toBeDefined();
-      expect(completionLog!.result).toBe("complete");
+      // Loop exit entry
+      const exitLog = logs.find((l) => l.decision.includes("All nodes complete"));
+      expect(exitLog).toBeDefined();
+      expect(exitLog!.result).toBe("loop_exit");
 
       // 3 run_node entries
       const runLogs = logs.filter((l) => l.action === "run_node");
@@ -213,42 +214,39 @@ describe("autopilot integration", () => {
       expect(mockRunSession).toHaveBeenCalledTimes(5);
     });
 
-    it("does not auto-exit when unused suggestions remain after all nodes done", async () => {
+    it("exits loop when all nodes are already done (even with unused suggestions)", async () => {
       const bp = setup("Suggestions Triage");
       const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
-      // Pre-mark node A as done so allNodesDone is true from the start
+      // Pre-mark node A as done
       db.updateMacroNode(bp.id, nodeA.id, { status: "done" as any });
-      // Add an unused suggestion — should prevent auto-exit
       db.createSuggestion(bp.id, nodeA.id, "Add logging", "Should add structured logging");
-
-      // LLM is consulted and decides to complete
-      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
-      // LLM was called: 1 decision + 1 final reflection + 1 global memory update
-      expect(mockRunSession).toHaveBeenCalledTimes(3);
+      // Auto-complete fires immediately — no LLM decision calls needed
+      // Only final reflection + global memory update
+      expect(mockRunSession).toHaveBeenCalledTimes(2);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
     });
 
-    it("does not auto-exit when unread insights remain after all nodes done", async () => {
+    it("exits loop when insights exist and all nodes done", async () => {
       const bp = setup("Insights Triage");
       const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
       db.updateMacroNode(bp.id, nodeA.id, { status: "done" as any });
-      // Add an unread insight — should prevent auto-exit
       db.createInsight(bp.id, nodeA.id, "evaluator", "warning", "Consider refactoring");
-
-      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
-      // 1 decision + 1 final reflection + 1 global memory update
-      expect(mockRunSession).toHaveBeenCalledTimes(3);
+      // Auto-complete fires immediately — no LLM decision calls needed
+      // Only final reflection + global memory update
+      expect(mockRunSession).toHaveBeenCalledTimes(2);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
     });
 
     it("creates nodes from suggestions and marks them used", async () => {
@@ -257,7 +255,7 @@ describe("autopilot integration", () => {
       const nodeB = db.createMacroNode(bp.id, { title: "Deploy", order: 2, dependencies: [nodeA.id] });
       const suggestion = db.createSuggestion(bp.id, nodeA.id, "Add tests", "Should have unit tests");
 
-      // AI: run A → create_node from suggestion → mark_suggestion_used → run B → run new node → auto-complete
+      // AI: run A → create_node from suggestion → mark_suggestion_used → run B → run new node → complete
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
         .mockResolvedValueOnce(dec("create_node", {
@@ -275,11 +273,17 @@ describe("autopilot integration", () => {
         return dec("run_node", { nodeId: newNode!.id });
       });
 
+      // Reflection triggered at iteration 5 (REFLECT_EVERY_N=5)
+      mockRunSession.mockResolvedValueOnce("## Memory\nOk.");
+      // After all nodes are done, LLM explicitly completes
+      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
+
       await ap.runAutopilotLoop(bp.id);
 
       // Blueprint done
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       expect(final.nodes.length).toBe(3); // A, B, new node
 
       // Suggestion marked used
@@ -299,12 +303,14 @@ describe("autopilot integration", () => {
 
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
-        .mockResolvedValueOnce(dec("skip_node", { nodeId: nodeB.id, reason: "Not needed" }));
+        .mockResolvedValueOnce(dec("skip_node", { nodeId: nodeB.id, reason: "Not needed" }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       expect(final.nodes.find((n) => n.id === nodeA.id)!.status).toBe("done");
       expect(final.nodes.find((n) => n.id === nodeB.id)!.status).toBe("skipped");
       expect(final.nodes.find((n) => n.id === nodeB.id)!.error).toContain("Not needed");
@@ -321,12 +327,14 @@ describe("autopilot integration", () => {
 
       mockRunSession
         .mockResolvedValueOnce(dec("resume_node", { nodeId: nodeA.id, feedback: "Try again with longer timeout" }))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
 
       // Both nodes done
       expect(final.nodes.find((n) => n.id === nodeA.id)!.status).toBe("done");
@@ -347,12 +355,14 @@ describe("autopilot integration", () => {
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
         .mockResolvedValueOnce(dec("evaluate_node", { nodeId: nodeA.id }))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       expect(mockEvaluateNodeCompletion).toHaveBeenCalledTimes(1);
     });
 
@@ -365,12 +375,14 @@ describe("autopilot integration", () => {
       mockRunSession
         .mockResolvedValueOnce(dec("mark_insight_read", { insightId: insight1.id }))
         .mockResolvedValueOnce(dec("dismiss_insight", { insightId: insight2.id }))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
 
       // getInsightsForBlueprint filters dismissed=0, so dismissed insight won't appear
       const insights = db.getInsightsForBlueprint(bp.id);
@@ -385,12 +397,14 @@ describe("autopilot integration", () => {
 
       mockRunSession
         .mockResolvedValueOnce(dec("update_node", { nodeId: nodeA.id, title: "Better Title", description: "Improved desc" }))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       expect(final.nodes[0].title).toBe("Better Title");
       expect(final.nodes[0].description).toBe("Improved desc");
     });
@@ -398,7 +412,7 @@ describe("autopilot integration", () => {
     it("handles batch_create_nodes", async () => {
       const bp = setup("Batch Create");
       const nodeA = db.createMacroNode(bp.id, { title: "Existing", order: 1 });
-      // Second node prevents auto-completion after A is done
+      // Second node ensures A is not the only node
       const nodeB = db.createMacroNode(bp.id, { title: "Blocker", order: 2, dependencies: [nodeA.id] });
 
       mockRunSession
@@ -423,10 +437,16 @@ describe("autopilot integration", () => {
         return dec("run_node", { nodeId: bn2!.id });
       });
 
+      // Reflection triggered at iteration 5 (REFLECT_EVERY_N=5)
+      mockRunSession.mockResolvedValueOnce("## Memory\nOk.");
+      // After all nodes are done, LLM explicitly completes
+      mockRunSession.mockResolvedValueOnce(dec("complete", {}));
+
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       expect(final.nodes.length).toBe(4); // Existing + Blocker + 2 batch nodes
 
       const bn2 = final.nodes.find((n) => n.title === "Batch Node 2")!;
@@ -490,7 +510,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toBe("Need human review of architecture");
 
       // Only 1 log entry
@@ -508,7 +529,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toBe("Autopilot paused by AI decision");
     });
   });
@@ -522,11 +544,9 @@ describe("autopilot integration", () => {
 
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
-        // After A is done but before allNodesDone is detected, AI might say complete
-        // Actually allNodesDone will be true, so this won't be reached — use skip instead
         .mockResolvedValueOnce(dec("complete", {}));
 
-      // Prevent auto-complete by keeping a node that's not done
+      // Add a second node so AI can demonstrate early completion
       const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
 
       // First run A, then AI decides to complete early (skipping B)
@@ -538,7 +558,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
       // B is still pending — AI chose to complete without finishing all nodes
       expect(final.nodes.find((n) => n.id === nodeB.id)!.status).toBe("pending");
     });
@@ -600,7 +621,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toContain("repeating the same action 3 times");
 
       // 3 iterations occurred
@@ -626,7 +648,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toContain("No progress");
 
       // checkNoProgress: iter 1 sets baseline, iters 2-6 count as no-progress (5 total) → pause at iter 6
@@ -650,7 +673,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toContain("maximum iterations (3)");
     });
 
@@ -679,7 +703,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toContain("resumed");
     });
   });
@@ -716,12 +741,13 @@ describe("autopilot integration", () => {
 
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }, "First action"))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }, "Second action"));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }, "Second action"))
+        .mockResolvedValueOnce(dec("complete", {}, "All done"));
 
       await ap.runAutopilotLoop(bp.id);
 
       const logs = db.getAutopilotLog(bp.id, 10, 0);
-      // 2 run_node + 1 auto-complete = 3 entries
+      // 2 run_node + 1 complete = 3 entries
       expect(logs.length).toBe(3);
 
       const runLog = logs.find((l) => l.action === "run_node" && l.iteration === 1);
@@ -746,12 +772,14 @@ describe("autopilot integration", () => {
       // First call fails, retry prompt also fails → fallback to pause
       mockRunSession
         .mockRejectedValueOnce(new Error("Network timeout"))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
+        .mockResolvedValueOnce(dec("complete", {}));
 
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("done");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
 
       // Error was logged but loop continued
       const logs = db.getAutopilotLog(bp.id, 10, 0);
@@ -776,7 +804,8 @@ describe("autopilot integration", () => {
       await ap.runAutopilotLoop(bp.id);
 
       const final = db.getBlueprint(bp.id)!;
-      expect(final.status).toBe("paused");
+      // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
       expect(final.pauseReason).toContain("AI response was not valid JSON");
     });
   });
@@ -1079,11 +1108,18 @@ describe("autopilot integration", () => {
       // Track which blueprint's nodes get executed
       const executedNodes: string[] = [];
 
+      const bp1Calls = { count: 0 };
+      const bp2Calls = { count: 0 };
+
       mockRunSession.mockImplementation(async (prompt: string) => {
         if (prompt.includes("Blueprint 1")) {
-          return dec("run_node", { nodeId: node1.id });
+          bp1Calls.count++;
+          if (bp1Calls.count === 1) return dec("run_node", { nodeId: node1.id });
+          return dec("complete", {});
         }
-        return dec("run_node", { nodeId: node2.id });
+        bp2Calls.count++;
+        if (bp2Calls.count === 1) return dec("run_node", { nodeId: node2.id });
+        return dec("complete", {});
       });
 
       mockExecuteNodeDirect.mockImplementation(async (bpId: string, nodeId: string) => {
@@ -1097,11 +1133,11 @@ describe("autopilot integration", () => {
         ap.runAutopilotLoop(bp2.id),
       ]);
 
-      // Both blueprints should be done
+      // Both blueprints completed their loops — status unchanged
       const final1 = db.getBlueprint(bp1.id)!;
       const final2 = db.getBlueprint(bp2.id)!;
-      expect(final1.status).toBe("done");
-      expect(final2.status).toBe("done");
+      expect(final1.status).toBe("approved");
+      expect(final2.status).toBe("approved");
 
       // Each blueprint's node was executed
       expect(executedNodes).toContain(`${bp1.id}:${node1.id}`);
@@ -1194,10 +1230,11 @@ describe("autopilot integration", () => {
           nodes.push(db.createMacroNode(bp.id, { title: `Node ${i}`, order: i + 1 }));
         }
 
-        // Queue 6 run_node decisions
+        // Queue 6 run_node decisions + explicit complete
         for (const node of nodes) {
           mockRunSession.mockResolvedValueOnce(dec("run_node", { nodeId: node.id }));
         }
+        mockRunSession.mockResolvedValueOnce(dec("complete", {}));
         // Reflection calls return updated memory
         mockRunSession.mockResolvedValue("## Updated Memory\nLearned to enrich first.");
 
@@ -1218,13 +1255,14 @@ describe("autopilot integration", () => {
         db.setAutopilotMemory(bp.id, "## Existing Memory\nAlways enrich before running.");
 
         const promptsReceived: string[] = [];
+        let memInjectDecisionCount = 0;
         mockRunSession.mockImplementation(async (prompt: string) => {
           promptsReceived.push(prompt);
-          if (promptsReceived.length === 1) {
-            return dec("run_node", { nodeId: nodeA.id });
-          }
-          if (promptsReceived.length === 2) {
-            return dec("run_node", { nodeId: nodeB.id });
+          if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+            memInjectDecisionCount++;
+            if (memInjectDecisionCount === 1) return dec("run_node", { nodeId: nodeA.id });
+            if (memInjectDecisionCount === 2) return dec("run_node", { nodeId: nodeB.id });
+            return dec("complete", {});
           }
           // Reflection/global memory calls — return updated memory
           return "## Refreshed Memory\nNew insight.";
@@ -1250,9 +1288,10 @@ describe("autopilot integration", () => {
         const bp = setup("First Blueprint");
         const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
+        // 1 run_node decision, then auto-complete fires
         mockRunSession
           .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
-        // Reflection returns memory
+        // Final reflection returns memory
         mockRunSession.mockResolvedValueOnce("## Blueprint Reflection\nGood run.");
         // Global memory update returns content
         mockRunSession.mockResolvedValueOnce("## Global Strategy\nAlways coordinate after 5 nodes.");
@@ -1272,9 +1311,10 @@ describe("autopilot integration", () => {
         const bp = setup("Second Blueprint");
         const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
+        // 1 run_node decision, then auto-complete fires
         mockRunSession
           .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }));
-        // Reflection
+        // Final reflection
         mockRunSession.mockResolvedValueOnce("## Reflection\nLearned things.");
         // Global memory update — replaces old content
         mockRunSession.mockResolvedValueOnce("## New Strategy\nReplaced content.");
@@ -1295,10 +1335,13 @@ describe("autopilot integration", () => {
         const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
         const promptsReceived: string[] = [];
+        let globalReadDecisionCount = 0;
         mockRunSession.mockImplementation(async (prompt: string) => {
           promptsReceived.push(prompt);
-          if (promptsReceived.length === 1) {
-            return dec("run_node", { nodeId: nodeA.id });
+          if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+            globalReadDecisionCount++;
+            if (globalReadDecisionCount === 1) return dec("run_node", { nodeId: nodeA.id });
+            return dec("complete", {});
           }
           return "## Memory\nOk.";
         });
@@ -1322,10 +1365,13 @@ describe("autopilot integration", () => {
         db.setAutopilotMemory(bp.id, "## Prior Run Notes\n- Node A needs extra context\n- Use enrich first");
 
         const promptsReceived: string[] = [];
+        let resumeDecisionCount = 0;
         mockRunSession.mockImplementation(async (prompt: string) => {
           promptsReceived.push(prompt);
-          if (promptsReceived.length === 1) {
-            return dec("run_node", { nodeId: nodeA.id });
+          if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+            resumeDecisionCount++;
+            if (resumeDecisionCount === 1) return dec("run_node", { nodeId: nodeA.id });
+            return dec("complete", {});
           }
           return "## Updated\nNew notes.";
         });
@@ -1355,14 +1401,21 @@ describe("autopilot integration", () => {
         const bp1Prompts: string[] = [];
         const bp2Prompts: string[] = [];
 
+        const bp1Decisions = { count: 0 };
+        const bp2Decisions = { count: 0 };
+
         mockRunSession.mockImplementation(async (prompt: string) => {
-          if (prompt.includes("Concurrent Mem 1")) {
+          if (prompt.includes("Concurrent Mem 1") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
             bp1Prompts.push(prompt);
-            return dec("run_node", { nodeId: node1.id });
+            bp1Decisions.count++;
+            if (bp1Decisions.count === 1) return dec("run_node", { nodeId: node1.id });
+            return dec("complete", {});
           }
-          if (prompt.includes("Concurrent Mem 2")) {
+          if (prompt.includes("Concurrent Mem 2") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
             bp2Prompts.push(prompt);
-            return dec("run_node", { nodeId: node2.id });
+            bp2Decisions.count++;
+            if (bp2Decisions.count === 1) return dec("run_node", { nodeId: node2.id });
+            return dec("complete", {});
           }
           // Reflection/global calls
           return "## Reflection\nOk.";
@@ -1390,8 +1443,8 @@ describe("autopilot integration", () => {
         expect(bp2Prompts[0]).not.toContain("BP1 Memory");
 
         // Both blueprints done
-        expect(db.getBlueprint(bp1.id)!.status).toBe("done");
-        expect(db.getBlueprint(bp2.id)!.status).toBe("done");
+        expect(db.getBlueprint(bp1.id)!.status).toBe("approved");
+        expect(db.getBlueprint(bp2.id)!.status).toBe("approved");
       });
 
       it("global memory file is shared (last-write-wins)", async () => {
@@ -1400,12 +1453,19 @@ describe("autopilot integration", () => {
         const node1 = db.createMacroNode(bp1.id, { title: "Node 1", order: 1 });
         const node2 = db.createMacroNode(bp2.id, { title: "Node 2", order: 1 });
 
+        const sg1Decisions = { count: 0 };
+        const sg2Decisions = { count: 0 };
+
         mockRunSession.mockImplementation(async (prompt: string) => {
           if (prompt.includes("Shared Global 1") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
-            return dec("run_node", { nodeId: node1.id });
+            sg1Decisions.count++;
+            if (sg1Decisions.count === 1) return dec("run_node", { nodeId: node1.id });
+            return dec("complete", {});
           }
           if (prompt.includes("Shared Global 2") && !prompt.includes("reflecting") && !prompt.includes("global autopilot")) {
-            return dec("run_node", { nodeId: node2.id });
+            sg2Decisions.count++;
+            if (sg2Decisions.count === 1) return dec("run_node", { nodeId: node2.id });
+            return dec("complete", {});
           }
           // Reflection calls
           if (prompt.includes("global autopilot") || prompt.includes("global strategy")) {
@@ -1429,8 +1489,8 @@ describe("autopilot integration", () => {
           expect(content).not.toBeNull();
         }
         // Both completed
-        expect(db.getBlueprint(bp1.id)!.status).toBe("done");
-        expect(db.getBlueprint(bp2.id)!.status).toBe("done");
+        expect(db.getBlueprint(bp1.id)!.status).toBe("approved");
+        expect(db.getBlueprint(bp2.id)!.status).toBe("approved");
       });
     });
 
@@ -1454,7 +1514,8 @@ describe("autopilot integration", () => {
         await ap.runAutopilotLoop(bp.id);
 
         const final = db.getBlueprint(bp.id)!;
-        expect(final.status).toBe("paused");
+        // Blueprint status is user-managed — autopilot only sets pauseReason
+      expect(final.status).toBe("approved");
 
         // Memory should have been saved by reflection
         const memory = db.getAutopilotMemory(bp.id);
@@ -1477,7 +1538,9 @@ describe("autopilot integration", () => {
 
         await ap.runAutopilotLoop(bp.id);
 
-        expect(db.getBlueprint(bp.id)!.status).toBe("paused");
+        // Blueprint status unchanged — only pauseReason set
+        expect(db.getBlueprint(bp.id)!.status).toBe("approved");
+        expect(db.getBlueprint(bp.id)!.pauseReason).toContain("Waiting for feedback");
 
         // Memory should be persisted
         const memory = db.getAutopilotMemory(bp.id);
@@ -1546,6 +1609,511 @@ describe("autopilot integration", () => {
         expect(ap.readGlobalMemory()).toBe("## Second\nReplacement.");
         expect(ap.readGlobalMemory()).not.toContain("First");
       });
+    });
+  });
+
+  // ─── 12. Message-to-Autopilot-to-Action Pipeline ──────────
+
+  describe("message-to-autopilot-to-action pipeline", () => {
+    // Need direct access to plan-db message functions
+    let createAutopilotMessage: typeof import("../plan-db.js")["createAutopilotMessage"];
+    let getUnacknowledgedMessages: typeof import("../plan-db.js")["getUnacknowledgedMessages"];
+    let acknowledgeMessage: typeof import("../plan-db.js")["acknowledgeMessage"];
+    let getMessageHistory: typeof import("../plan-db.js")["getMessageHistory"];
+    let buildStateSnapshot: typeof import("../autopilot.js")["buildStateSnapshot"];
+    let executeDecision: typeof import("../autopilot.js")["executeDecision"];
+
+    beforeAll(async () => {
+      const planDb = await import("../plan-db.js");
+      createAutopilotMessage = planDb.createAutopilotMessage;
+      getUnacknowledgedMessages = planDb.getUnacknowledgedMessages;
+      acknowledgeMessage = planDb.acknowledgeMessage;
+      getMessageHistory = planDb.getMessageHistory;
+
+      const autopilot = await import("../autopilot.js");
+      buildStateSnapshot = autopilot.buildStateSnapshot;
+      executeDecision = autopilot.executeDecision;
+    });
+
+    /** Create an FSD blueprint (autopilot with no safeguards, unlimited iterations) */
+    function setupFsd(title: string) {
+      const bp = db.createBlueprint(title, "FSD integration test", "/tmp/fsd-test");
+      db.updateBlueprint(bp.id, {
+        status: "approved",
+        executionMode: "fsd",
+      });
+      return bp;
+    }
+
+    // ── 12.1. Message triggers autopilot loop ──
+
+    it("autopilot loop processes user messages injected into prompt", async () => {
+      const bp = setupFsd("Msg Trigger");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // Create a user message before loop starts
+      const msg = createAutopilotMessage(bp.id, "user", "Focus on tests");
+
+      const promptsReceived: string[] = [];
+      let decisionCount = 0;
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        promptsReceived.push(prompt);
+        // Only count non-reflection calls as decisions
+        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+          decisionCount++;
+          if (decisionCount === 1) {
+            return dec("acknowledge_message", { messageId: msg.id });
+          }
+          if (decisionCount === 2) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          return dec("complete", {});
+        }
+        // Reflection/global
+        return "## Memory\nOk.";
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // User message should appear in the first prompt
+      expect(promptsReceived[0]).toContain("User Messages");
+      expect(promptsReceived[0]).toContain("Focus on tests");
+
+      // Message should be acknowledged after loop processed it
+      const unacked = getUnacknowledgedMessages(bp.id);
+      const found = unacked.find((m) => m.id === msg.id);
+      expect(found).toBeUndefined(); // acknowledged = not in unacked list
+
+      // Blueprint should be done
+      expect(db.getBlueprint(bp.id)!.status).toBe("approved");
+    });
+
+    // ── 12.2. Generate via message ──
+
+    it("generate via message: autopilot sees message and creates nodes", async () => {
+      const bp = setupFsd("Generate Via Msg");
+      // No nodes initially
+
+      // Message asking to generate nodes
+      const msg = createAutopilotMessage(bp.id, "user", "Generate 3 nodes for a REST API");
+
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        // 1st call: read messages
+        if (mockRunSession.mock.calls.length === 1) {
+          return dec("read_user_messages", {});
+        }
+        // 2nd call: acknowledge the message
+        if (mockRunSession.mock.calls.length === 2) {
+          return dec("acknowledge_message", { messageId: msg.id });
+        }
+        // 3rd call: batch create nodes
+        if (mockRunSession.mock.calls.length === 3) {
+          return dec("batch_create_nodes", {
+            nodes: [
+              { title: "Setup Express server", description: "Initialize Express" },
+              { title: "Create REST endpoints", description: "CRUD routes", dependsOn: [0] },
+              { title: "Add tests", description: "Integration tests", dependsOn: [1] },
+            ],
+          });
+        }
+        // 4th+: run each created node
+        const updated = db.getBlueprint(bp.id)!;
+        const pendingNode = updated.nodes.find((n) => n.status === "pending");
+        if (pendingNode) {
+          return dec("run_node", { nodeId: pendingNode.id });
+        }
+        // All done
+        return dec("complete", {});
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.nodes.length).toBe(3);
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
+
+      // Verify message was acknowledged
+      const unacked = getUnacknowledgedMessages(bp.id);
+      expect(unacked.find((m) => m.id === msg.id)).toBeUndefined();
+    });
+
+    // ── 12.3. Enrich via message ──
+
+    it("enrich message is created and visible in prompt when in FSD mode", async () => {
+      const bp = setupFsd("Enrich Via Msg");
+      const nodeA = db.createMacroNode(bp.id, { title: "Implement feature", description: "Basic desc", order: 1 });
+
+      // Simulate what the enrich-node endpoint does in FSD mode
+      createAutopilotMessage(bp.id, "user", `Enrich node ${nodeA.id}: title="Implement feature"`);
+
+      const promptsReceived: string[] = [];
+      let enrichDecisionCount = 0;
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        promptsReceived.push(prompt);
+        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+          enrichDecisionCount++;
+          if (enrichDecisionCount === 1) {
+            return dec("update_node", {
+              nodeId: nodeA.id,
+              description: "Enriched: implement REST feature with proper error handling",
+            });
+          }
+          if (enrichDecisionCount === 2) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          return dec("complete", {});
+        }
+        return "## Memory\nOk.";
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // First prompt should contain the enrich message
+      expect(promptsReceived[0]).toContain("Enrich node");
+      expect(promptsReceived[0]).toContain("Implement feature");
+
+      // Node should be updated
+      const final = db.getBlueprint(bp.id)!;
+      expect(final.nodes[0].description).toContain("Enriched");
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
+    });
+
+    // ── 12.4. Manual mode fallback ──
+
+    it("manual mode does not create messages for AI operations", async () => {
+      const bp = db.createBlueprint("Manual Fallback", "Test", "/tmp/manual");
+      db.updateBlueprint(bp.id, { status: "approved" });
+      // executionMode defaults to "manual" (undefined)
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // In manual mode, no autopilot messages should exist
+      const messagesBefore = getUnacknowledgedMessages(bp.id);
+      expect(messagesBefore.length).toBe(0);
+
+      // Directly creating a message is fine, but triggerAutopilotIfNeeded would be a no-op
+      // since executionMode is manual. Verify by checking the blueprint stays as-is.
+      const bpData = db.getBlueprint(bp.id)!;
+      expect(bpData.executionMode).toBeUndefined(); // manual = undefined
+      expect(bpData.nodes.find((n) => n.id === nodeA.id)!.status).toBe("pending");
+    });
+
+    // ── 12.5. Read tools in autopilot loop ──
+
+    it("get_node_titles returns summary without descriptions", async () => {
+      const bp = setupFsd("Read Tools");
+      const nodeA = db.createMacroNode(bp.id, { title: "API Design", description: "Full API spec", order: 1 });
+      const nodeB = db.createMacroNode(bp.id, { title: "Implementation", description: "Build it", order: 2, dependencies: [nodeA.id] });
+
+      // Test get_node_titles via executeDecision
+      const titlesResult = await executeDecision(bp.id, {
+        reasoning: "Get overview",
+        action: "get_node_titles",
+        params: {},
+      });
+
+      expect(titlesResult.success).toBe(true);
+      const titles = JSON.parse(titlesResult.message);
+      expect(titles.length).toBe(2);
+      // Should have id, seq, title, status but NOT description
+      expect(titles[0]).toHaveProperty("title");
+      expect(titles[0]).toHaveProperty("status");
+      expect(titles[0]).not.toHaveProperty("description");
+
+      // Test get_node_details returns full context including description
+      const detailsResult = await executeDecision(bp.id, {
+        reasoning: "Get details",
+        action: "get_node_details",
+        params: { nodeId: nodeA.id },
+      });
+
+      expect(detailsResult.success).toBe(true);
+      const details = JSON.parse(detailsResult.message);
+      expect(details.title).toBe("API Design");
+      expect(details.description).toBe("Full API spec");
+      expect(details.dependencies).toBeDefined();
+    });
+
+    // ── 12.6. Message queue ordering ──
+
+    it("messages are returned in chronological order and acknowledgment works", async () => {
+      const bp = setupFsd("Queue Ordering");
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // Send 3 messages rapidly
+      const m1 = createAutopilotMessage(bp.id, "user", "First message");
+      const m2 = createAutopilotMessage(bp.id, "user", "Second message");
+      const m3 = createAutopilotMessage(bp.id, "user", "Third message");
+
+      // read_user_messages should return all 3 in chronological order
+      const readResult = await executeDecision(bp.id, {
+        reasoning: "Check messages",
+        action: "read_user_messages",
+        params: {},
+      });
+
+      expect(readResult.success).toBe(true);
+      const messages = JSON.parse(readResult.message);
+      expect(messages.length).toBeGreaterThanOrEqual(3);
+
+      // Find our 3 messages and verify order
+      const ourMessages = messages.filter((m: { id: string }) =>
+        [m1.id, m2.id, m3.id].includes(m.id),
+      );
+      expect(ourMessages.length).toBe(3);
+      expect(ourMessages[0].content).toBe("First message");
+      expect(ourMessages[1].content).toBe("Second message");
+      expect(ourMessages[2].content).toBe("Third message");
+
+      // Acknowledge first message
+      const ackResult = await executeDecision(bp.id, {
+        reasoning: "Ack first",
+        action: "acknowledge_message",
+        params: { messageId: m1.id },
+      });
+      expect(ackResult.success).toBe(true);
+
+      // Re-read: only 2 unacknowledged
+      const readResult2 = await executeDecision(bp.id, {
+        reasoning: "Re-check",
+        action: "read_user_messages",
+        params: {},
+      });
+      const messages2 = JSON.parse(readResult2.message);
+      const ourMessages2 = messages2.filter((m: { id: string }) =>
+        [m1.id, m2.id, m3.id].includes(m.id),
+      );
+      expect(ourMessages2.length).toBe(2);
+      expect(ourMessages2[0].content).toBe("Second message");
+      expect(ourMessages2[1].content).toBe("Third message");
+    });
+
+    // ── 12.7. Autopilot not double-started ──
+
+    it("autopilot loop does not start again while already running", async () => {
+      const bp = setupFsd("No Double Start");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      let loopRunning = false;
+      let concurrentAttempts = 0;
+
+      let noDoubleDecisionCount = 0;
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        if (prompt.includes("reflecting") || prompt.includes("global autopilot") || prompt.includes("global strategy")) {
+          return "## Memory\nOk.";
+        }
+        if (loopRunning) {
+          concurrentAttempts++;
+        }
+        loopRunning = true;
+        // Simulate some work
+        await new Promise((r) => setTimeout(r, 10));
+        loopRunning = false;
+        noDoubleDecisionCount++;
+        if (noDoubleDecisionCount === 1) return dec("run_node", { nodeId: nodeA.id });
+        return dec("complete", {});
+      });
+
+      // Start autopilot loop
+      const loop1 = ap.runAutopilotLoop(bp.id);
+      // A second loop on the same blueprint should effectively be a no-op
+      // because after the first one completes, blueprint is done
+      const loop2 = ap.runAutopilotLoop(bp.id);
+
+      await Promise.all([loop1, loop2]);
+
+      // The second loop either found bp already done or exited quickly
+      // The key invariant: both loops complete without errors
+      const final = db.getBlueprint(bp.id)!;
+      expect(["done", "approved"]).toContain(final.status);
+    });
+
+    // ── 12.8. Reduced state snapshot ──
+
+    it("buildStateSnapshot nodes do not include description or suggestions", () => {
+      const bp = setupFsd("Reduced Snapshot");
+      db.createMacroNode(bp.id, {
+        title: "Node With Description",
+        description: "This is a detailed description that should not appear in snapshot",
+        order: 1,
+      });
+
+      const state = buildStateSnapshot(bp.id);
+      expect(state.nodes.length).toBe(1);
+
+      const nodeState = state.nodes[0];
+      // AutopilotNodeState should have these fields
+      expect(nodeState).toHaveProperty("id");
+      expect(nodeState).toHaveProperty("seq");
+      expect(nodeState).toHaveProperty("title");
+      expect(nodeState).toHaveProperty("status");
+      expect(nodeState).toHaveProperty("dependencies");
+      expect(nodeState).toHaveProperty("resumeCount");
+
+      // Should NOT have description or suggestions (fetched on-demand via read tools)
+      expect(nodeState).not.toHaveProperty("description");
+      expect(nodeState).not.toHaveProperty("suggestions");
+    });
+
+    // ── 12.9. User message injection in prompt ──
+
+    it("buildAutopilotPrompt includes user messages section when messages exist", () => {
+      const bp = setupFsd("Prompt Injection");
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      const state = buildStateSnapshot(bp.id);
+
+      // With user messages
+      const messages = [
+        { id: "msg-1", blueprintId: bp.id, role: "user" as const, content: "Please prioritize testing", acknowledged: false, createdAt: new Date().toISOString() },
+        { id: "msg-2", blueprintId: bp.id, role: "user" as const, content: "Also add error handling", acknowledged: false, createdAt: new Date().toISOString() },
+      ];
+
+      const promptWithMsgs = ap.buildAutopilotPrompt(
+        state, 1, 50,
+        { blueprint: null, global: null },
+        false,
+        messages,
+      );
+
+      expect(promptWithMsgs).toContain("User Messages (HIGHEST PRIORITY");
+      expect(promptWithMsgs).toContain("Please prioritize testing");
+      expect(promptWithMsgs).toContain("Also add error handling");
+      expect(promptWithMsgs).toContain("[msg-1]");
+      expect(promptWithMsgs).toContain("[msg-2]");
+      expect(promptWithMsgs).toContain("acknowledge_message");
+
+      // Without user messages — the "User Messages" section should be absent
+      const promptWithoutMsgs = ap.buildAutopilotPrompt(
+        state, 1, 50,
+        { blueprint: null, global: null },
+        false,
+        [],
+      );
+      expect(promptWithoutMsgs).not.toContain("User Messages (HIGHEST PRIORITY");
+    });
+
+    // ── 12.10. Split via message in FSD mode ──
+
+    it("split via message: autopilot creates sub-nodes and skips original", async () => {
+      const bp = setupFsd("Split Via Msg");
+      const nodeA = db.createMacroNode(bp.id, { title: "Big Feature", description: "Too complex", order: 1 });
+
+      // Simulate the split endpoint creating a message
+      createAutopilotMessage(bp.id, "user", `Split node ${nodeA.id}: "Big Feature"`);
+
+      let callCount = 0;
+      mockRunSession.mockImplementation(async () => {
+        callCount++;
+        // 1: read messages / see the split request in prompt
+        if (callCount === 1) {
+          return dec("get_node_details", { nodeId: nodeA.id });
+        }
+        // 2: batch create sub-nodes
+        if (callCount === 2) {
+          return dec("batch_create_nodes", {
+            nodes: [
+              { title: "Sub-task 1", description: "Part 1", dependsOn: [] },
+              { title: "Sub-task 2", description: "Part 2", dependsOn: [0] },
+            ],
+          });
+        }
+        // 3: skip original
+        if (callCount === 3) {
+          return dec("skip_node", { nodeId: nodeA.id, reason: "Split into sub-tasks" });
+        }
+        // 4+: run the sub-tasks
+        const updated = db.getBlueprint(bp.id)!;
+        const pendingNode = updated.nodes.find((n) => n.status === "pending");
+        if (pendingNode) {
+          return dec("run_node", { nodeId: pendingNode.id });
+        }
+        return dec("complete", {});
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      const final = db.getBlueprint(bp.id)!;
+      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.status).toBe("approved");
+
+      // Original node should be skipped
+      const originalNode = final.nodes.find((n) => n.id === nodeA.id)!;
+      expect(originalNode.status).toBe("skipped");
+      expect(originalNode.error).toContain("Split into sub-tasks");
+
+      // Sub-nodes should be created and done
+      const subNodes = final.nodes.filter((n) => n.id !== nodeA.id);
+      expect(subNodes.length).toBe(2);
+      for (const sub of subNodes) {
+        expect(sub.status).toBe("done");
+      }
+    });
+
+    // ── 12.11. Full message lifecycle in autopilot loop ──
+
+    it("full message lifecycle: create → inject in prompt → read → acknowledge", async () => {
+      const bp = setupFsd("Full Msg Lifecycle");
+      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      // Create messages before loop starts
+      const msg1 = createAutopilotMessage(bp.id, "user", "Instruction Alpha");
+      const msg2 = createAutopilotMessage(bp.id, "user", "Instruction Beta");
+
+      const promptsReceived: string[] = [];
+      let lifecycleDecisionCount = 0;
+      mockRunSession.mockImplementation(async (prompt: string) => {
+        promptsReceived.push(prompt);
+
+        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
+          lifecycleDecisionCount++;
+          if (lifecycleDecisionCount === 1) {
+            return dec("acknowledge_message", { messageId: msg1.id });
+          }
+          if (lifecycleDecisionCount === 2) {
+            return dec("acknowledge_message", { messageId: msg2.id });
+          }
+          if (lifecycleDecisionCount === 3) {
+            return dec("run_node", { nodeId: nodeA.id });
+          }
+          return dec("complete", {});
+        }
+        return "## Memory\nOk.";
+      });
+
+      await ap.runAutopilotLoop(bp.id);
+
+      // First prompt should have both messages injected
+      expect(promptsReceived[0]).toContain("Instruction Alpha");
+      expect(promptsReceived[0]).toContain("Instruction Beta");
+
+      // After acknowledging, second prompt should have fewer/no messages
+      // (msg1 acknowledged, msg2 still pending)
+      expect(promptsReceived[1]).toContain("Instruction Beta");
+
+      // All acknowledged
+      const remaining = getUnacknowledgedMessages(bp.id);
+      const ours = remaining.filter((m) => [msg1.id, msg2.id].includes(m.id));
+      expect(ours.length).toBe(0);
+
+      expect(db.getBlueprint(bp.id)!.status).toBe("approved");
+    });
+
+    // ── 12.12. Acknowledge non-existent message ──
+
+    it("acknowledge_message returns error for non-existent message", async () => {
+      const bp = setupFsd("Bad Ack");
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+
+      const result = await executeDecision(bp.id, {
+        reasoning: "Ack bad id",
+        action: "acknowledge_message",
+        params: { messageId: "non-existent-message-id" },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("not_found");
     });
   });
 });

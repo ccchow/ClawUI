@@ -42,8 +42,11 @@ import {
   dismissInsight,
   getTotalUnreadInsightCount,
   getAutopilotLog,
+  createAutopilotMessage,
+  getMessageHistory,
+  getMessageCount,
 } from "./plan-db.js";
-import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, ReportedStatus } from "./plan-db.js";
+import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, MacroNodeStatus, ReportedStatus } from "./plan-db.js";
 import {
   createConveneSession,
   getConveneSession,
@@ -88,10 +91,32 @@ function safeError(err: unknown): string {
 }
 
 /**
- * If all nodes in a blueprint are terminal (done/skipped), transition the
- * blueprint status to "done".  Also resets stuck "running" blueprints back
- * to "approved" when no nodes are running/queued and no in-memory pending
- * tasks remain (e.g. after a process crash or queue drain without cleanup).
+ * Check if the blueprint is in autopilot/FSD mode and no autopilot loop is
+ * currently running. If so, enqueue a new autopilot loop. This avoids
+ * duplicating the trigger logic across multiple endpoints.
+ */
+function triggerAutopilotIfNeeded(blueprintId: string): void {
+  const bp = getBlueprint(blueprintId);
+  if (!bp) return;
+  const isAutopilot = bp.executionMode === "autopilot" || bp.executionMode === "fsd";
+  if (!isAutopilot) return;
+  const queueInfo = getQueueInfo(blueprintId);
+  const hasAutopilotTask = queueInfo.pendingTasks.some((t) => t.type === "autopilot");
+  if (!hasAutopilotTask && !queueInfo.running) {
+    enqueueBlueprintTask(blueprintId, () => runAutopilotLoop(blueprintId)).catch((err) => {
+      log.error(`Autopilot loop failed for ${blueprintId}: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+}
+
+/**
+ * Resets stuck "running" blueprints back to "approved" when no nodes are
+ * running/queued and no in-memory pending tasks remain (e.g. after a
+ * process crash or queue drain without cleanup).
+ *
+ * Note: Does NOT auto-complete blueprints when all nodes are done.
+ * Blueprint completion requires an explicit user action or autopilot
+ * complete() call.
  *
  * Called after node status updates from API endpoints (batch update,
  * single-node update) so the blueprint doesn't stay stuck in "running"
@@ -100,14 +125,6 @@ function safeError(err: unknown): string {
 function maybeFinalizeBlueprint(blueprintId: string): void {
   const bp = getBlueprint(blueprintId);
   if (!bp || bp.status !== "running") return;
-  const allTerminal = bp.nodes.length > 0 && bp.nodes.every(
-    (n) => n.status === "done" || n.status === "skipped",
-  );
-  if (allTerminal) {
-    updateBlueprint(blueprintId, { status: "done" });
-    log.info(`Blueprint ${blueprintId.slice(0, 8)} auto-finalized — all nodes done/skipped`);
-    return;
-  }
   // Check for stuck state: blueprint is "running" but no nodes are active
   // and no in-memory pending tasks exist (queue drained without status update)
   const anyActive = bp.nodes.some(
@@ -417,6 +434,17 @@ planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => 
       }
     }
 
+    // In autopilot/FSD mode, route through message queue
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      const msgContent = nodeId
+        ? `Enrich node ${nodeId}: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`
+        : `Enrich new node: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`;
+      createAutopilotMessage(blueprintId, "user", msgContent);
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ status: "queued", nodeId: nodeId ?? null });
+      return;
+    }
+
     // Build context: dependencies (titles + handoffs) take priority.
     // Workspace (projectCwd) provides broader context — never list all other nodes.
     const currentNode = nodeId ? blueprint.nodes.find((n) => n.id === nodeId) : null;
@@ -531,6 +559,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
     const blueprintId = req.params.blueprintId;
     const nodeId = req.params.nodeId;
 
+    // In autopilot/FSD mode, route through message queue
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      createAutopilotMessage(blueprintId, "user", `Reevaluate node ${nodeId}: "${node.title}"`);
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ status: "queued", nodeId });
+      return;
+    }
+
     // Track in pending tasks for queue status API
     addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
 
@@ -577,6 +613,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/split", (req, res) =
     const blueprintId = req.params.blueprintId;
     const nodeId = req.params.nodeId;
 
+    // In autopilot/FSD mode, route through message queue
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      createAutopilotMessage(blueprintId, "user", `Split node ${nodeId}: "${node.title}"`);
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ status: "queued", nodeId });
+      return;
+    }
+
     // Track in pending tasks for queue status API
     addPendingTask(blueprintId, { type: "split", nodeId, queuedAt: new Date().toISOString() });
 
@@ -618,6 +662,14 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies",
     }
     if (!["pending", "failed", "blocked"].includes(node.status)) {
       res.status(400).json({ error: "Smart dependencies only available for pending/failed/blocked nodes" });
+      return;
+    }
+
+    // In autopilot/FSD mode, route through message queue
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      createAutopilotMessage(blueprintId, "user", `Smart dependencies for node ${nodeId}: "${node.title}"`);
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ status: "queued", nodeId });
       return;
     }
 
@@ -749,15 +801,8 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/batch-create", (req, res) =>
         description: step.description,
         order: step.order ?? maxOrder + i + 1,
         dependencies: depIds.length > 0 ? depIds : undefined,
+        ...(step.roles && Array.isArray(step.roles) && step.roles.length > 0 ? { roles: step.roles } : {}),
       });
-      // Set roles if provided (createMacroNode doesn't accept roles directly)
-      if (step.roles && Array.isArray(step.roles) && step.roles.length > 0) {
-        const updated = updateMacroNode(req.params.blueprintId, node.id, { roles: step.roles });
-        if (updated) {
-          createdNodes.push(updated);
-          continue;
-        }
-      }
       createdNodes.push(node);
     }
 
@@ -889,7 +934,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
     }
     const maxOrder = blueprint.nodes.reduce((m, n) => Math.max(m, n.order), -1);
     const nodeOrder = order ?? maxOrder + 1;
-    let node = createMacroNode(req.params.blueprintId, {
+    const node = createMacroNode(req.params.blueprintId, {
       title: title.trim(),
       description,
       order: nodeOrder,
@@ -897,12 +942,8 @@ planRouter.post("/api/blueprints/:blueprintId/nodes", (req, res) => {
       parallelGroup,
       prompt,
       estimatedMinutes,
+      ...(roles && Array.isArray(roles) && roles.length > 0 ? { roles } : {}),
     });
-    // Set roles if provided (createMacroNode doesn't accept roles directly)
-    if (roles && Array.isArray(roles) && roles.length > 0) {
-      const updated = updateMacroNode(req.params.blueprintId, node.id, { roles });
-      if (updated) node = updated;
-    }
     res.status(201).json(node);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
@@ -1757,6 +1798,15 @@ planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
     }
 
     const blueprintId = req.params.id;
+
+    // In autopilot/FSD mode, route through message queue
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      createAutopilotMessage(blueprintId, "user", "Reevaluate all non-done nodes");
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ message: "reevaluation requested via autopilot", blueprintId });
+      return;
+    }
+
     const nonDoneNodes = blueprint.nodes.filter(
       (n) => n.status !== "done" && n.status !== "running" && n.status !== "queued",
     );
@@ -1860,6 +1910,17 @@ planRouter.post("/api/blueprints/:id/generate", (req, res) => {
 
     const blueprintId = req.params.id;
     const { description } = req.body as { description?: string };
+
+    // In autopilot/FSD mode, route through message queue instead of running directly
+    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
+      const msgContent = description
+        ? `Generate nodes: ${description}`
+        : "Generate nodes for this blueprint based on its title and description";
+      createAutopilotMessage(blueprintId, "user", msgContent);
+      triggerAutopilotIfNeeded(blueprintId);
+      res.json({ status: "queued", blueprintId });
+      return;
+    }
 
     // Track as a pending generate task for queue status API
     addPendingTask(blueprintId, { type: "generate", queuedAt: new Date().toISOString() });
@@ -2365,16 +2426,8 @@ planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/approve", (req,
         description: step.description,
         order: maxOrder + i + 1,
         dependencies: depIds.length > 0 ? depIds : undefined,
+        ...(step.roles && Array.isArray(step.roles) && step.roles.length > 0 ? { roles: step.roles } : {}),
       });
-
-      // Set roles if provided (createMacroNode doesn't accept roles directly)
-      if (step.roles && Array.isArray(step.roles) && step.roles.length > 0) {
-        const updated = updateMacroNode(blueprintId, node.id, { roles: step.roles });
-        if (updated) {
-          createdNodes.push(updated);
-          continue;
-        }
-      }
       createdNodes.push(node);
     }
 
@@ -2535,6 +2588,147 @@ planRouter.post("/api/blueprints/:id/convene-sessions/:sessionId/propose-nodes",
 
     updateConveneSessionStatus(req.params.sessionId, "synthesizing", nodes);
     res.json({ success: true, count: nodes.length });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// ─── Autopilot Message Queue ─────────────────────────────────
+
+// POST /api/blueprints/:id/messages — send a user message to the autopilot
+planRouter.post("/api/blueprints/:id/messages", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const { content } = req.body as { content?: string };
+    if (!content || typeof content !== "string" || !content.trim()) {
+      res.status(400).json({ error: "Missing or empty 'content'" });
+      return;
+    }
+    const message = createAutopilotMessage(req.params.id, "user", content.trim());
+    triggerAutopilotIfNeeded(req.params.id);
+    res.json(message);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/messages — get message history for chat display
+planRouter.get("/api/blueprints/:id/messages", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const rawLimit = parseInt(req.query.limit as string, 10);
+    const rawOffset = parseInt(req.query.offset as string, 10);
+    const limit = Math.min(Math.max(isNaN(rawLimit) ? 50 : rawLimit, 1), 200);
+    const offset = Math.max(isNaN(rawOffset) ? 0 : rawOffset, 0);
+    const messages = getMessageHistory(req.params.id, limit, offset);
+    const total = getMessageCount(req.params.id);
+    res.json({ messages, total });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// ─── Lightweight Node-Read Endpoints ─────────────────────────
+
+// GET /api/blueprints/:id/nodes/summary — lightweight node overview for autopilot
+planRouter.get("/api/blueprints/:id/nodes/summary", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const nodes = blueprint.nodes.map((n) => ({
+      id: n.id,
+      seq: n.seq,
+      title: n.title,
+      status: n.status,
+      roles: n.roles ?? [],
+      dependencies: n.dependencies,
+    }));
+    res.json({ nodes });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/nodes/:nodeId/context — full node context for autopilot
+planRouter.get("/api/blueprints/:id/nodes/:nodeId/context", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const node = blueprint.nodes.find((n) => n.id === req.params.nodeId);
+    if (!node) {
+      res.status(404).json({ error: "Node not found" });
+      return;
+    }
+
+    // Resolve dependencies to objects with title + status
+    const dependencies = node.dependencies
+      .map((depId) => {
+        const dep = blueprint.nodes.find((n) => n.id === depId);
+        return dep ? { id: dep.id, title: dep.title, status: dep.status } : null;
+      })
+      .filter(Boolean) as Array<{ id: string; title: string; status: MacroNodeStatus }>;
+
+    // Latest handoff_summary artifact
+    const handoffArtifact = [...node.outputArtifacts]
+      .filter((a) => a.type === "handoff_summary")
+      .pop();
+    const handoff = handoffArtifact ? handoffArtifact.content : null;
+
+    // Suggestions
+    const suggestions = getSuggestionsForNode(node.id).map((s) => ({
+      id: s.id,
+      title: s.title,
+      description: s.description,
+    }));
+
+    res.json({
+      id: node.id,
+      seq: node.seq,
+      title: node.title,
+      description: node.description,
+      prompt: node.prompt ?? null,
+      status: node.status,
+      error: node.error ?? null,
+      roles: node.roles ?? [],
+      dependencies,
+      handoff,
+      suggestions,
+    });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:id/progress — node status counts
+planRouter.get("/api/blueprints/:id/progress", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.id);
+    if (!blueprint) {
+      res.status(404).json({ error: "Blueprint not found" });
+      return;
+    }
+    const counts: Record<string, number> = { total: 0, done: 0, failed: 0, pending: 0, running: 0, skipped: 0, queued: 0, blocked: 0 };
+    for (const node of blueprint.nodes) {
+      counts.total++;
+      if (node.status in counts) {
+        counts[node.status]++;
+      }
+    }
+    res.json(counts);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }

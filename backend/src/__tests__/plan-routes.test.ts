@@ -291,6 +291,19 @@ vi.mock("../plan-db.js", () => ({
   })),
   updateConveneSessionStatus: vi.fn(),
   getConveneSessionCount: vi.fn(() => 0),
+  createAutopilotMessage: vi.fn((blueprintId: string, role: string, content: string) => ({
+    id: "msg-1",
+    blueprintId,
+    role,
+    content,
+    acknowledged: false,
+    createdAt: "2024-01-01T00:00:00Z",
+  })),
+  getMessageHistory: vi.fn(() => []),
+  getMessageCount: vi.fn(() => 0),
+  getUnacknowledgedMessages: vi.fn(() => []),
+  acknowledgeMessage: vi.fn(() => true),
+  getAutopilotLog: vi.fn(() => []),
 }));
 
 vi.mock("../plan-executor.js", () => ({
@@ -412,6 +425,9 @@ import {
   getConveneMessages,
   createConveneMessage,
   updateConveneSessionStatus,
+  createAutopilotMessage,
+  getMessageHistory,
+  getMessageCount,
 } from "../plan-db.js";
 import {
   applyGraphMutations,
@@ -600,22 +616,20 @@ describe("plan-routes", () => {
       expect(res.status).toBe(404);
     });
 
-    it("applies roles via updateMacroNode after creation", async () => {
+    it("passes roles directly to createMacroNode", async () => {
       const res = await request(app)
         .post("/api/blueprints/bp-1/nodes")
         .send({ title: "QA Step", roles: ["qa"] });
       expect(res.status).toBe(201);
-      expect(createMacroNode).toHaveBeenCalled();
-      expect(updateMacroNode).toHaveBeenCalledWith("bp-1", "node-new", { roles: ["qa"] });
+      expect(createMacroNode).toHaveBeenCalledWith("bp-1", expect.objectContaining({ roles: ["qa"] }));
     });
 
-    it("skips updateMacroNode when no roles provided", async () => {
+    it("does not pass roles to createMacroNode when no roles provided", async () => {
       const res = await request(app)
         .post("/api/blueprints/bp-1/nodes")
         .send({ title: "Plain Step" });
       expect(res.status).toBe(201);
-      expect(createMacroNode).toHaveBeenCalled();
-      expect(updateMacroNode).not.toHaveBeenCalled();
+      expect(createMacroNode).toHaveBeenCalledWith("bp-1", expect.not.objectContaining({ roles: expect.anything() }));
     });
   });
 
@@ -2794,6 +2808,280 @@ describe("plan-routes", () => {
       vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
 
       const res = await request(app).post("/api/blueprints/missing/run-all");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Lightweight Node-Read Endpoints ────────────────────────
+
+  describe("GET /api/blueprints/:id/nodes/summary", () => {
+    it("returns only id/seq/title/status/roles/dependencies (no descriptions)", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        nodes: [
+          {
+            id: "n1", blueprintId: "bp-1", order: 0, seq: 1,
+            title: "Step 1", description: "Full description here",
+            status: "done", dependencies: [], roles: ["sde"],
+            inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+          {
+            id: "n2", blueprintId: "bp-1", order: 1, seq: 2,
+            title: "Step 2", description: "Another description",
+            status: "pending", dependencies: ["n1"],
+            inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app).get("/api/blueprints/bp-1/nodes/summary");
+      expect(res.status).toBe(200);
+      expect(res.body.nodes).toHaveLength(2);
+
+      const node1 = res.body.nodes[0];
+      expect(node1.id).toBe("n1");
+      expect(node1.seq).toBe(1);
+      expect(node1.title).toBe("Step 1");
+      expect(node1.status).toBe("done");
+      expect(node1.roles).toEqual(["sde"]);
+      expect(node1.dependencies).toEqual([]);
+
+      // Must NOT include descriptions
+      expect(node1).not.toHaveProperty("description");
+      expect(node1).not.toHaveProperty("prompt");
+      expect(node1).not.toHaveProperty("executions");
+
+      const node2 = res.body.nodes[1];
+      expect(node2.dependencies).toEqual(["n1"]);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+      const res = await request(app).get("/api/blueprints/missing/nodes/summary");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /api/blueprints/:id/nodes/:nodeId/context", () => {
+    it("returns resolved dependencies with titles and latest handoff", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        nodes: [
+          {
+            id: "dep-1", blueprintId: "bp-1", order: 0, seq: 1,
+            title: "Dependency Node", description: "dep desc",
+            status: "done", dependencies: [],
+            inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+          {
+            id: "n1", blueprintId: "bp-1", order: 1, seq: 2,
+            title: "Main Node", description: "main desc",
+            prompt: "Do something", status: "pending",
+            dependencies: ["dep-1"], roles: ["sde"],
+            inputArtifacts: [],
+            outputArtifacts: [
+              { id: "a1", type: "handoff_summary", content: "Handoff data", sourceNodeId: "n1", blueprintId: "bp-1", createdAt: "2024-01-01" },
+            ],
+            executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      } as any);
+      vi.mocked(getSuggestionsForNode).mockReturnValueOnce([]);
+
+      const res = await request(app).get("/api/blueprints/bp-1/nodes/n1/context");
+      expect(res.status).toBe(200);
+
+      expect(res.body.id).toBe("n1");
+      expect(res.body.title).toBe("Main Node");
+      expect(res.body.description).toBe("main desc");
+      expect(res.body.prompt).toBe("Do something");
+      expect(res.body.status).toBe("pending");
+      expect(res.body.roles).toEqual(["sde"]);
+
+      // Dependencies resolved with titles
+      expect(res.body.dependencies).toHaveLength(1);
+      expect(res.body.dependencies[0].id).toBe("dep-1");
+      expect(res.body.dependencies[0].title).toBe("Dependency Node");
+      expect(res.body.dependencies[0].status).toBe("done");
+
+      // Handoff present
+      expect(res.body.handoff).toBe("Handoff data");
+    });
+
+    it("returns handoff: null for node without handoff artifact", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        nodes: [
+          {
+            id: "n1", blueprintId: "bp-1", order: 0, seq: 1,
+            title: "No Handoff", description: "desc",
+            status: "pending", dependencies: [],
+            inputArtifacts: [], outputArtifacts: [], executions: [],
+            createdAt: "2024-01-01", updatedAt: "2024-01-01",
+          },
+        ],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      } as any);
+      vi.mocked(getSuggestionsForNode).mockReturnValueOnce([]);
+
+      const res = await request(app).get("/api/blueprints/bp-1/nodes/n1/context");
+      expect(res.status).toBe(200);
+      expect(res.body.handoff).toBeNull();
+    });
+
+    it("returns 404 for missing node", async () => {
+      const res = await request(app).get("/api/blueprints/bp-1/nodes/missing-node/context");
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+      const res = await request(app).get("/api/blueprints/missing/nodes/n1/context");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("GET /api/blueprints/:id/progress", () => {
+    it("returns correct counts matching node statuses", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce({
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        nodes: [
+          { id: "n1", status: "done", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+          { id: "n2", status: "done", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+          { id: "n3", status: "pending", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+          { id: "n4", status: "running", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+          { id: "n5", status: "failed", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+          { id: "n6", status: "skipped", dependencies: [], inputArtifacts: [], outputArtifacts: [], executions: [] },
+        ],
+        createdAt: "2024-01-01", updatedAt: "2024-01-01",
+      } as any);
+
+      const res = await request(app).get("/api/blueprints/bp-1/progress");
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(6);
+      expect(res.body.done).toBe(2);
+      expect(res.body.pending).toBe(1);
+      expect(res.body.running).toBe(1);
+      expect(res.body.failed).toBe(1);
+      expect(res.body.skipped).toBe(1);
+      expect(res.body.queued).toBe(0);
+      expect(res.body.blocked).toBe(0);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+      const res = await request(app).get("/api/blueprints/missing/progress");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ─── Autopilot Message Endpoints ────────────────────────────
+
+  describe("GET /api/blueprints/:id/messages", () => {
+    it("returns paginated message history", async () => {
+      const mockMessages = [
+        { id: "m1", blueprintId: "bp-1", role: "user", content: "Hello", acknowledged: false, createdAt: "2024-01-02" },
+        { id: "m2", blueprintId: "bp-1", role: "system", content: "Ack", acknowledged: true, createdAt: "2024-01-01" },
+      ];
+      vi.mocked(getMessageHistory).mockReturnValueOnce(mockMessages as any);
+      vi.mocked(getMessageCount).mockReturnValueOnce(2);
+
+      const res = await request(app).get("/api/blueprints/bp-1/messages");
+      expect(res.status).toBe(200);
+      expect(res.body.messages).toHaveLength(2);
+      expect(res.body.total).toBe(2);
+      expect(getMessageHistory).toHaveBeenCalledWith("bp-1", 50, 0);
+    });
+
+    it("clamps limit between 1 and 200", async () => {
+      vi.mocked(getMessageHistory).mockReturnValueOnce([]);
+      vi.mocked(getMessageCount).mockReturnValueOnce(0);
+
+      await request(app).get("/api/blueprints/bp-1/messages?limit=500");
+      expect(getMessageHistory).toHaveBeenCalledWith("bp-1", 200, 0);
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+      const res = await request(app).get("/api/blueprints/missing/messages");
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/blueprints/:id/messages", () => {
+    it("creates message and returns it", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/messages")
+        .send({ content: "Focus on tests" });
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe("Focus on tests");
+      expect(res.body.role).toBe("user");
+      expect(createAutopilotMessage).toHaveBeenCalledWith("bp-1", "user", "Focus on tests");
+    });
+
+    it("returns 400 for missing content", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/messages")
+        .send({});
+      expect(res.status).toBe(400);
+    });
+
+    it("returns 400 for empty content", async () => {
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/messages")
+        .send({ content: "   " });
+      expect(res.status).toBe(400);
+    });
+
+    it("triggers autopilot loop when blueprint is in FSD mode", async () => {
+      const fsdBlueprint = {
+        id: "bp-1",
+        title: "Test",
+        description: "desc",
+        status: "running",
+        executionMode: "fsd",
+        projectCwd: "/test",
+        nodes: [],
+        createdAt: "2024-01-01",
+        updatedAt: "2024-01-01",
+      } as any;
+      // First call: route handler checks blueprint exists
+      // Second call: triggerAutopilotIfNeeded checks executionMode
+      vi.mocked(getBlueprint)
+        .mockReturnValueOnce(fsdBlueprint)
+        .mockReturnValueOnce(fsdBlueprint);
+
+      const res = await request(app)
+        .post("/api/blueprints/bp-1/messages")
+        .send({ content: "Do something" });
+      expect(res.status).toBe(200);
+      // triggerAutopilotIfNeeded checks mode and enqueues if needed
+      expect(enqueueBlueprintTask).toHaveBeenCalled();
+    });
+
+    it("returns 404 for missing blueprint", async () => {
+      vi.mocked(getBlueprint).mockReturnValueOnce(null as any);
+      const res = await request(app)
+        .post("/api/blueprints/missing/messages")
+        .send({ content: "Hello" });
       expect(res.status).toBe(404);
     });
   });

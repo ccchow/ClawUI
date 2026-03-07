@@ -45,8 +45,7 @@ import { SkeletonLoader } from "@/components/SkeletonLoader";
 import { useToast } from "@/components/Toast";
 import { ConfirmationStrip } from "@/components/ConfirmationStrip";
 import { AutopilotToggle } from "@/components/AutopilotToggle";
-import { AutopilotLog } from "@/components/AutopilotLog";
-import { PauseBanner } from "@/components/PauseBanner";
+import { BlueprintChat } from "@/components/BlueprintChat";
 import { useBlueprintBroadcast } from "@/lib/useBlueprintBroadcast";
 
 /** Strip markdown formatting for plain-text preview (best-effort, line-clamp handles overflow) */
@@ -152,11 +151,11 @@ export default function BlueprintDetailPage() {
   const [nodeSearchQuery, setNodeSearchQuery] = useState("");
   const nodeSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showOlderNodes, setShowOlderNodes] = useState(false);
-  const [generateInstruction, setGenerateInstruction] = useState("");
   const [approving, setApproving] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [reevaluating, setReevaluating] = useState(false);
-  const [insightsOpen, setInsightsOpen] = useState(true);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  const insightsAutoOpenedRef = useRef(false);
   const [showDismissed, setShowDismissed] = useState(false);
 
   // Convene state
@@ -171,9 +170,6 @@ export default function BlueprintDetailPage() {
   const [sessionDetail, setSessionDetail] = useState<(ConveneSession & { messages: ConveneMessage[] }) | null>(null);
   const [confirmingDiscard, setConfirmingDiscard] = useState<string | null>(null);
   const [expandedMsgIds, setExpandedMsgIds] = useState<Set<string>>(new Set());
-  const [generateCooldown, setGenerateCooldown] = useState(false);
-  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
-  const [confirmingReevaluate, setConfirmingReevaluate] = useState(false);
   const [confirmingRunAll, setConfirmingRunAll] = useState(false);
   const [confirmingStatusReset, setConfirmingStatusReset] = useState(false);
   const [confirmingStatusTransition, setConfirmingStatusTransition] = useState<string | null>(null);
@@ -237,7 +233,7 @@ export default function BlueprintDetailPage() {
     });
   }, [blueprint, id, invalidateAll]);
 
-  // Auto-generate nodes if ?generate=true
+  // Auto-generate nodes if ?generate=true (fire-and-forget on new blueprint)
   useEffect(() => {
     if (
       searchParams.get("generate") === "true" &&
@@ -247,38 +243,17 @@ export default function BlueprintDetailPage() {
       !generating
     ) {
       autoGenerateTriggered.current = true;
-      handleGenerate(true);
+      setGenerating(true);
+      setMutationError(null);
+      preGenerateNodeIdsRef.current = new Set();
+      setNewNodeIds(new Set());
+      generatePlan(id)
+        .then(() => { broadcastOperation("generate"); invalidateAll(); })
+        .catch((err) => setMutationError(err instanceof Error ? err.message : String(err)))
+        .finally(() => setGenerating(false));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleGenerate is intentionally excluded to prevent re-trigger loops; autoGenerateTriggered ref guards against double execution
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only triggered by blueprint/searchParams changes; autoGenerateTriggered ref guards against double execution
   }, [blueprint, searchParams]);
-
-  const handleGenerate = async (skipConfirm = false) => {
-    if (!skipConfirm && blueprint && blueprint.nodes.length > 0 && !confirmingRegenerate) {
-      setConfirmingRegenerate(true);
-      return;
-    }
-    setConfirmingRegenerate(false);
-    setGenerating(true);
-    setMutationError(null);
-    // Snapshot current node IDs to track new ones during generation
-    preGenerateNodeIdsRef.current = new Set(blueprint?.nodes.map(n => n.id) ?? []);
-    setNewNodeIds(new Set());
-    try {
-      await generatePlan(id, generateInstruction.trim() || undefined);
-      broadcastOperation("generate");
-      // Generate is now fire-and-forget — invalidate queries to pick up pending task,
-      // then polling will detect new nodes as Claude creates them via API
-      invalidateAll();
-      // Prevent accidental reevaluate clicks right after generation
-      setGenerateCooldown(true);
-      setTimeout(() => setGenerateCooldown(false), 5000);
-    } catch (err) {
-      setMutationError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setGenerateInstruction("");
-      setGenerating(false);
-    }
-  };
 
   // Derived state (used by JSX and below effects)
   const anyNodeRunning = blueprint?.nodes.some(n => n.status === "running") ?? false;
@@ -368,11 +343,6 @@ export default function BlueprintDetailPage() {
   };
 
   const handleReevaluateAll = async () => {
-    if (!confirmingReevaluate) {
-      setConfirmingReevaluate(true);
-      return;
-    }
-    setConfirmingReevaluate(false);
     setReevaluating(true);
     setMutationError(null);
     try {
@@ -675,6 +645,16 @@ export default function BlueprintDetailPage() {
     } catch { /* ignore */ }
     return "/blueprints";
   }, []);
+
+  // Auto-open insights panel on first load only if there are unread insights
+  useEffect(() => {
+    if (!insightsAutoOpenedRef.current && insights.length > 0) {
+      insightsAutoOpenedRef.current = true;
+      if (insights.some((i) => !i.read && !i.dismissed)) {
+        setInsightsOpen(true);
+      }
+    }
+  }, [insights]);
 
   if (loading) {
     return (
@@ -1189,91 +1169,24 @@ export default function BlueprintDetailPage() {
           />
         </div>
 
-        {/* Generate instruction + action buttons — ChatGPT-style unified input */}
-        <div className={`rounded-xl border bg-bg-secondary transition-colors ${generating || isGeneratingTask ? "border-accent-purple/40" : "border-border-primary focus-within:border-accent-purple/60"}`}>
-          <textarea
-            rows={2}
-            value={generateInstruction}
-            onChange={(e) => setGenerateInstruction(e.target.value)}
-            readOnly={generating || isGeneratingTask}
-            placeholder="Describe what to generate or change (e.g. 'add auth support', 'focus on testing')..."
-            className={`w-full px-4 pt-3 pb-1 bg-transparent text-text-primary text-sm placeholder:text-text-muted focus:outline-none resize-none max-h-32 overflow-y-auto ${generating || isGeneratingTask ? "opacity-60 cursor-not-allowed" : ""}`}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                if (!generating && !isGeneratingTask) handleGenerate();
-              }
-            }}
-          />
-          <div className="flex items-center justify-between gap-2 px-3 pb-2.5">
-            {/* Generative actions — left side */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued") && (
-                confirmingReevaluate ? (
-                  <ConfirmationStrip
-                    confirmLabel="Reevaluate?"
-                    variant="amber"
-                    onConfirm={handleReevaluateAll}
-                    onCancel={() => setConfirmingReevaluate(false)}
-                    disabled={isReevaluatingTask}
-                  />
-                ) : (
-                  <button
-                    onClick={handleReevaluateAll}
-                    disabled={isRunning || reevaluating || generateCooldown || isReevaluatingTask}
-                    title={generateCooldown ? "Please wait a moment after generating nodes" : reevaluating || isReevaluatingTask ? "AI is re-evaluating all nodes..." : isRunning ? "Cannot reevaluate while nodes are running" : "AI reads your codebase and updates all node titles, descriptions, and statuses"}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-accent-amber text-xs font-medium hover:bg-accent-amber/10 transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed whitespace-nowrap"
-                  >
-                    {reevaluating || pendingTasks.some((t) => t.type === "reevaluate") ? (
-                      <><AISparkle size="xs" /> Reevaluating...</>
-                    ) : (
-                      <>
-                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-                        </svg>
-                        Reevaluate
-                      </>
-                    )}
-                  </button>
-                )
-              )}
-            </div>
-            {/* Primary generate action — right side */}
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              {confirmingRegenerate ? (
-                <ConfirmationStrip
-                  confirmLabel="Regenerate?"
-                  variant="purple"
-                  onConfirm={() => handleGenerate(true)}
-                  onCancel={() => setConfirmingRegenerate(false)}
-                  disabled={isGeneratingTask}
-                />
-              ) : (
-                <button
-                  onClick={() => handleGenerate()}
-                  disabled={generating || isGeneratingTask}
-                  title={generating || isGeneratingTask ? "AI is generating task nodes..." : `Use AI to decompose the blueprint into executable task nodes (${navigator?.userAgent?.includes("Mac") ? "⌘" : "Ctrl"}+Enter)`}
-                  aria-label="Generate nodes"
-                  className={`inline-flex items-center gap-1.5 rounded-lg text-sm font-medium transition-all active:scale-[0.97] disabled:opacity-disabled disabled:cursor-not-allowed ${
-                    generating || isGeneratingTask
-                      ? "px-3 py-1.5 bg-accent-purple/20 text-accent-purple"
-                      : blueprint.nodes.length === 0
-                        ? "p-2 bg-accent-purple text-white hover:bg-accent-purple/90"
-                        : "p-2 text-accent-purple hover:bg-accent-purple/15"
-                  }`}
-                >
-                  {generating || isGeneratingTask ? (
-                    <><AISparkle size="xs" /> Generating...</>
-                  ) : (
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
-                    </svg>
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        {/* Blueprint Chat — replaces generator textarea */}
+        <BlueprintChat
+          blueprintId={id}
+          executionMode={blueprint.executionMode}
+          blueprintStatus={blueprint.status}
+          pauseReason={blueprint.pauseReason}
+          isReevaluating={reevaluating || isReevaluatingTask}
+          isRunning={isRunning}
+          hasNodes={blueprint.nodes.some((n) => n.status !== "done" && n.status !== "running" && n.status !== "queued")}
+          onReevaluateAll={handleReevaluateAll}
+          onUpdate={(patch) => setBlueprint((prev) => prev ? { ...prev, ...patch } as typeof prev : prev)}
+          onInvalidate={invalidateAll}
+          onBroadcast={(type) => broadcastOperation(type as Parameters<typeof broadcastOperation>[0])}
+          onScrollToNode={(nodeId) => {
+            const el = document.getElementById(`node-${nodeId}`);
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+          }}
+        />
         {/* Generation progress banner */}
         {isGeneratingTask && (
           <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-accent-purple/10 border border-accent-purple/30">
@@ -1418,30 +1331,6 @@ export default function BlueprintDetailPage() {
         </div>
       )}
 
-      {/* Autopilot Pause Banner */}
-      {blueprint.status === "paused" && blueprint.pauseReason && isAutopilot && (
-        <PauseBanner
-          blueprintId={id}
-          pauseReason={blueprint.pauseReason}
-          executionMode={blueprint.executionMode}
-          onUpdate={(patch) => setBlueprint((prev) => prev ? { ...prev, ...patch } as typeof prev : prev)}
-          onInvalidate={invalidateAll}
-          onBroadcast={(type) => broadcastOperation(type as Parameters<typeof broadcastOperation>[0])}
-          onScrollToNode={(nodeId) => {
-            const el = document.getElementById(`node-${nodeId}`);
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-          }}
-        />
-      )}
-
-      {/* Autopilot Decision Log */}
-      {isAutopilot && (
-        <AutopilotLog
-          blueprintId={id}
-          executionMode={blueprint.executionMode}
-          blueprintStatus={blueprint.status}
-        />
-      )}
 
       {/* Insights Panel */}
       {insights.length > 0 && (() => {

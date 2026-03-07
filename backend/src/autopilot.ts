@@ -16,9 +16,13 @@ import {
   getAutopilotLog,
   setAutopilotMemory,
   getAutopilotMemory,
+  getUnacknowledgedMessages,
+  acknowledgeMessage,
+  getArtifactsForNode,
 } from "./plan-db.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 import type {
+  AutopilotMessage,
   BlueprintStatus,
   MacroNodeStatus,
   InsightSeverity,
@@ -37,13 +41,8 @@ import {
 import type { PendingTask } from "./plan-executor.js";
 import { getActiveRuntime } from "./agent-runtime.js";
 import { coordinateBlueprint } from "./plan-coordinator.js";
-import {
-  enrichNodeInternal,
-  reevaluateNodeInternal,
-  splitNodeInternal,
-  smartDepsInternal,
-  reevaluateAllInternal,
-} from "./plan-operations.js";
+// plan-operations.js imports removed — sub-agent AI operations (enrich, split,
+// smart deps, reevaluate) are now handled by the autopilot via read tools + CRUD.
 import { getDb } from "./db.js";
 import { createLogger } from "./logger.js";
 
@@ -55,6 +54,7 @@ import "./agent-codex.js";
 
 // Side-effect: auto-discovers and registers all roles
 import "./roles/load-all-roles.js";
+import { getAllRoles } from "./roles/role-registry.js";
 
 const log = createLogger("autopilot");
 
@@ -84,13 +84,14 @@ export function writeGlobalMemory(content: string): void {
 
 /** All known autopilot tool names (derived from TOOL_DESCRIPTIONS). */
 const ALL_TOOL_NAMES = [
-  "run_node", "resume_node", "evaluate_node", "reevaluate_node",
-  "enrich_node", "split_node", "smart_dependencies",
+  "run_node", "resume_node", "evaluate_node",
+  "get_node_titles", "get_node_details", "get_node_handoff",
+  "read_user_messages", "acknowledge_message",
   "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
-  "coordinate", "convene", "reevaluate_all",
+  "coordinate", "convene",
   "mark_insight_read", "dismiss_insight", "mark_suggestion_used",
   "batch_mark_suggestions_used", "batch_dismiss_insights",
-  "pause", "complete",
+  "pause",
 ];
 
 export interface ToolUsageStats {
@@ -376,20 +377,11 @@ export interface AutopilotNodeState {
   id: string;
   seq: number;
   title: string;
-  description: string;
   status: MacroNodeStatus;
   dependencies: string[];
   roles?: string[];
   error?: string;
   resumeCount: number;
-  suggestions: AutopilotSuggestionState[];
-}
-
-export interface AutopilotSuggestionState {
-  id: string;
-  title: string;
-  description: string;
-  roles?: string[];
 }
 
 export interface AutopilotInsightState {
@@ -504,50 +496,34 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
     includedNodeIds = new Set(allNodes.map((n) => n.id));
   }
 
-  // Build node snapshots with suggestions, tracking unused count to avoid duplicate DB queries
+  // Build lightweight node snapshots (description and suggestions fetched on-demand via read tools)
   const nodes: AutopilotNodeState[] = [];
   const allUnusedSuggestionIds: string[] = [];
   let totalUnusedSuggestions = 0;
   for (const node of allNodes) {
+    // Count unused suggestions for summary stats (all nodes)
+    const allSuggestions = getSuggestionsForNode(node.id);
+    const unusedIds = allSuggestions
+      .filter((s: NodeSuggestion) => !s.used)
+      .map((s: NodeSuggestion) => s.id);
+    totalUnusedSuggestions += unusedIds.length;
+
     if (!includedNodeIds.has(node.id)) continue;
 
-    // Unused suggestions only (exclude used:true per spec)
-    const allSuggestions = getSuggestionsForNode(node.id);
-    const unusedSuggestions: AutopilotSuggestionState[] = allSuggestions
-      .filter((s: NodeSuggestion) => !s.used)
-      .map((s: NodeSuggestion) => {
-        allUnusedSuggestionIds.push(s.id);
-        return {
-          id: s.id,
-          title: s.title,
-          description: truncate(s.description, 150),
-          ...(s.roles && s.roles.length > 0 ? { roles: s.roles } : {}),
-        };
-      });
-    totalUnusedSuggestions += unusedSuggestions.length;
+    allUnusedSuggestionIds.push(...unusedIds);
 
     const nodeState: AutopilotNodeState = {
       id: node.id,
       seq: node.seq,
       title: node.title,
-      description: truncate(node.description, 200),
       status: node.status,
       dependencies: node.dependencies,
       resumeCount: getResumeCount(blueprintId, node.id),
-      suggestions: unusedSuggestions,
     };
     if (node.roles && node.roles.length > 0) nodeState.roles = node.roles;
     if (node.error) nodeState.error = node.error;
 
     nodes.push(nodeState);
-  }
-  // For large blueprints, count unused suggestions for non-included nodes too
-  if (isLargeBlueprint) {
-    for (const node of allNodes) {
-      if (includedNodeIds.has(node.id)) continue;
-      const suggestions = getSuggestionsForNode(node.id);
-      totalUnusedSuggestions += suggestions.filter((s: NodeSuggestion) => !s.used).length;
-    }
   }
 
   // Only include unread, non-dismissed insights — auto-mark as read after snapshot
@@ -618,16 +594,19 @@ export function buildStateSnapshot(blueprintId: string): AutopilotState {
 
 // ─── Tool Descriptions (spec §4.2) ──────────────────────────
 
-const TOOL_DESCRIPTIONS = `### Node Execution
+const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
+- **get_node_titles()** — Returns all nodes with {id, seq, title, status, roles, deps}. Use to understand current plan structure before creating or modifying nodes.
+- **get_node_details(nodeId)** — Returns full node context: description, prompt, error, resolved dependency titles+statuses, latest handoff content, unused suggestions. Use before modifying any node.
+- **get_node_handoff(nodeId)** — Returns just the latest handoff artifact content for a completed node. Lightweight alternative to get_node_details when you only need the output.
+
+### User Messages
+- **read_user_messages()** — Returns unacknowledged messages from the user. Check at the start of each iteration.
+- **acknowledge_message(messageId)** — Mark a message as acknowledged after reading it.
+
+### Node Execution
 - **run_node(nodeId)** — Execute a single pending/queued node. Dependencies must be done first.
 - **resume_node(nodeId, feedback?)** — Resume a node's session with optional guidance/feedback string.
 - **evaluate_node(nodeId)** — Trigger evaluation on a completed node to check quality.
-- **reevaluate_node(nodeId)** — Re-run evaluation on a previously evaluated node.
-
-### Node Intelligence
-- **enrich_node(nodeId)** — AI-enrich a node's description for better execution quality.
-- **split_node(nodeId)** — Split a complex node into smaller sub-nodes.
-- **smart_dependencies(nodeId)** — Auto-detect and set dependencies for a node.
 
 ### Node CRUD
 - **create_node(title, description, dependsOn?, roles?)** — Create a new node. dependsOn is an array of node IDs. roles is an array of role IDs.
@@ -639,7 +618,6 @@ const TOOL_DESCRIPTIONS = `### Node Execution
 ### Blueprint Intelligence
 - **coordinate()** — Run the coordinator to process unread insights and take corrective actions.
 - **convene(topic, roleIds)** — Start a multi-role discussion on a specific topic. roleIds is an array of role ID strings.
-- **reevaluate_all()** — Re-evaluate all completed nodes.
 
 ### Insight & Suggestion Management
 - **mark_insight_read(insightId)** — Acknowledge an insight without taking action.
@@ -649,8 +627,51 @@ const TOOL_DESCRIPTIONS = `### Node Execution
 - **batch_dismiss_insights(insightIds)** — Dismiss multiple insights at once. insightIds is an array of insight ID strings.
 
 ### Control Flow
-- **pause(reason)** — Pause autopilot and request human input. Use when you encounter ambiguous requirements, architectural decisions, or external dependencies that need human judgment.
-- **complete()** — Signal that the blueprint is done. Only use when all nodes are done/skipped.`;
+- **pause(reason)** — Pause autopilot and request human input. Use when you encounter ambiguous requirements, architectural decisions, or external dependencies that need human judgment.`;
+
+// ─── Role Descriptions for Prompt ────────────────────────────
+
+/**
+ * Build a description of available roles for inclusion in the autopilot prompt.
+ * Helps the LLM assign appropriate roles when creating nodes.
+ */
+function buildRoleDescriptions(enabledRoleIds: string[]): string {
+  const allRoles = getAllRoles();
+  if (allRoles.length === 0) return "";
+
+  const enabledSet = new Set(enabledRoleIds);
+  const enabled = allRoles.filter((r) => enabledSet.has(r.id));
+  const available = allRoles.filter((r) => !enabledSet.has(r.id));
+
+  let section = "## Available Roles\n";
+  section += "When creating nodes, assign appropriate roles to ensure the right expertise is applied.\n\n";
+
+  if (enabled.length > 0) {
+    section += "**Enabled on this blueprint:**\n";
+    for (const role of enabled) {
+      section += `- \`${role.id}\` — **${role.label}**: ${role.description}\n`;
+    }
+  }
+
+  if (available.length > 0) {
+    section += "\n**Other available roles** (can still be assigned to individual nodes):\n";
+    for (const role of available) {
+      section += `- \`${role.id}\` — **${role.label}**: ${role.description}\n`;
+    }
+  }
+
+  section += `\n**Role assignment guidelines:**
+- Implementation/coding tasks → \`sde\`
+- Testing/QA tasks → \`qa\`
+- UI/UX design tasks → \`uxd\`
+- Architecture/system design → \`sa\`
+- Requirements/planning → \`pm\`
+- ML/data science → \`mle\`
+- When unsure, use the role(s) enabled on the blueprint
+- A node can have multiple roles for cross-cutting work\n`;
+
+  return section;
+}
 
 // ─── Autopilot Memory for Prompt Injection ───────────────────
 
@@ -671,8 +692,9 @@ export function buildAutopilotPrompt(
   maxIterations: number,
   memory: AutopilotMemory = { blueprint: null, global: null },
   fsdMode: boolean = false,
+  userMessages: AutopilotMessage[] = [],
 ): string {
-  const remaining = maxIterations - iteration;
+  const remaining = maxIterations === Infinity ? Infinity : maxIterations - iteration;
 
   // Build memory sections to inject between state and tools
   let memorySections = "";
@@ -686,47 +708,75 @@ export function buildAutopilotPrompt(
   const workflowSection = fsdMode
     ? `## FSD Mode (Full Speed Drive)
 You are running in FSD mode — no safeguards, no throttling. Execute as fast and efficiently as possible.
-Focus on running nodes to completion. Skip enrichment and coordination overhead unless absolutely necessary.
-Don't hesitate to run nodes back-to-back. Maximize throughput.`
+Focus on running nodes to completion. Use get_node_details only when needed for context before running complex nodes.
+Don't hesitate to run nodes back-to-back. Maximize throughput.
+Check read_user_messages() periodically — user messages always take priority.`
     : `## Recommended Workflow Rhythm
-Don't just run nodes back-to-back. Follow this quality-aware pattern:
+Follow this read-before-act pattern:
 
-1. **Before running a node**: If its description is short or vague, use enrich_node first to improve the prompt.
-2. **After running a node**: Evaluation runs automatically — you'll see suggestions appear on completed nodes. Review them before moving on.
-3. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
-4. **When suggestions accumulate**: Review them — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
-5. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
+1. **Check user messages first**: Call read_user_messages() at the start of each iteration. User messages contain instructions, feedback, or requests that should guide your next actions. Always acknowledge messages after reading them.
+2. **Read before modifying**: Before modifying any node, use get_node_details(nodeId) to understand its full context. Before creating nodes, use get_node_titles() to understand the current plan structure.
+3. **Before running a node**: Use get_node_details to check if its description is adequate. If it's short or vague, use update_node to improve the description/prompt yourself — you have the context to write good prompts.
+4. **After running a node**: Evaluation runs automatically — use get_node_details to check suggestions. Review them before moving on.
+5. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
+6. **When suggestions accumulate**: Review them via get_node_details — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
+7. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
 
-A good rhythm: enrich → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.`;
+A good rhythm: read context → improve prompt if needed → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.`;
 
   const guidelinesSection = fsdMode
     ? `## Guidelines
 - Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
 - If a node failed, try resume with feedback or skip it — don't get stuck on any single node.
-- When all nodes are done, call complete().
-- You have ${remaining} iterations left.`
+- If user messages appear above, process them first — they take priority over everything else.
+- The loop exits automatically when all nodes are done and no user messages remain. Just focus on running nodes.
+- No iteration limit — keep going until all nodes are done.`
     : `## Guidelines
 - Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
-- If a node failed, analyze the error. Consider: resume with feedback, split it, modify its description/prompt, or skip it if non-critical.
-- If a node seems too complex (long description >500 chars, many dependencies), consider split_node first.
-- If a node has been resumed multiple times (check resumeCount), consider splitting or skipping it instead of retrying.
-- When creating nodes from suggestions, set appropriate dependencies and roles.
+- If a node failed, use get_node_details to analyze the error. Consider: resume with feedback, update its description/prompt, create sub-nodes to break it down, or skip it if non-critical.
+- If a node seems too complex, create sub-nodes to break it down using create_node with appropriate dependencies.
+- If a node has been resumed multiple times (check resumeCount), consider breaking it down or skipping it instead of retrying.
+- When creating nodes, always set appropriate roles and dependencies:
+  - Assign roles matching the task type (e.g. \`sde\` for implementation, \`qa\` for testing — see Available Roles section).
+  - Set dependsOn for nodes that require output from other nodes. Use get_node_titles() to find existing node IDs to depend on.
+  - For multi-step feature requests, decompose into separate nodes with dependency chains (e.g. design → implement → test).
 - If critical insights exist (severity: "critical"), address them before proceeding with normal execution.
 - If warning insights exist, consider addressing them when convenient but don't block progress.
 - If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason).
-- You have ${remaining} iterations left. Balance quality (coordinate, enrich, suggestion triage) with progress (run_node).
-- When all nodes are done: review any remaining unused suggestions. Use batch_mark_suggestions_used for ones not worth acting on. Use create_node for actionable ones. Then call complete().`;
+- You have ${remaining === Infinity ? "unlimited" : remaining} iterations left. Balance quality (coordinate, suggestion triage) with progress (run_node).
+- If user messages appear above, process them first — create new nodes if needed, then acknowledge.
+- The loop exits automatically when all nodes are done and no user messages remain. Just focus on making progress.`;
 
-  return `You are the Autopilot agent for a software blueprint. Your goal is to drive this blueprint to completion by choosing the best next action at each step.
+  // Build role descriptions
+  const roleSection = buildRoleDescriptions(state.blueprint.enabledRoles);
+
+  // User messages section — stronger framing when messages exist
+  let userMessageSection = "";
+  if (userMessages.length > 0) {
+    userMessageSection = `## User Messages (HIGHEST PRIORITY — address before anything else)
+The user has sent messages that you MUST process before taking any other action.
+Do NOT call complete() while unacknowledged messages exist — the user may be requesting new work.
+
+${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
+
+**Required**: Read each message carefully. If it contains a feature request, bug report, or improvement suggestion:
+1. Use create_node (or batch_create_nodes) to create new nodes with appropriate titles, descriptions, roles, and dependencies.
+2. Then acknowledge_message(messageId) to mark it as handled.
+If it's a question or comment that doesn't require new nodes, acknowledge it after considering it.
+
+`;
+  }
+
+  return `You are the Autopilot agent for a software blueprint. Your goal is to drive this blueprint to completion by choosing the best next action at each step. You can also create new nodes when the user requests additional work — even if all existing nodes are done.
 
 ## Current Blueprint State
 ${JSON.stringify(state, null, 2)}
 
-## Iteration ${iteration} of ${maxIterations}
-${memorySections}
-## Available Tools
+## Iteration ${iteration}${maxIterations === Infinity ? "" : ` of ${maxIterations}`}
+${memorySections}${userMessageSection}## Available Tools
 ${TOOL_DESCRIPTIONS}
 
+${roleSection}
 ${workflowSection}
 
 ${guidelinesSection}
@@ -808,56 +858,84 @@ export async function executeDecision(
         return { success: true, message: `Evaluated node ${nodeId}` };
       }
 
-      case "reevaluate_node": {
-        const nodeId = p.nodeId as string;
-        addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
-        try {
-          await reevaluateNodeInternal(blueprintId, nodeId);
-        } catch (err) {
-          log.error(`Autopilot reevaluate_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          removePendingTask(blueprintId, nodeId, "reevaluate");
-        }
-        return { success: true, message: `Reevaluated node ${nodeId}` };
+      case "get_node_titles": {
+        const bp = getBlueprint(blueprintId);
+        if (!bp) return { success: false, message: "Blueprint not found", error: "not_found" };
+        const titles = bp.nodes.map((n) => ({
+          id: n.id,
+          seq: n.seq,
+          title: n.title,
+          status: n.status,
+          roles: n.roles ?? [],
+          deps: n.dependencies,
+        }));
+        return { success: true, message: JSON.stringify(titles) };
       }
 
-      case "enrich_node": {
+      case "get_node_details": {
         const nodeId = p.nodeId as string;
-        addPendingTask(blueprintId, { type: "enrich", nodeId, queuedAt: new Date().toISOString() });
-        try {
-          await enrichNodeInternal(blueprintId, nodeId);
-        } catch (err) {
-          log.error(`Autopilot enrich_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          removePendingTask(blueprintId, nodeId, "enrich");
-        }
-        return { success: true, message: `Enriched node ${nodeId}` };
+        const bp = getBlueprint(blueprintId);
+        if (!bp) return { success: false, message: "Blueprint not found", error: "not_found" };
+        const node = bp.nodes.find((n) => n.id === nodeId);
+        if (!node) return { success: false, message: `Node ${nodeId} not found`, error: "not_found" };
+
+        // Resolve dependencies with titles and statuses
+        const resolvedDeps = node.dependencies.map((depId) => {
+          const dep = bp.nodes.find((n) => n.id === depId);
+          return dep ? { id: dep.id, seq: dep.seq, title: dep.title, status: dep.status } : { id: depId, seq: 0, title: "(unknown)", status: "pending" };
+        });
+
+        // Get latest handoff artifact
+        const outputArtifacts = getArtifactsForNode(nodeId, "output");
+        const latestHandoff = outputArtifacts
+          .filter((a) => a.type === "handoff_summary")
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+
+        // Get unused suggestions
+        const allSuggestions = getSuggestionsForNode(nodeId);
+        const unusedSuggestions = allSuggestions
+          .filter((s) => !s.used)
+          .map((s) => ({ id: s.id, title: s.title, description: s.description, roles: s.roles }));
+
+        const details = {
+          id: node.id,
+          seq: node.seq,
+          title: node.title,
+          description: node.description,
+          prompt: node.prompt ?? null,
+          status: node.status,
+          error: node.error ?? null,
+          roles: node.roles ?? [],
+          dependencies: resolvedDeps,
+          latestHandoff: latestHandoff ? latestHandoff.content : null,
+          unusedSuggestions,
+          resumeCount: getResumeCount(blueprintId, nodeId),
+        };
+        return { success: true, message: JSON.stringify(details) };
       }
 
-      case "split_node": {
+      case "get_node_handoff": {
         const nodeId = p.nodeId as string;
-        addPendingTask(blueprintId, { type: "split", nodeId, queuedAt: new Date().toISOString() });
-        try {
-          await splitNodeInternal(blueprintId, nodeId);
-        } catch (err) {
-          log.error(`Autopilot split_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          removePendingTask(blueprintId, nodeId, "split");
+        const outputArtifacts = getArtifactsForNode(nodeId, "output");
+        const latestHandoff = outputArtifacts
+          .filter((a) => a.type === "handoff_summary")
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        if (!latestHandoff) {
+          return { success: true, message: JSON.stringify({ nodeId, handoff: null }) };
         }
-        return { success: true, message: `Split node ${nodeId}` };
+        return { success: true, message: JSON.stringify({ nodeId, handoff: latestHandoff.content }) };
       }
 
-      case "smart_dependencies": {
-        const nodeId = p.nodeId as string;
-        addPendingTask(blueprintId, { type: "smart_deps", nodeId, queuedAt: new Date().toISOString() });
-        try {
-          await smartDepsInternal(blueprintId, nodeId);
-        } catch (err) {
-          log.error(`Autopilot smart_dependencies ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          removePendingTask(blueprintId, nodeId, "smart_deps");
-        }
-        return { success: true, message: `Smart dependencies set for node ${nodeId}` };
+      case "read_user_messages": {
+        const messages = getUnacknowledgedMessages(blueprintId);
+        return { success: true, message: JSON.stringify(messages) };
+      }
+
+      case "acknowledge_message": {
+        const messageId = p.messageId as string;
+        const result = acknowledgeMessage(messageId);
+        if (!result) return { success: false, message: `Message ${messageId} not found`, error: "not_found" };
+        return { success: true, message: `Acknowledged message ${messageId}` };
       }
 
       case "create_node": {
@@ -866,12 +944,14 @@ export async function executeDecision(
         const maxOrder = Math.max(0, ...blueprint.nodes.map((n) => n.order));
         const deps = (p.dependsOn as string[] | undefined) ?? [];
         const roles = p.roles as string[] | undefined;
+        // Fall back to blueprint's defaultRole when LLM doesn't specify roles
+        const effectiveRoles = roles && roles.length > 0 ? roles : [blueprint.defaultRole ?? "sde"];
         const node = createMacroNode(blueprintId, {
           title: p.title as string,
           description: p.description as string | undefined,
           order: maxOrder + 1,
           dependencies: deps,
-          ...(roles ? { roles } : {}),
+          roles: effectiveRoles,
         });
         return { success: true, message: `Created node ${node.id} "${node.title}"` };
       }
@@ -918,12 +998,14 @@ export async function executeDecision(
               return typeof dep === "string" && (existingNodeIds.has(dep) || createdNodes.some((n) => n.id === dep)) ? dep : null;
             })
             .filter((id): id is string => id !== null);
+          // Fall back to blueprint's defaultRole when LLM doesn't specify roles
+          const itemRoles = item.roles && item.roles.length > 0 ? item.roles : [blueprint.defaultRole ?? "sde"];
           const created = createMacroNode(blueprintId, {
             title: item.title,
             description: item.description,
             order: maxOrder + i + 1,
             dependencies: depIds,
-            ...(item.roles ? { roles: item.roles } : {}),
+            roles: itemRoles,
           });
           createdNodes.push(created);
         }
@@ -968,30 +1050,6 @@ export async function executeDecision(
         return { success: true, message: "Convene session complete" };
       }
 
-      case "reevaluate_all": {
-        const blueprint = getBlueprint(blueprintId);
-        if (!blueprint) return { success: false, message: "Blueprint not found", error: "not_found" };
-        const nonDoneNodes = blueprint.nodes.filter(
-          (n) => n.status !== "done" && n.status !== "running" && n.status !== "queued",
-        );
-        if (nonDoneNodes.length === 0) {
-          return { success: false, message: "No nodes to reevaluate", error: "no_nodes" };
-        }
-        for (const n of nonDoneNodes) {
-          addPendingTask(blueprintId, { type: "reevaluate", nodeId: n.id, queuedAt: new Date().toISOString() });
-        }
-        try {
-          await reevaluateAllInternal(blueprintId);
-        } catch (err) {
-          log.error(`Autopilot reevaluate_all failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          for (const n of nonDoneNodes) {
-            removePendingTask(blueprintId, n.id, "reevaluate");
-          }
-        }
-        return { success: true, message: `Reevaluated ${nonDoneNodes.length} nodes` };
-      }
-
       case "mark_insight_read": {
         const insightId = p.insightId as string;
         const result = markInsightRead(insightId);
@@ -1031,16 +1089,15 @@ export async function executeDecision(
 
       case "pause": {
         const reason = (p.reason as string) || "Autopilot paused by AI decision";
-        updateBlueprint(blueprintId, {
-          status: "paused" as BlueprintStatus,
-          pauseReason: reason,
-        });
+        // Only set pauseReason — blueprint status is user-managed only
+        updateBlueprint(blueprintId, { pauseReason: reason });
         return { success: true, message: `Paused: ${reason}` };
       }
 
       case "complete": {
-        updateBlueprint(blueprintId, { status: "done" as BlueprintStatus });
-        return { success: true, message: "Blueprint marked as complete" };
+        // No-op for blueprint status — status is user-managed only.
+        // Just signals the loop to exit gracefully.
+        return { success: true, message: "Loop exit signaled" };
       }
 
       default:
@@ -1245,13 +1302,15 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
     return;
   }
 
-  updateBlueprint(blueprintId, { status: "running" as BlueprintStatus, pauseReason: "" });
+  // Clear pauseReason only — blueprint status is user-managed
+  updateBlueprint(blueprintId, { pauseReason: "" });
   addPendingTask(blueprintId, { type: "autopilot" as PendingTask["type"], queuedAt: new Date().toISOString() });
   clearResumeCounts(blueprintId);
   clearSeenSuggestions(blueprintId);
 
   const isFsdAtStart = blueprint.executionMode === "fsd";
-  const maxIterations = blueprint.maxIterations ?? (isFsdAtStart ? 200 : 50);
+  // FSD mode: no hard iteration limit (Infinity) unless user explicitly set one
+  const maxIterations = blueprint.maxIterations ?? (isFsdAtStart ? Infinity : 50);
   let iteration = 0;
 
   // Memory: read existing per-blueprint and global memory at loop start
@@ -1266,7 +1325,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
     graceIterations: options?.safeguardGrace ?? 0,
   };
 
-  log.info(`Autopilot starting for blueprint ${blueprintId.slice(0, 8)} (max ${maxIterations} iterations, mode: ${isFsdAtStart ? "fsd" : "autopilot"})`);
+  log.info(`Autopilot starting for blueprint ${blueprintId.slice(0, 8)} (max ${maxIterations === Infinity ? "unlimited" : maxIterations} iterations, mode: ${isFsdAtStart ? "fsd" : "autopilot"})`);
 
   try {
     while (iteration < maxIterations) {
@@ -1276,16 +1335,12 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       const state = buildStateSnapshot(blueprintId);
 
       // 2. CHECK EXIT CONDITIONS
-      // Only auto-exit if all nodes done AND no NEW unresolved work.
-      // Unseen suggestions or unread insights → let the LLM triage first.
-      // Suggestions the LLM already saw (and chose not to act on) don't block exit.
-      const unusedSuggestionIds = state.nodes.flatMap((n) => n.suggestions.map((s) => s.id));
-      const hasNewSuggestions = hasUnseenSuggestions(blueprintId, unusedSuggestionIds);
-      const hasUnreadInsights = state.insights.length > 0; // snapshot only contains unread
-      if (state.allNodesDone && !hasNewSuggestions && !hasUnreadInsights) {
-        updateBlueprint(blueprintId, { status: "done" as BlueprintStatus });
-        logAutopilot(blueprintId, iteration, state.summary, "All nodes complete", "complete");
-        log.info(`Autopilot completed blueprint ${blueprintId.slice(0, 8)} at iteration ${iteration}`);
+      // Exit loop when all nodes are done AND no pending user messages.
+      // Blueprint status is NOT changed — it's managed by the user only.
+      const pendingMessages = getUnacknowledgedMessages(blueprintId);
+      if (state.allNodesDone && pendingMessages.length === 0) {
+        logAutopilot(blueprintId, iteration, state.summary, "All nodes complete, no pending user messages", "loop_exit");
+        log.info(`Autopilot loop exiting for ${blueprintId.slice(0, 8)} at iteration ${iteration} (all nodes done, no pending messages)`);
         break;
       }
 
@@ -1314,10 +1369,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         // Check resume cap safeguard
         const resumeCapReason = checkResumeCapExceeded(blueprintId, state);
         if (resumeCapReason) {
-          updateBlueprint(blueprintId, {
-            status: "paused" as BlueprintStatus,
-            pauseReason: resumeCapReason,
-          });
+          updateBlueprint(blueprintId, { pauseReason: resumeCapReason });
           logAutopilot(blueprintId, iteration, state.summary, "safeguard:resume_cap", resumeCapReason);
           log.warn(`Autopilot paused: ${resumeCapReason}`);
           break;
@@ -1326,24 +1378,27 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         // Check no-progress safeguard
         const noProgressReason = checkNoProgress(safeguardState, state);
         if (noProgressReason) {
-          updateBlueprint(blueprintId, {
-            status: "paused" as BlueprintStatus,
-            pauseReason: noProgressReason,
-          });
+          updateBlueprint(blueprintId, { pauseReason: noProgressReason });
           logAutopilot(blueprintId, iteration, state.summary, "safeguard:no_progress", noProgressReason);
           log.warn(`Autopilot paused: ${noProgressReason}`);
           break;
         }
       }
 
-      // Mark suggestions as seen (after exit check, so first sight blocks exit)
+      // Mark suggestions as seen so the LLM knows which are new
+      const unusedSuggestionIds = current
+        ? current.nodes.flatMap((n) =>
+            getSuggestionsForNode(n.id).filter((s) => !s.used).map((s) => s.id),
+          )
+        : [];
       markSuggestionsSeen(blueprintId, unusedSuggestionIds);
 
       // 3. DECIDE — Ask AI what to do next
+      // pendingMessages already fetched above for exit condition check
       const prompt = buildAutopilotPrompt(state, iteration, maxIterations, {
         blueprint: blueprintMemory,
         global: globalMemory,
-      }, isFsd);
+      }, isFsd, pendingMessages);
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);
@@ -1361,10 +1416,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       if (!skipSafeguards) {
         const sameActionReason = checkSameActionRepeat(safeguardState, decision);
         if (sameActionReason) {
-          updateBlueprint(blueprintId, {
-            status: "paused" as BlueprintStatus,
-            pauseReason: sameActionReason,
-          });
+          updateBlueprint(blueprintId, { pauseReason: sameActionReason });
           logAutopilot(blueprintId, iteration, state.summary, decision, { success: false, message: sameActionReason, error: "safeguard" });
           log.warn(`Autopilot paused: ${sameActionReason}`);
           break;
@@ -1396,14 +1448,13 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         lastReflectionIteration = iteration;
       }
 
-      // 6. Handle pause/complete decisions
+      // 6. Handle pause/complete decisions — break loop
       if (decision.action === "pause") {
-        // Already handled by executeDecision — just break
         log.info(`Autopilot paused at iteration ${iteration}: ${decision.params.reason}`);
         break;
       }
       if (decision.action === "complete") {
-        log.info(`Autopilot complete at iteration ${iteration}`);
+        log.info(`Autopilot loop exit at iteration ${iteration} (LLM called complete)`);
         break;
       }
 
@@ -1417,23 +1468,19 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       blueprintMemory,
     );
 
-    // Global memory update: if all nodes done or blueprint completed
+    // Global memory update: if all nodes done
     const finalBlueprint = getBlueprint(blueprintId);
     if (
       finalBlueprint &&
-      (finalBlueprint.status === "done" ||
-        finalBlueprint.nodes.every((n) => n.status === "done" || n.status === "skipped"))
+      finalBlueprint.nodes.every((n) => n.status === "done" || n.status === "skipped")
     ) {
       await updateGlobalMemory(blueprintId, blueprintMemory, readGlobalMemory());
     }
 
-    // Safety: max iterations reached
-    if (iteration >= maxIterations) {
+    // Safety: max iterations reached (skipped in FSD mode with unlimited iterations)
+    if (maxIterations !== Infinity && iteration >= maxIterations) {
       const pauseReason = `Autopilot reached maximum iterations (${maxIterations}). Review progress and resume.`;
-      updateBlueprint(blueprintId, {
-        status: "paused" as BlueprintStatus,
-        pauseReason,
-      });
+      updateBlueprint(blueprintId, { pauseReason });
       logAutopilot(blueprintId, iteration, "max_iterations_reached", "safeguard:max_iterations", pauseReason);
       log.warn(`Autopilot paused: max iterations (${maxIterations}) reached for ${blueprintId.slice(0, 8)}`);
     }
