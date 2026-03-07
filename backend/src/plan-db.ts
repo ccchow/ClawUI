@@ -2178,7 +2178,7 @@ export function getUnacknowledgedMessages(blueprintId: string): AutopilotMessage
     .prepare(
       `SELECT id, blueprint_id, role, content, acknowledged, created_at
        FROM autopilot_messages
-       WHERE blueprint_id = ? AND acknowledged = 0
+       WHERE blueprint_id = ? AND acknowledged = 0 AND role != 'assistant'
        ORDER BY created_at ASC`,
     )
     .all(blueprintId) as Array<{

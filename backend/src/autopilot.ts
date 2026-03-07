@@ -1144,6 +1144,7 @@ export async function executeDecision(
         return { success: true, message: `Paused: ${reason}` };
       }
 
+      case "loop_exit":
       case "complete": {
         // No-op for blueprint status — status is user-managed only.
         // Just signals the loop to exit gracefully.
@@ -1505,8 +1506,8 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         log.info(`Autopilot paused at iteration ${iteration}: ${decision.params.reason}`);
         break;
       }
-      if (decision.action === "complete") {
-        log.info(`Autopilot loop exit at iteration ${iteration} (LLM called complete)`);
+      if (decision.action === "complete" || decision.action === "loop_exit") {
+        log.info(`Autopilot loop exit at iteration ${iteration} (LLM called ${decision.action})`);
         break;
       }
 
