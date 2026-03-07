@@ -761,11 +761,11 @@ Do NOT call complete() while unacknowledged messages exist — the user may be r
 
 ${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
 
-**Required**: For each message, you MUST:
-1. First, acknowledge_message(messageId) to mark it as read.
-2. Then, send_message(content) to reply to the user — confirm what you understood and what you plan to do.
-3. Then, take action: create_node/batch_create_nodes for feature requests, run_node for tasks, or just explain your answer for questions.
-Do NOT stop after acknowledging — always follow up with a send_message and then the appropriate action.
+**Required**: For each message, follow this order:
+1. send_message(content) — reply to the user first: confirm what you understood and what you plan to do.
+2. Take action: create_node/batch_create_nodes for feature requests, run_node for tasks, etc.
+3. acknowledge_message(messageId) — mark as handled ONLY AFTER you have taken action.
+IMPORTANT: Do NOT acknowledge before acting — the message stays visible in your prompt until acknowledged, so you keep context about what the user asked for.
 
 `;
   }
