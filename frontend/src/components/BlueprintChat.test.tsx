@@ -9,11 +9,11 @@ import type { AutopilotLogEntry, AutopilotMessage, ExecutionMode, BlueprintStatu
 const apiMocks = vi.hoisted(() => ({
   fetchAutopilotLog: vi.fn((): Promise<AutopilotLogEntry[]> => Promise.resolve([])),
   getBlueprintMessages: vi.fn(() => Promise.resolve({ messages: [] as AutopilotMessage[], total: 0 })),
-  sendBlueprintMessage: vi.fn(() =>
+  sendBlueprintMessage: vi.fn((): Promise<AutopilotMessage> =>
     Promise.resolve({
       id: "msg-new",
       blueprintId: "bp-1",
-      role: "user" as const,
+      role: "user",
       content: "",
       acknowledged: false,
       createdAt: new Date().toISOString(),

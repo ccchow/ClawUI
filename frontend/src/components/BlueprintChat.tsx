@@ -35,6 +35,7 @@ interface BlueprintChatProps {
 type ChatItem =
   | { kind: "user-message"; id: string; content: string; createdAt: string }
   | { kind: "system-message"; id: string; content: string; createdAt: string }
+  | { kind: "assistant-message"; id: string; content: string; createdAt: string }
   | { kind: "log-entry"; id: string; entry: AutopilotLogEntry; createdAt: string }
   | { kind: "pause"; id: string; reason: string; createdAt: string };
 
@@ -142,6 +143,26 @@ function SystemMessageBubble({ content, createdAt }: { content: string; createdA
         </div>
         <span
           className="text-[10px] text-text-muted mt-0.5 block text-center"
+          title={absoluteTime(createdAt)}
+        >
+          {relativeTime(createdAt)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Assistant message bubble (left-aligned) ─────────────────
+
+function AssistantMessageBubble({ content, createdAt }: { content: string; createdAt: string }) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] lg:max-w-[70%]">
+        <div className="rounded-xl bg-accent-green/10 border border-accent-green/20 px-3 py-2">
+          <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{content}</p>
+        </div>
+        <span
+          className="text-[10px] text-text-muted ml-3 mt-0.5 block"
           title={absoluteTime(createdAt)}
         >
           {relativeTime(createdAt)}
@@ -309,6 +330,8 @@ export function BlueprintChat({
     for (const msg of messages) {
       if (msg.role === "user") {
         items.push({ kind: "user-message", id: `msg-${msg.id}`, content: msg.content, createdAt: msg.createdAt });
+      } else if (msg.role === "assistant") {
+        items.push({ kind: "assistant-message", id: `msg-${msg.id}`, content: msg.content, createdAt: msg.createdAt });
       } else {
         items.push({ kind: "system-message", id: `msg-${msg.id}`, content: msg.content, createdAt: msg.createdAt });
       }
@@ -441,6 +464,8 @@ export function BlueprintChat({
           switch (item.kind) {
             case "user-message":
               return <UserMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
+            case "assistant-message":
+              return <AssistantMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
             case "system-message":
               return <SystemMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
             case "log-entry":

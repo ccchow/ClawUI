@@ -18,6 +18,7 @@ import {
   getAutopilotMemory,
   getUnacknowledgedMessages,
   acknowledgeMessage,
+  createAutopilotMessage,
   getArtifactsForNode,
 } from "./plan-db.js";
 import { CLAWUI_DB_DIR } from "./config.js";
@@ -86,7 +87,7 @@ export function writeGlobalMemory(content: string): void {
 const ALL_TOOL_NAMES = [
   "run_node", "resume_node", "evaluate_node",
   "get_node_titles", "get_node_details", "get_node_handoff",
-  "read_user_messages", "acknowledge_message",
+  "read_user_messages", "acknowledge_message", "send_message",
   "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
   "coordinate", "convene",
   "mark_insight_read", "dismiss_insight", "mark_suggestion_used",
@@ -602,6 +603,7 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 ### User Messages
 - **read_user_messages()** — Returns unacknowledged messages from the user. Check at the start of each iteration.
 - **acknowledge_message(messageId)** — Mark a message as acknowledged after reading it.
+- **send_message(content)** — Send a visible reply to the user in the chat. Use this to confirm receipt of requests, explain your plan, answer questions, or report results. Always send a message after acknowledging user input so they see your response.
 
 ### Node Execution
 - **run_node(nodeId)** — Execute a single pending/queued node. Dependencies must be done first.
@@ -759,10 +761,11 @@ Do NOT call complete() while unacknowledged messages exist — the user may be r
 
 ${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
 
-**Required**: Read each message carefully. If it contains a feature request, bug report, or improvement suggestion:
-1. Use create_node (or batch_create_nodes) to create new nodes with appropriate titles, descriptions, roles, and dependencies.
-2. Then acknowledge_message(messageId) to mark it as handled.
-If it's a question or comment that doesn't require new nodes, acknowledge it after considering it.
+**Required**: For each message, you MUST:
+1. First, acknowledge_message(messageId) to mark it as read.
+2. Then, send_message(content) to reply to the user — confirm what you understood and what you plan to do.
+3. Then, take action: create_node/batch_create_nodes for feature requests, run_node for tasks, or just explain your answer for questions.
+Do NOT stop after acknowledging — always follow up with a send_message and then the appropriate action.
 
 `;
   }
@@ -936,6 +939,15 @@ export async function executeDecision(
         const result = acknowledgeMessage(messageId);
         if (!result) return { success: false, message: `Message ${messageId} not found`, error: "not_found" };
         return { success: true, message: `Acknowledged message ${messageId}` };
+      }
+
+      case "send_message": {
+        const content = p.content as string;
+        if (!content || content.trim().length === 0) {
+          return { success: false, message: "Message content is required", error: "invalid_params" };
+        }
+        createAutopilotMessage(blueprintId, "assistant", content.trim());
+        return { success: true, message: "Message sent to user" };
       }
 
       case "create_node": {
@@ -1317,6 +1329,9 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
   let blueprintMemory = getAutopilotMemory(blueprintId);
   const globalMemory = readGlobalMemory();
   let lastReflectionIteration = 0;
+  // Track whether the previous iteration handled a user message (acknowledge/send_message).
+  // When true, skip auto-exit for one iteration so the LLM can act on the message content.
+  let lastIterationHandledMessage = false;
 
   const safeguardState: LoopSafeguardState = {
     recentActions: [],
@@ -1336,13 +1351,17 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // 2. CHECK EXIT CONDITIONS
       // Exit loop when all nodes are done AND no pending user messages.
+      // BUT skip auto-exit if the previous iteration handled a message — give the LLM
+      // one more iteration to act on the message content (create nodes, run commands, etc.)
       // Blueprint status is NOT changed — it's managed by the user only.
       const pendingMessages = getUnacknowledgedMessages(blueprintId);
-      if (state.allNodesDone && pendingMessages.length === 0) {
+      if (state.allNodesDone && pendingMessages.length === 0 && !lastIterationHandledMessage) {
         logAutopilot(blueprintId, iteration, state.summary, "All nodes complete, no pending user messages", "loop_exit");
         log.info(`Autopilot loop exiting for ${blueprintId.slice(0, 8)} at iteration ${iteration} (all nodes done, no pending messages)`);
         break;
       }
+      // Reset the flag — it applies for one iteration only
+      lastIterationHandledMessage = false;
 
       // Check if user switched to manual mode
       const current = getBlueprint(blueprintId);
@@ -1428,6 +1447,11 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // 4. EXECUTE — Carry out the AI's decision
       const result = await executeDecision(blueprintId, decision);
+
+      // Track message-related actions to prevent premature auto-exit
+      if (decision.action === "acknowledge_message" || decision.action === "send_message" || decision.action === "read_user_messages") {
+        lastIterationHandledMessage = true;
+      }
 
       // 5. LOG
       logAutopilot(blueprintId, iteration, state.summary, decision, result);

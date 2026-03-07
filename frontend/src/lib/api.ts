@@ -876,7 +876,7 @@ export interface AutopilotLogEntry {
 export interface AutopilotMessage {
   id: string;
   blueprintId: string;
-  role: "user" | "system";
+  role: "user" | "system" | "assistant";
   content: string;
   acknowledged: boolean;
   createdAt: string;

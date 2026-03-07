@@ -190,7 +190,7 @@ export interface AutopilotLogEntry {
 export interface AutopilotMessage {
   id: string;
   blueprintId: string;
-  role: "user" | "system";
+  role: "user" | "system" | "assistant";
   content: string;
   acknowledged: boolean;
   createdAt: string;
@@ -2159,7 +2159,7 @@ export function setAutopilotMemory(blueprintId: string, memory: string | null): 
 
 export function createAutopilotMessage(
   blueprintId: string,
-  role: "user" | "system",
+  role: "user" | "system" | "assistant",
   content: string,
 ): AutopilotMessage {
   const db = getDb();
