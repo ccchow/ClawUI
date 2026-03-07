@@ -88,6 +88,7 @@ const ALL_TOOL_NAMES = [
   "run_node", "resume_node", "evaluate_node",
   "get_node_titles", "get_node_details", "get_node_handoff",
   "read_user_messages", "acknowledge_message", "send_message",
+  "run_direct",
   "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
   "coordinate", "convene",
   "mark_insight_read", "dismiss_insight", "mark_suggestion_used",
@@ -605,7 +606,10 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 - **acknowledge_message(messageId)** — Mark a message as acknowledged after reading it.
 - **send_message(content)** — Send a visible reply to the user in the chat. Use this to confirm receipt of requests, explain your plan, answer questions, or report results. Always send a message after acknowledging user input so they see your response.
 
-### Node Execution
+### Direct Execution (Simple Tasks)
+- **run_direct(prompt)** — Run a prompt directly as a one-shot agent session in the blueprint's project directory. The agent has full access to shell commands, git, file operations, etc. Use for simple, transactional tasks (git commit, run tests, quick file edits, Q&A about the codebase) that do NOT need the full node lifecycle. The output is automatically sent as a reply visible to the user.
+
+### Node Execution (Complex Tasks)
 - **run_node(nodeId)** — Execute a single pending/queued node. Dependencies must be done first.
 - **resume_node(nodeId, feedback?)** — Resume a node's session with optional guidance/feedback string.
 - **evaluate_node(nodeId)** — Trigger evaluation on a completed node to check quality.
@@ -761,17 +765,22 @@ Do NOT call complete() while unacknowledged messages exist — the user may be r
 
 ${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
 
-**Required action order** (NEVER acknowledge before acting):
-1. **ACT FIRST**: Use create_node to create a task for the user's request. Every request can be handled by creating a node — each node runs a FULL agent session that can execute shell commands, git operations, file edits, deployments, etc.
-2. **THEN run_node**: If the node has no blocking dependencies, run it immediately.
-3. **THEN acknowledge_message(messageId)**: Mark as handled ONLY AFTER you have created/run a node.
-4. Optionally use send_message(content) to answer questions that don't need a node.
+**Choose the right path for each message**:
+
+**Path A — Simple tasks** (Q&A, git commit, run tests, quick file checks, status queries):
+→ Use **run_direct(prompt)** — executes immediately, output shown to user. Then acknowledge_message.
+
+**Path B — Complex tasks** (new features, refactors, multi-step work, engineering tasks):
+→ Use **create_node** + **run_node** — goes through the full node lifecycle. Then acknowledge_message.
+
+**Action order** (NEVER acknowledge before acting):
+1. **ACT FIRST**: Use run_direct for simple tasks, or create_node for complex ones.
+2. **THEN acknowledge_message(messageId)**: Mark as handled ONLY AFTER you have acted.
 
 CRITICAL RULES:
-- NEVER call acknowledge_message before creating a node. The message stays in your prompt until acknowledged — this is by design so you keep context.
-- NEVER call send_message as your first action on a user request — take action first.
-- NEVER pause because you think you "can't" do something. You CAN do anything by creating a node — the node's agent session has full system access.
-- If multiple messages request the same thing, create ONE node and acknowledge ALL of them.
+- NEVER call acknowledge_message before acting. The message stays in your prompt until acknowledged — this preserves context.
+- NEVER pause because you think you "can't" do something. Use run_direct for immediate actions or create_node for complex ones.
+- If multiple messages request the same thing, act ONCE and acknowledge ALL of them.
 
 `;
   }
@@ -954,6 +963,29 @@ export async function executeDecision(
         }
         createAutopilotMessage(blueprintId, "assistant", content.trim());
         return { success: true, message: "Message sent to user" };
+      }
+
+      case "run_direct": {
+        const directPrompt = p.prompt as string;
+        if (!directPrompt || directPrompt.trim().length === 0) {
+          return { success: false, message: "Prompt is required", error: "invalid_params" };
+        }
+        const blueprint = getBlueprint(blueprintId);
+        const cwd = blueprint?.projectCwd;
+        try {
+          const runtime = getActiveRuntime();
+          const output = await runtime.runSession(directPrompt.trim(), cwd);
+          // Send the output as an assistant message visible to the user
+          const trimmedOutput = output.trim();
+          if (trimmedOutput.length > 0) {
+            createAutopilotMessage(blueprintId, "assistant", trimmedOutput);
+          }
+          return { success: true, message: `Direct execution complete (${trimmedOutput.length} chars output)` };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          createAutopilotMessage(blueprintId, "assistant", `Error running direct task: ${errMsg}`);
+          return { success: false, message: errMsg, error: "execution_error" };
+        }
       }
 
       case "create_node": {
