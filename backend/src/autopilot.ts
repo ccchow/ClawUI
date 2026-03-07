@@ -762,10 +762,10 @@ Do NOT call complete() while unacknowledged messages exist — the user may be r
 ${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
 
 **Required**: For each message, follow this order:
-1. send_message(content) — reply to the user first: confirm what you understood and what you plan to do.
-2. Take action: create_node/batch_create_nodes for feature requests, run_node for tasks, etc.
-3. acknowledge_message(messageId) — mark as handled ONLY AFTER you have taken action.
-IMPORTANT: Do NOT acknowledge before acting — the message stays visible in your prompt until acknowledged, so you keep context about what the user asked for.
+1. Take action FIRST: create_node/batch_create_nodes for feature requests, run_node for tasks, etc.
+2. acknowledge_message(messageId) — mark as handled ONLY AFTER you have taken action.
+3. Optionally use send_message(content) to answer questions or explain decisions that don't require creating nodes.
+IMPORTANT: The message stays visible in your prompt until acknowledged, preserving context. Do NOT acknowledge before acting. Do NOT call send_message repeatedly — one reply per user message is enough.
 
 `;
   }
@@ -1329,9 +1329,6 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
   let blueprintMemory = getAutopilotMemory(blueprintId);
   const globalMemory = readGlobalMemory();
   let lastReflectionIteration = 0;
-  // Track whether the previous iteration handled a user message (acknowledge/send_message).
-  // When true, skip auto-exit for one iteration so the LLM can act on the message content.
-  let lastIterationHandledMessage = false;
 
   const safeguardState: LoopSafeguardState = {
     recentActions: [],
@@ -1351,17 +1348,15 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // 2. CHECK EXIT CONDITIONS
       // Exit loop when all nodes are done AND no pending user messages.
-      // BUT skip auto-exit if the previous iteration handled a message — give the LLM
-      // one more iteration to act on the message content (create nodes, run commands, etc.)
       // Blueprint status is NOT changed — it's managed by the user only.
+      // Unacknowledged messages naturally prevent exit (pendingMessages > 0).
+      // After the LLM acknowledges (which happens AFTER taking action), exit is allowed.
       const pendingMessages = getUnacknowledgedMessages(blueprintId);
-      if (state.allNodesDone && pendingMessages.length === 0 && !lastIterationHandledMessage) {
+      if (state.allNodesDone && pendingMessages.length === 0) {
         logAutopilot(blueprintId, iteration, state.summary, "All nodes complete, no pending user messages", "loop_exit");
         log.info(`Autopilot loop exiting for ${blueprintId.slice(0, 8)} at iteration ${iteration} (all nodes done, no pending messages)`);
         break;
       }
-      // Reset the flag — it applies for one iteration only
-      lastIterationHandledMessage = false;
 
       // Check if user switched to manual mode
       const current = getBlueprint(blueprintId);
@@ -1447,12 +1442,6 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // 4. EXECUTE — Carry out the AI's decision
       const result = await executeDecision(blueprintId, decision);
-
-      // Track message-handling actions to prevent premature auto-exit.
-      // Only acknowledge/send count — read_user_messages is a passive read that shouldn't defer exit.
-      if (decision.action === "acknowledge_message" || decision.action === "send_message") {
-        lastIterationHandledMessage = true;
-      }
 
       // 5. LOG
       logAutopilot(blueprintId, iteration, state.summary, decision, result);
