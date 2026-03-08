@@ -192,9 +192,6 @@ describe("buildUserAgentPrompt", () => {
 
     // Execution control
     expect(prompt).toContain("POST /api/blueprints/bp-1/run-all");
-
-    // Communication
-    expect(prompt).toContain("POST /api/blueprints/bp-1/messages");
   });
 
   it("does NOT include FSD-specific tools", () => {

@@ -85,18 +85,18 @@ curl -s -X POST '${baseUrl}/api/blueprints/${blueprintId}/nodes?${authParam}' \\
 - GET /api/blueprints/${blueprintId}/progress — Node status counts
 - GET /api/blueprints/${blueprintId}/queue — Queue status
 
-### Communication
-- POST /api/blueprints/${blueprintId}/messages — Send reply: \`{"content": "..."}\`
-
 ## Instructions
 1. Understand what the user wants from their message(s).
 2. For **codebase Q&A** (questions about the project, code, architecture): read files and search the codebase directly to answer. No API calls needed.
-3. For **blueprint Q&A** (questions about node status, progress, errors): use the Read State API endpoints to get details, then reply via the messages endpoint.
-4. For **simple tasks** (git commit, run tests, quick file edits): execute directly using bash, then reply with the result via the messages endpoint.
-5. For **complex tasks** (new features, refactors, multi-step work): decompose into nodes using the Node Operations API. Create nodes with appropriate dependencies. Reply to confirm your plan.
+3. For **blueprint Q&A** (questions about node status, progress, errors): use the Read State API endpoints to get details.
+4. For **simple tasks** (git commit, run tests, quick file edits): execute directly using bash.
+5. For **complex tasks** (new features, refactors, multi-step work): decompose into nodes using the Node Operations API. Create nodes with appropriate dependencies.
 6. For **AI operations** the user requests (split, enrich, smart-deps): call the corresponding AI endpoint.
-7. Always reply to the user via \`POST /api/blueprints/${blueprintId}/messages\` to confirm what you did.
-8. Check existing nodes before creating new ones to avoid duplicates.`;
+7. Check existing nodes before creating new ones to avoid duplicates.
+8. Do NOT call POST /messages — your text output is automatically delivered to the user as a reply.
+
+## Response
+Write a concise summary of what you did. This text will be shown to the user.`;
 }
 
 export async function handleUserMessage(blueprintId: string): Promise<void> {
@@ -116,6 +116,11 @@ export async function handleUserMessage(blueprintId: string): Promise<void> {
     const runtime = getActiveRuntime();
     const output = await runtime.runSession(prompt, blueprint.projectCwd);
     log.info(`User agent session completed (${output.length} chars)`);
+
+    // Send session output as assistant reply to the user
+    if (output.trim()) {
+      createAutopilotMessage(blueprintId, "assistant", output.slice(0, 5000));
+    }
 
     for (const msg of messages) {
       acknowledgeMessage(msg.id);
