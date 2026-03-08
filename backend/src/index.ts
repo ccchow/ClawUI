@@ -4,8 +4,8 @@ import cors from "cors";
 import router from "./routes.js";
 import planRouter from "./plan-routes.js";
 import { initDb, syncAll } from "./db.js";
-import { initPlanTables } from "./plan-db.js";
-import { requeueOrphanedNodes, smartRecoverStaleExecutions } from "./plan-executor.js";
+import { initPlanTables, listBlueprints, getUnacknowledgedMessages } from "./plan-db.js";
+import { requeueOrphanedNodes, smartRecoverStaleExecutions, enqueueBlueprintTask } from "./plan-executor.js";
 import { PORT, EXPECT_PATH, CLAUDE_PATH } from "./config.js";
 import { createLogger } from "./logger.js";
 import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
@@ -77,6 +77,36 @@ initPlanTables();
 smartRecoverStaleExecutions();
 requeueOrphanedNodes();
 syncAll();
+
+// ─── Resume FSD/autopilot loops after server restart ─────────
+// If a blueprint was in FSD/autopilot mode when the server stopped,
+// its in-memory loop was lost. Re-trigger it now.
+{
+  const blueprints = listBlueprints();
+  for (const bp of blueprints) {
+    const isAutopilot = bp.executionMode === "autopilot" || bp.executionMode === "fsd";
+    const isActive = bp.status === "running" || bp.status === "approved";
+    const hasPendingNodes = bp.nodes.some((n) => n.status === "pending" || n.status === "queued");
+    if (isAutopilot && isActive && hasPendingNodes) {
+      const unacked = getUnacknowledgedMessages(bp.id);
+      if (unacked.length > 0) {
+        // User messages pending — route through User Agent first
+        import("./user-agent.js").then(({ triggerUserAgent }) => {
+          triggerUserAgent(bp.id);
+          log.info(`Recovered blueprint ${bp.id.slice(0, 8)} "${bp.title}" — triggering User Agent (${unacked.length} pending message(s))`);
+        });
+      } else {
+        // No messages — start FSD loop directly
+        import("./autopilot.js").then(({ runAutopilotLoop }) => {
+          enqueueBlueprintTask(bp.id, () => runAutopilotLoop(bp.id)).catch((err) => {
+            log.error(`FSD loop recovery failed for ${bp.id}: ${err instanceof Error ? err.message : err}`);
+          });
+          log.info(`Recovered blueprint ${bp.id.slice(0, 8)} "${bp.title}" — resuming FSD loop`);
+        });
+      }
+    }
+  }
+}
 
 // Log detected agent runtimes
 try {
