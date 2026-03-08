@@ -1612,14 +1612,12 @@ describe("autopilot integration", () => {
     });
   });
 
-  // ─── 12. Message-to-Autopilot-to-Action Pipeline ──────────
+  // ─── 12. FSD Loop Yield and Message Pipeline ──────────
 
-  describe("message-to-autopilot-to-action pipeline", () => {
+  describe("FSD loop yield and message pipeline", () => {
     // Need direct access to plan-db message functions
     let createAutopilotMessage: typeof import("../plan-db.js")["createAutopilotMessage"];
     let getUnacknowledgedMessages: typeof import("../plan-db.js")["getUnacknowledgedMessages"];
-    let acknowledgeMessage: typeof import("../plan-db.js")["acknowledgeMessage"];
-    let getMessageHistory: typeof import("../plan-db.js")["getMessageHistory"];
     let buildStateSnapshot: typeof import("../autopilot.js")["buildStateSnapshot"];
     let executeDecision: typeof import("../autopilot.js")["executeDecision"];
 
@@ -1627,8 +1625,6 @@ describe("autopilot integration", () => {
       const planDb = await import("../plan-db.js");
       createAutopilotMessage = planDb.createAutopilotMessage;
       getUnacknowledgedMessages = planDb.getUnacknowledgedMessages;
-      acknowledgeMessage = planDb.acknowledgeMessage;
-      getMessageHistory = planDb.getMessageHistory;
 
       const autopilot = await import("../autopilot.js");
       buildStateSnapshot = autopilot.buildStateSnapshot;
@@ -1645,142 +1641,38 @@ describe("autopilot integration", () => {
       return bp;
     }
 
-    // ── 12.1. Message triggers autopilot loop ──
+    // ── 12.1. FSD loop yields when unacknowledged messages exist ──
 
-    it("autopilot loop processes user messages injected into prompt", async () => {
-      const bp = setupFsd("Msg Trigger");
-      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
+    it("FSD loop yields when unacknowledged messages exist", async () => {
+      const bp = setupFsd("Yield on Msg");
+      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
       // Create a user message before loop starts
-      const msg = createAutopilotMessage(bp.id, "user", "Focus on tests");
+      createAutopilotMessage(bp.id, "user", "Focus on tests");
 
-      const promptsReceived: string[] = [];
-      let decisionCount = 0;
-      mockRunSession.mockImplementation(async (prompt: string) => {
-        promptsReceived.push(prompt);
-        // Only count non-reflection calls as decisions
-        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
-          decisionCount++;
-          if (decisionCount === 1) {
-            return dec("acknowledge_message", { messageId: msg.id });
-          }
-          if (decisionCount === 2) {
-            return dec("run_node", { nodeId: nodeA.id });
-          }
-          return dec("complete", {});
-        }
-        // Reflection/global
-        return "## Memory\nOk.";
-      });
+      // Provide a reflection response (final reflection always runs after loop exit)
+      mockRunSession.mockResolvedValue("## Memory\nYielded due to pending messages.");
 
       await ap.runAutopilotLoop(bp.id);
 
-      // User message should appear in the first prompt
-      expect(promptsReceived[0]).toContain("User Messages");
-      expect(promptsReceived[0]).toContain("Focus on tests");
+      // Only the final reflection should have called mockRunSession — no AI decisions
+      // (The loop yielded before reaching the decision step, but final reflection runs)
+      const decisionCalls = mockRunSession.mock.calls.filter(
+        (call) => !String(call[0]).includes("reflecting"),
+      );
+      expect(decisionCalls.length).toBe(0);
 
-      // Message should be acknowledged after loop processed it
-      const unacked = getUnacknowledgedMessages(bp.id);
-      const found = unacked.find((m) => m.id === msg.id);
-      expect(found).toBeUndefined(); // acknowledged = not in unacked list
-
-      // Blueprint should be done
-      expect(db.getBlueprint(bp.id)!.status).toBe("approved");
-    });
-
-    // ── 12.2. Generate via message ──
-
-    it("generate via message: autopilot sees message and creates nodes", async () => {
-      const bp = setupFsd("Generate Via Msg");
-      // No nodes initially
-
-      // Message asking to generate nodes
-      const msg = createAutopilotMessage(bp.id, "user", "Generate 3 nodes for a REST API");
-
-      mockRunSession.mockImplementation(async (prompt: string) => {
-        // 1st call: read messages
-        if (mockRunSession.mock.calls.length === 1) {
-          return dec("read_user_messages", {});
-        }
-        // 2nd call: acknowledge the message
-        if (mockRunSession.mock.calls.length === 2) {
-          return dec("acknowledge_message", { messageId: msg.id });
-        }
-        // 3rd call: batch create nodes
-        if (mockRunSession.mock.calls.length === 3) {
-          return dec("batch_create_nodes", {
-            nodes: [
-              { title: "Setup Express server", description: "Initialize Express" },
-              { title: "Create REST endpoints", description: "CRUD routes", dependsOn: [0] },
-              { title: "Add tests", description: "Integration tests", dependsOn: [1] },
-            ],
-          });
-        }
-        // 4th+: run each created node
-        const updated = db.getBlueprint(bp.id)!;
-        const pendingNode = updated.nodes.find((n) => n.status === "pending");
-        if (pendingNode) {
-          return dec("run_node", { nodeId: pendingNode.id });
-        }
-        // All done
-        return dec("complete", {});
-      });
-
-      await ap.runAutopilotLoop(bp.id);
-
+      // Node should still be pending (loop did not execute anything)
       const final = db.getBlueprint(bp.id)!;
-      expect(final.nodes.length).toBe(3);
-      // Blueprint status is user-managed — autopilot doesn't change it
+      expect(final.nodes[0].status).toBe("pending");
       expect(final.status).toBe("approved");
 
-      // Verify message was acknowledged
+      // Messages are still unacknowledged (User Agent handles them, not FSD loop)
       const unacked = getUnacknowledgedMessages(bp.id);
-      expect(unacked.find((m) => m.id === msg.id)).toBeUndefined();
+      expect(unacked.length).toBeGreaterThanOrEqual(1);
     });
 
-    // ── 12.3. Enrich via message ──
-
-    it("enrich message is created and visible in prompt when in FSD mode", async () => {
-      const bp = setupFsd("Enrich Via Msg");
-      const nodeA = db.createMacroNode(bp.id, { title: "Implement feature", description: "Basic desc", order: 1 });
-
-      // Simulate what the enrich-node endpoint does in FSD mode
-      createAutopilotMessage(bp.id, "user", `Enrich node ${nodeA.id}: title="Implement feature"`);
-
-      const promptsReceived: string[] = [];
-      let enrichDecisionCount = 0;
-      mockRunSession.mockImplementation(async (prompt: string) => {
-        promptsReceived.push(prompt);
-        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
-          enrichDecisionCount++;
-          if (enrichDecisionCount === 1) {
-            return dec("update_node", {
-              nodeId: nodeA.id,
-              description: "Enriched: implement REST feature with proper error handling",
-            });
-          }
-          if (enrichDecisionCount === 2) {
-            return dec("run_node", { nodeId: nodeA.id });
-          }
-          return dec("complete", {});
-        }
-        return "## Memory\nOk.";
-      });
-
-      await ap.runAutopilotLoop(bp.id);
-
-      // First prompt should contain the enrich message
-      expect(promptsReceived[0]).toContain("Enrich node");
-      expect(promptsReceived[0]).toContain("Implement feature");
-
-      // Node should be updated
-      const final = db.getBlueprint(bp.id)!;
-      expect(final.nodes[0].description).toContain("Enriched");
-      // Blueprint status is user-managed — autopilot doesn't change it
-      expect(final.status).toBe("approved");
-    });
-
-    // ── 12.4. Manual mode fallback ──
+    // ── 12.2. Manual mode fallback ──
 
     it("manual mode does not create messages for AI operations", async () => {
       const bp = db.createBlueprint("Manual Fallback", "Test", "/tmp/manual");
@@ -1799,7 +1691,7 @@ describe("autopilot integration", () => {
       expect(bpData.nodes.find((n) => n.id === nodeA.id)!.status).toBe("pending");
     });
 
-    // ── 12.5. Read tools in autopilot loop ──
+    // ── 12.3. Read tools in autopilot loop ──
 
     it("get_node_titles returns summary without descriptions", async () => {
       const bp = setupFsd("Read Tools");
@@ -1835,61 +1727,7 @@ describe("autopilot integration", () => {
       expect(details.dependencies).toBeDefined();
     });
 
-    // ── 12.6. Message queue ordering ──
-
-    it("messages are returned in chronological order and acknowledgment works", async () => {
-      const bp = setupFsd("Queue Ordering");
-      db.createMacroNode(bp.id, { title: "Node A", order: 1 });
-
-      // Send 3 messages rapidly
-      const m1 = createAutopilotMessage(bp.id, "user", "First message");
-      const m2 = createAutopilotMessage(bp.id, "user", "Second message");
-      const m3 = createAutopilotMessage(bp.id, "user", "Third message");
-
-      // read_user_messages should return all 3 in chronological order
-      const readResult = await executeDecision(bp.id, {
-        reasoning: "Check messages",
-        action: "read_user_messages",
-        params: {},
-      });
-
-      expect(readResult.success).toBe(true);
-      const messages = JSON.parse(readResult.message);
-      expect(messages.length).toBeGreaterThanOrEqual(3);
-
-      // Find our 3 messages and verify order
-      const ourMessages = messages.filter((m: { id: string }) =>
-        [m1.id, m2.id, m3.id].includes(m.id),
-      );
-      expect(ourMessages.length).toBe(3);
-      expect(ourMessages[0].content).toBe("First message");
-      expect(ourMessages[1].content).toBe("Second message");
-      expect(ourMessages[2].content).toBe("Third message");
-
-      // Acknowledge first message
-      const ackResult = await executeDecision(bp.id, {
-        reasoning: "Ack first",
-        action: "acknowledge_message",
-        params: { messageId: m1.id },
-      });
-      expect(ackResult.success).toBe(true);
-
-      // Re-read: only 2 unacknowledged
-      const readResult2 = await executeDecision(bp.id, {
-        reasoning: "Re-check",
-        action: "read_user_messages",
-        params: {},
-      });
-      const messages2 = JSON.parse(readResult2.message);
-      const ourMessages2 = messages2.filter((m: { id: string }) =>
-        [m1.id, m2.id, m3.id].includes(m.id),
-      );
-      expect(ourMessages2.length).toBe(2);
-      expect(ourMessages2[0].content).toBe("Second message");
-      expect(ourMessages2[1].content).toBe("Third message");
-    });
-
-    // ── 12.7. Autopilot not double-started ──
+    // ── 12.4. Autopilot not double-started ──
 
     it("autopilot loop does not start again while already running", async () => {
       const bp = setupFsd("No Double Start");
@@ -1929,7 +1767,7 @@ describe("autopilot integration", () => {
       expect(["done", "approved"]).toContain(final.status);
     });
 
-    // ── 12.8. Reduced state snapshot ──
+    // ── 12.5. Reduced state snapshot ──
 
     it("buildStateSnapshot nodes do not include description or suggestions", () => {
       const bp = setupFsd("Reduced Snapshot");
@@ -1956,164 +1794,46 @@ describe("autopilot integration", () => {
       expect(nodeState).not.toHaveProperty("suggestions");
     });
 
-    // ── 12.9. User message injection in prompt ──
+    // ── 12.6. Prompt does not contain user message features ──
 
-    it("buildAutopilotPrompt includes user messages section when messages exist", () => {
-      const bp = setupFsd("Prompt Injection");
+    it("buildAutopilotPrompt does not contain user message tools or sections", () => {
+      const bp = setupFsd("No Msg Prompt");
       db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
       const state = buildStateSnapshot(bp.id);
 
-      // With user messages
-      const messages = [
-        { id: "msg-1", blueprintId: bp.id, role: "user" as const, content: "Please prioritize testing", acknowledged: false, createdAt: new Date().toISOString() },
-        { id: "msg-2", blueprintId: bp.id, role: "user" as const, content: "Also add error handling", acknowledged: false, createdAt: new Date().toISOString() },
-      ];
-
-      const promptWithMsgs = ap.buildAutopilotPrompt(
+      const prompt = ap.buildAutopilotPrompt(
         state, 1, 50,
         { blueprint: null, global: null },
         false,
-        messages,
       );
 
-      expect(promptWithMsgs).toContain("User Messages (HIGHEST PRIORITY");
-      expect(promptWithMsgs).toContain("Please prioritize testing");
-      expect(promptWithMsgs).toContain("Also add error handling");
-      expect(promptWithMsgs).toContain("[msg-1]");
-      expect(promptWithMsgs).toContain("[msg-2]");
-      expect(promptWithMsgs).toContain("acknowledge_message");
+      // User message handling is now in User Agent, not FSD loop
+      expect(prompt).not.toContain("User Messages (HIGHEST PRIORITY");
+      expect(prompt).not.toContain("acknowledge_message");
+      expect(prompt).not.toContain("read_user_messages");
+      expect(prompt).not.toContain("send_message(content)");
 
-      // Without user messages — the "User Messages" section should be absent
-      const promptWithoutMsgs = ap.buildAutopilotPrompt(
-        state, 1, 50,
-        { blueprint: null, global: null },
-        false,
-        [],
-      );
-      expect(promptWithoutMsgs).not.toContain("User Messages (HIGHEST PRIORITY");
+      // Read tools should still be present
+      expect(prompt).toContain("get_node_titles");
+      expect(prompt).toContain("get_node_details");
+      expect(prompt).toContain("get_node_handoff");
     });
 
-    // ── 12.10. Split via message in FSD mode ──
+    // ── 12.7. Removed message tools return unknown_action ──
 
-    it("split via message: autopilot creates sub-nodes and skips original", async () => {
-      const bp = setupFsd("Split Via Msg");
-      const nodeA = db.createMacroNode(bp.id, { title: "Big Feature", description: "Too complex", order: 1 });
-
-      // Simulate the split endpoint creating a message
-      createAutopilotMessage(bp.id, "user", `Split node ${nodeA.id}: "Big Feature"`);
-
-      let callCount = 0;
-      mockRunSession.mockImplementation(async () => {
-        callCount++;
-        // 1: read messages / see the split request in prompt
-        if (callCount === 1) {
-          return dec("get_node_details", { nodeId: nodeA.id });
-        }
-        // 2: batch create sub-nodes
-        if (callCount === 2) {
-          return dec("batch_create_nodes", {
-            nodes: [
-              { title: "Sub-task 1", description: "Part 1", dependsOn: [] },
-              { title: "Sub-task 2", description: "Part 2", dependsOn: [0] },
-            ],
-          });
-        }
-        // 3: skip original
-        if (callCount === 3) {
-          return dec("skip_node", { nodeId: nodeA.id, reason: "Split into sub-tasks" });
-        }
-        // 4+: run the sub-tasks
-        const updated = db.getBlueprint(bp.id)!;
-        const pendingNode = updated.nodes.find((n) => n.status === "pending");
-        if (pendingNode) {
-          return dec("run_node", { nodeId: pendingNode.id });
-        }
-        return dec("complete", {});
-      });
-
-      await ap.runAutopilotLoop(bp.id);
-
-      const final = db.getBlueprint(bp.id)!;
-      // Blueprint status is user-managed — autopilot doesn't change it
-      expect(final.status).toBe("approved");
-
-      // Original node should be skipped
-      const originalNode = final.nodes.find((n) => n.id === nodeA.id)!;
-      expect(originalNode.status).toBe("skipped");
-      expect(originalNode.error).toContain("Split into sub-tasks");
-
-      // Sub-nodes should be created and done
-      const subNodes = final.nodes.filter((n) => n.id !== nodeA.id);
-      expect(subNodes.length).toBe(2);
-      for (const sub of subNodes) {
-        expect(sub.status).toBe("done");
-      }
-    });
-
-    // ── 12.11. Full message lifecycle in autopilot loop ──
-
-    it("full message lifecycle: create → inject in prompt → read → acknowledge", async () => {
-      const bp = setupFsd("Full Msg Lifecycle");
-      const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
-
-      // Create messages before loop starts
-      const msg1 = createAutopilotMessage(bp.id, "user", "Instruction Alpha");
-      const msg2 = createAutopilotMessage(bp.id, "user", "Instruction Beta");
-
-      const promptsReceived: string[] = [];
-      let lifecycleDecisionCount = 0;
-      mockRunSession.mockImplementation(async (prompt: string) => {
-        promptsReceived.push(prompt);
-
-        if (!prompt.includes("reflecting") && !prompt.includes("global autopilot") && !prompt.includes("global strategy")) {
-          lifecycleDecisionCount++;
-          if (lifecycleDecisionCount === 1) {
-            return dec("acknowledge_message", { messageId: msg1.id });
-          }
-          if (lifecycleDecisionCount === 2) {
-            return dec("acknowledge_message", { messageId: msg2.id });
-          }
-          if (lifecycleDecisionCount === 3) {
-            return dec("run_node", { nodeId: nodeA.id });
-          }
-          return dec("complete", {});
-        }
-        return "## Memory\nOk.";
-      });
-
-      await ap.runAutopilotLoop(bp.id);
-
-      // First prompt should have both messages injected
-      expect(promptsReceived[0]).toContain("Instruction Alpha");
-      expect(promptsReceived[0]).toContain("Instruction Beta");
-
-      // After acknowledging, second prompt should have fewer/no messages
-      // (msg1 acknowledged, msg2 still pending)
-      expect(promptsReceived[1]).toContain("Instruction Beta");
-
-      // All acknowledged
-      const remaining = getUnacknowledgedMessages(bp.id);
-      const ours = remaining.filter((m) => [msg1.id, msg2.id].includes(m.id));
-      expect(ours.length).toBe(0);
-
-      expect(db.getBlueprint(bp.id)!.status).toBe("approved");
-    });
-
-    // ── 12.12. Acknowledge non-existent message ──
-
-    it("acknowledge_message returns error for non-existent message", async () => {
+    it("acknowledge_message returns unknown_action error", async () => {
       const bp = setupFsd("Bad Ack");
       db.createMacroNode(bp.id, { title: "Node A", order: 1 });
 
       const result = await executeDecision(bp.id, {
-        reasoning: "Ack bad id",
+        reasoning: "Try removed tool",
         action: "acknowledge_message",
         params: { messageId: "non-existent-message-id" },
       });
 
       expect(result.success).toBe(false);
-      expect(result.error).toBe("not_found");
+      expect(result.error).toBe("unknown_action");
     });
   });
 });

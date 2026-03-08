@@ -20,7 +20,6 @@ vi.mock("../plan-db.js", () => ({
   setAutopilotMemory: vi.fn(),
   getAutopilotMemory: vi.fn(),
   getUnacknowledgedMessages: vi.fn(),
-  acknowledgeMessage: vi.fn(),
   getArtifactsForNode: vi.fn(),
 }));
 
@@ -122,7 +121,6 @@ import {
   getAutopilotLog,
   setAutopilotMemory,
   getUnacknowledgedMessages,
-  acknowledgeMessage,
   getArtifactsForNode,
 } from "../plan-db.js";
 import type { MacroNodeStatus, Artifact, NodeExecution } from "../plan-db.js";
@@ -645,27 +643,16 @@ describe("autopilot", () => {
       expect(details.unusedSuggestions[0].title).toBe("Add tests");
     });
 
-    it("acknowledge_message: returns error for non-existent message", async () => {
-      vi.mocked(acknowledgeMessage).mockReturnValue(false);
-
-      const decision: AutopilotDecision = {
-        reasoning: "Ack unknown",
-        action: "acknowledge_message",
-        params: { messageId: "non-existent" },
-      };
-      const result = await executeDecision("bp-1", decision);
-
-      expect(result.success).toBe(false);
-      expect(result.error).toBe("not_found");
-    });
-
-    it("removed tools (enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all) return unknown_action error", async () => {
+    it("removed tools (enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all, acknowledge_message, read_user_messages, send_message) return unknown_action error", async () => {
       const removedTools = [
         "enrich_node",
         "split_node",
         "smart_dependencies",
         "reevaluate_node",
         "reevaluate_all",
+        "acknowledge_message",
+        "read_user_messages",
+        "send_message",
       ];
 
       for (const toolName of removedTools) {
@@ -680,38 +667,6 @@ describe("autopilot", () => {
         expect(result.error).toBe("unknown_action");
         expect(result.message).toContain(toolName);
       }
-    });
-
-    it("read_user_messages: returns unacknowledged messages", async () => {
-      vi.mocked(getUnacknowledgedMessages).mockReturnValue([
-        { id: "m1", blueprintId: "bp-1", role: "user", content: "Please focus on tests", acknowledged: false, createdAt: "2024-01-01" },
-      ]);
-
-      const decision: AutopilotDecision = {
-        reasoning: "Check messages",
-        action: "read_user_messages",
-        params: {},
-      };
-      const result = await executeDecision("bp-1", decision);
-
-      expect(result.success).toBe(true);
-      const messages = JSON.parse(result.message);
-      expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe("Please focus on tests");
-    });
-
-    it("acknowledge_message: marks message as acknowledged", async () => {
-      vi.mocked(acknowledgeMessage).mockReturnValue(true);
-
-      const decision: AutopilotDecision = {
-        reasoning: "Ack message",
-        action: "acknowledge_message",
-        params: { messageId: "m1" },
-      };
-      const result = await executeDecision("bp-1", decision);
-
-      expect(result.success).toBe(true);
-      expect(acknowledgeMessage).toHaveBeenCalledWith("m1");
     });
 
     it("create_node: creates a new node with dependencies and roles", async () => {
@@ -1386,7 +1341,7 @@ describe("autopilot", () => {
     });
   });
 
-  describe("buildAutopilotPrompt user message injection", () => {
+  describe("buildAutopilotPrompt simplified (no user messages)", () => {
     const baseState: AutopilotState = {
       blueprint: { id: "bp-1", title: "Test", description: "Test", status: "running", enabledRoles: [] },
       nodes: [],
@@ -1396,26 +1351,17 @@ describe("autopilot", () => {
       summary: "0/0 nodes done",
     };
 
-    it("includes user messages section when messages are provided", () => {
-      const messages = [
-        { id: "m1", blueprintId: "bp-1", role: "user" as const, content: "Please focus on testing", acknowledged: false, createdAt: "2024-01-01" },
-        { id: "m2", blueprintId: "bp-1", role: "user" as const, content: "Skip node 3", acknowledged: false, createdAt: "2024-01-02" },
-      ];
-
-      const prompt = buildAutopilotPrompt(baseState, 1, 50, { blueprint: null, global: null }, false, messages);
-
-      expect(prompt).toContain("## User Messages (HIGHEST PRIORITY");
-      expect(prompt).toContain("[m1] Please focus on testing");
-      expect(prompt).toContain("[m2] Skip node 3");
-      expect(prompt).toContain("acknowledge_message(messageId)");
+    it("does not contain user message section", () => {
+      const prompt = buildAutopilotPrompt(baseState, 1, 50);
+      expect(prompt).not.toContain("## Pending User Messages");
+      expect(prompt).not.toContain("## User Messages (HIGHEST PRIORITY");
+      expect(prompt).not.toContain("acknowledge_message");
     });
 
-    it("omits user messages injection section when no messages provided", () => {
-      const prompt = buildAutopilotPrompt(baseState, 1, 50, { blueprint: null, global: null }, false, []);
-
-      // The "## User Messages" section should NOT be present
-      expect(prompt).not.toContain("## User Messages (HIGHEST PRIORITY");
-      expect(prompt).not.toContain("acknowledge_message(messageId) to mark it as handled");
+    it("does not contain user message tools", () => {
+      const prompt = buildAutopilotPrompt(baseState, 1, 50);
+      expect(prompt).not.toContain("read_user_messages");
+      expect(prompt).not.toContain("send_message(content)");
     });
 
     it("includes read tools (get_node_titles, get_node_details, get_node_handoff) in tool descriptions", () => {
@@ -1424,8 +1370,6 @@ describe("autopilot", () => {
       expect(prompt).toContain("get_node_titles");
       expect(prompt).toContain("get_node_details");
       expect(prompt).toContain("get_node_handoff");
-      expect(prompt).toContain("read_user_messages");
-      expect(prompt).toContain("acknowledge_message");
     });
   });
 
