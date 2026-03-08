@@ -19,6 +19,10 @@ import {
   getUnacknowledgedMessages,
   createAutopilotMessage,
   getArtifactsForNode,
+  clearBlueprintSuggestions,
+  createBlueprintSuggestion,
+  createSuggestion,
+  createInsight,
 } from "./plan-db.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 import type {
@@ -33,7 +37,6 @@ import {
   getQueueInfo,
   executeNodeDirect,
   resumeNodeSession,
-  evaluateNodeCompletion,
   addPendingTask,
   removePendingTask,
   enqueueBlueprintTask,
@@ -84,11 +87,13 @@ export function writeGlobalMemory(content: string): void {
 
 /** All known autopilot tool names (derived from TOOL_DESCRIPTIONS). */
 const ALL_TOOL_NAMES = [
-  "run_node", "resume_node", "evaluate_node",
+  "run_node", "resume_node",
   "get_node_titles", "get_node_details", "get_node_handoff",
   "run_direct",
   "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
   "coordinate", "convene",
+  "create_insight", "create_node_suggestion", "create_blueprint_suggestion",
+  "clear_blueprint_suggestions",
   "mark_insight_read", "dismiss_insight", "mark_suggestion_used",
   "batch_mark_suggestions_used", "batch_dismiss_insights",
   "pause",
@@ -605,7 +610,6 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 ### Node Execution (Complex Tasks)
 - **run_node(nodeId)** — Execute a single pending/queued node. Dependencies must be done first.
 - **resume_node(nodeId, feedback?)** — Resume a node's session with optional guidance/feedback string.
-- **evaluate_node(nodeId)** — Trigger evaluation on a completed node to check quality.
 
 ### Node CRUD
 - **create_node(title, description, dependsOn?, roles?)** — Create a new node. dependsOn is an array of node IDs. roles is an array of role IDs.
@@ -617,6 +621,12 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 ### Blueprint Intelligence
 - **coordinate()** — Run the coordinator to process unread insights and take corrective actions.
 - **convene(topic, roleIds)** — Start a multi-role discussion on a specific topic. roleIds is an array of role ID strings.
+
+### Retrospective (Review & Create)
+- **create_insight(severity, message, sourceNodeId?)** — Create a blueprint-level insight. severity: "info"|"warning"|"critical". sourceNodeId is optional (links to a specific node).
+- **create_node_suggestion(nodeId, title, description)** — Create a follow-up suggestion for a specific node.
+- **create_blueprint_suggestion(title, description)** — Create a blueprint-level suggestion for what the user could do next.
+- **clear_blueprint_suggestions()** — Clear all existing blueprint suggestions before generating new ones.
 
 ### Insight & Suggestion Management
 - **mark_insight_read(insightId)** — Acknowledge an insight without taking action.
@@ -691,6 +701,7 @@ export function buildAutopilotPrompt(
   maxIterations: number,
   memory: AutopilotMemory = { blueprint: null, global: null },
   fsdMode: boolean = false,
+  completedThisRound: string[] = [],
 ): string {
   const remaining = maxIterations === Infinity ? Infinity : maxIterations - iteration;
 
@@ -703,22 +714,38 @@ export function buildAutopilotPrompt(
     memorySections += `\n## Blueprint Memory (your notes from earlier iterations)\n${memory.blueprint}\n`;
   }
 
+  // Completed nodes this round — tells the LLM what to review in retrospective
+  let completedSection = "";
+  if (completedThisRound.length > 0) {
+    completedSection = `\n## Nodes Completed This Round\n${completedThisRound.map((entry) => `- ${entry}`).join("\n")}\nReview these using get_node_details to check outcomes. Create insights/suggestions as needed.\n`;
+  }
+
   const workflowSection = fsdMode
     ? `## FSD Mode (Full Speed Drive)
 You are running in FSD mode — no safeguards, no throttling. Execute as fast and efficiently as possible.
 Focus on running nodes to completion. Use get_node_details only when needed for context before running complex nodes.
-Don't hesitate to run nodes back-to-back. Maximize throughput.`
+Don't hesitate to run nodes back-to-back. Maximize throughput.
+
+### Retrospective
+After completing a batch of nodes, review your work before moving on:
+- Use **get_node_details(nodeId)** to read the outcome/handoff of completed nodes
+- **create_insight** for important observations (architectural issues, quality concerns, cross-cutting patterns)
+- **create_node_suggestion** for follow-up work on specific nodes
+- **create_blueprint_suggestion** for overall next steps the user should consider
+- If a node's work is incomplete, create a follow-up node with **create_node**
+
+Don't review every node exhaustively — focus on nodes where the outcome matters for downstream work or where you notice issues. Check "Nodes completed this round" in the state for what to review.`
     : `## Recommended Workflow Rhythm
 Follow this read-before-act pattern:
 
 1. **Read before modifying**: Before modifying any node, use get_node_details(nodeId) to understand its full context. Before creating nodes, use get_node_titles() to understand the current plan structure.
 2. **Before running a node**: Use get_node_details to check if its description is adequate. If it's short or vague, use update_node to improve the description/prompt yourself — you have the context to write good prompts.
-3. **After running a node**: Evaluation runs automatically — use get_node_details to check suggestions. Review them before moving on.
+3. **After completing nodes**: Review outcomes using get_node_details. Create insights for important observations, suggestions for follow-up work. If work is incomplete, create follow-up nodes.
 4. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
 5. **When suggestions accumulate**: Review them via get_node_details — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
 6. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
 
-A good rhythm: read context → improve prompt if needed → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.`;
+A good rhythm: read context → improve prompt if needed → run → review outcomes → create insights/suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without reviewing outcomes or triaging suggestions.`;
 
   const guidelinesSection = fsdMode
     ? `## Guidelines
@@ -750,7 +777,7 @@ A good rhythm: read context → improve prompt if needed → run → triage sugg
 ${JSON.stringify(state, null, 2)}
 
 ## Iteration ${iteration}${maxIterations === Infinity ? "" : ` of ${maxIterations}`}
-${memorySections}## Available Tools
+${memorySections}${completedSection}## Available Tools
 ${TOOL_DESCRIPTIONS}
 
 ${roleSection}
@@ -822,17 +849,38 @@ export async function executeDecision(
         return { success: true, message: `Resumed node ${nodeId}` };
       }
 
-      case "evaluate_node": {
-        const nodeId = p.nodeId as string;
-        addPendingTask(blueprintId, { type: "evaluate", nodeId, queuedAt: new Date().toISOString() });
-        try {
-          await evaluateNodeCompletion(blueprintId, nodeId);
-        } catch (err) {
-          log.error(`Autopilot evaluate_node ${nodeId} failed: ${err instanceof Error ? err.message : err}`);
-        } finally {
-          removePendingTask(blueprintId, nodeId, "evaluate");
+      case "create_insight": {
+        const severity = p.severity as string;
+        const message = p.message as string;
+        const sourceNodeId = (p.sourceNodeId as string) || null;
+        if (!["info", "warning", "critical"].includes(severity)) {
+          return { success: false, message: `Invalid severity "${severity}". Must be info, warning, or critical.`, error: "invalid_params" };
         }
-        return { success: true, message: `Evaluated node ${nodeId}` };
+        if (!message) return { success: false, message: "message is required", error: "invalid_params" };
+        createInsight(blueprintId, sourceNodeId, "autopilot", severity as InsightSeverity, message);
+        return { success: true, message: `Created ${severity} insight` };
+      }
+
+      case "create_node_suggestion": {
+        const nodeId = p.nodeId as string;
+        const title = p.title as string;
+        const description = p.description as string;
+        if (!nodeId || !title) return { success: false, message: "nodeId and title are required", error: "invalid_params" };
+        createSuggestion(blueprintId, nodeId, title, description || "");
+        return { success: true, message: `Created suggestion for node ${nodeId}` };
+      }
+
+      case "create_blueprint_suggestion": {
+        const title = p.title as string;
+        const description = p.description as string;
+        if (!title) return { success: false, message: "title is required", error: "invalid_params" };
+        createBlueprintSuggestion(blueprintId, title, description || "");
+        return { success: true, message: "Created blueprint suggestion" };
+      }
+
+      case "clear_blueprint_suggestions": {
+        clearBlueprintSuggestions(blueprintId);
+        return { success: true, message: "Cleared all blueprint suggestions" };
       }
 
       case "get_node_titles": {
@@ -1306,6 +1354,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
   let blueprintMemory = getAutopilotMemory(blueprintId);
   const globalMemory = readGlobalMemory();
   let lastReflectionIteration = 0;
+  const completedThisRound: string[] = [];
 
   const safeguardState: LoopSafeguardState = {
     recentActions: [],
@@ -1393,7 +1442,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       const prompt = buildAutopilotPrompt(state, iteration, maxIterations, {
         blueprint: blueprintMemory,
         global: globalMemory,
-      }, isFsd);
+      }, isFsd, completedThisRound);
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);
@@ -1423,6 +1472,16 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
       // 4. EXECUTE — Carry out the AI's decision
       const result = await executeDecision(blueprintId, decision);
+
+      // Track completed nodes for retrospective
+      if (decision.action === "run_node" && result.success) {
+        const nodeId = decision.params.nodeId as string;
+        const bp = getBlueprint(blueprintId);
+        const node = bp?.nodes.find((n) => n.id === nodeId);
+        if (node && node.status === "done") {
+          completedThisRound.push(`#${node.seq} "${node.title}" (${nodeId})`);
+        }
+      }
 
       // 5. LOG
       logAutopilot(blueprintId, iteration, state.summary, decision, result);
@@ -1498,7 +1557,7 @@ export function triggerFsdLoopIfNeeded(blueprintId: string): void {
   if (!isAutopilot) return;
   const queueInfo = getQueueInfo(blueprintId);
   const hasLoopTask = queueInfo.pendingTasks.some((t) => t.type === "autopilot");
-  if (!hasLoopTask && !queueInfo.running) {
+  if (!hasLoopTask) {
     enqueueBlueprintTask(blueprintId, () => runAutopilotLoop(blueprintId)).catch((err) => {
       log.error(`FSD loop failed for ${blueprintId}: ${err instanceof Error ? err.message : err}`);
     });

@@ -38,13 +38,11 @@ vi.mock("../agent-runtime.js", () => ({
 const mockExecuteNode = vi.fn();
 const mockExecuteNodeDirect = vi.fn();
 const mockResumeNodeSession = vi.fn();
-const mockEvaluateNodeCompletion = vi.fn();
 vi.mock("../plan-executor.js", () => ({
   getQueueInfo: vi.fn(() => ({ running: false, queueLength: 0, pendingTasks: [] })),
   executeNode: mockExecuteNode,
   executeNodeDirect: mockExecuteNodeDirect,
   resumeNodeSession: mockResumeNodeSession,
-  evaluateNodeCompletion: mockEvaluateNodeCompletion,
   enqueueBlueprintTask: vi.fn(async (_bpId: string, task: () => Promise<unknown>) => task()),
   addPendingTask: vi.fn(),
   removePendingTask: vi.fn(),
@@ -71,6 +69,7 @@ let db: {
   recoverStaleExecutions: PlanDb["recoverStaleExecutions"];
   getAutopilotMemory: PlanDb["getAutopilotMemory"];
   setAutopilotMemory: PlanDb["setAutopilotMemory"];
+  getBlueprintSuggestions: PlanDb["getBlueprintSuggestions"];
 };
 
 let ap: {
@@ -113,6 +112,7 @@ describe("autopilot integration", () => {
       recoverStaleExecutions: planDb.recoverStaleExecutions,
       getAutopilotMemory: planDb.getAutopilotMemory,
       setAutopilotMemory: planDb.setAutopilotMemory,
+      getBlueprintSuggestions: planDb.getBlueprintSuggestions,
     };
 
     const autopilot = await import("../autopilot.js");
@@ -137,7 +137,6 @@ describe("autopilot integration", () => {
     mockExecuteNode.mockReset();
     mockExecuteNodeDirect.mockReset();
     mockResumeNodeSession.mockReset();
-    mockEvaluateNodeCompletion.mockReset();
     vi.clearAllMocks();
 
     // Default: executeNode/executeNodeDirect marks node as done in real DB
@@ -150,7 +149,6 @@ describe("autopilot integration", () => {
     mockResumeNodeSession.mockImplementation(async (bpId: string, nodeId: string) => {
       db.updateMacroNode(bpId, nodeId, { status: "done" });
     });
-    mockEvaluateNodeCompletion.mockImplementation(async () => {});
   });
 
   // ─── Helpers ─────────────────────────────────────────────
@@ -347,23 +345,30 @@ describe("autopilot integration", () => {
       expect(ap.getResumeCount(bp.id, nodeA.id)).toBe(1);
     });
 
-    it("handles evaluate_node without changing status", async () => {
-      const bp = setup("Evaluate Flow");
+    it("handles retrospective tools (create_insight, create_node_suggestion, create_blueprint_suggestion)", async () => {
+      const bp = setup("Retrospective Flow");
       const nodeA = db.createMacroNode(bp.id, { title: "Node A", order: 1 });
       const nodeB = db.createMacroNode(bp.id, { title: "Node B", order: 2 });
 
+      // Run A first, then retrospective actions (loop won't auto-exit because B is still pending),
+      // then run B, then auto-exit triggers (all nodes done).
       mockRunSession
         .mockResolvedValueOnce(dec("run_node", { nodeId: nodeA.id }))
-        .mockResolvedValueOnce(dec("evaluate_node", { nodeId: nodeA.id }))
-        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }))
-        .mockResolvedValueOnce(dec("complete", {}));
+        .mockResolvedValueOnce(dec("create_insight", { severity: "info", message: "Code looks clean", sourceNodeId: nodeA.id }))
+        .mockResolvedValueOnce(dec("create_node_suggestion", { nodeId: nodeA.id, title: "Add tests", description: "Missing unit tests" }))
+        .mockResolvedValueOnce(dec("create_blueprint_suggestion", { title: "Run CI", description: "Verify everything works" }))
+        .mockResolvedValueOnce(dec("run_node", { nodeId: nodeB.id }));
 
       await ap.runAutopilotLoop(bp.id);
 
-      const final = db.getBlueprint(bp.id)!;
-      // Blueprint status is user-managed — autopilot doesn't change it
-      expect(final.status).toBe("approved");
-      expect(mockEvaluateNodeCompletion).toHaveBeenCalledTimes(1);
+      const insights = db.getInsightsForBlueprint(bp.id);
+      expect(insights.some((i) => i.message === "Code looks clean" && i.severity === "info")).toBe(true);
+
+      const suggestions = db.getSuggestionsForNode(nodeA.id);
+      expect(suggestions.some((s) => s.title === "Add tests")).toBe(true);
+
+      const bpSuggestions = db.getBlueprintSuggestions(bp.id);
+      expect(bpSuggestions.some((s) => s.title === "Run CI")).toBe(true);
     });
 
     it("handles mark_insight_read and dismiss_insight", async () => {

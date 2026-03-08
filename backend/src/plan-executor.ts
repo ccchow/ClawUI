@@ -1316,10 +1316,14 @@ async function executeNodeInternal(
         } catch (artErr) {
           log.error(`Artifact generation failed for node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
         }
-        try {
-          await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
-        } catch (evalErr) {
-          log.error(`Post-completion evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+        // Skip automated evaluation in FSD/autopilot mode — the FSD loop handles retrospective
+        const skipEval1 = blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd";
+        if (!skipEval1) {
+          try {
+            await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+          } catch (evalErr) {
+            log.error(`Post-completion evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+          }
         }
         return updateExecution(execution.id, {})!;
       }
@@ -1483,11 +1487,14 @@ async function executeNodeInternal(
 
     // Evaluate completion and apply graph mutations if needed.
     // Runs after artifact generation so the evaluation has handoff context.
-    // Failures are logged but don't affect the node's done status.
-    try {
-      await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
-    } catch (evalErr) {
-      log.error(`Post-completion evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+    // Skip in FSD/autopilot mode — the FSD loop handles retrospective.
+    const skipEval2 = blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd";
+    if (!skipEval2) {
+      try {
+        await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+      } catch (evalErr) {
+        log.error(`Post-completion evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+      }
     }
 
     return updateExecution(execution.id, {})!;
@@ -1600,10 +1607,13 @@ export async function resumeNodeSession(
         } catch (artErr) {
           log.error(`Artifact generation failed for resumed node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
         }
-        try {
-          await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
-        } catch (evalErr) {
-          log.error(`Post-resume evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+        const skipEval3 = blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd";
+        if (!skipEval3) {
+          try {
+            await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+          } catch (evalErr) {
+            log.error(`Post-resume evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+          }
         }
         return;
       }
@@ -1690,11 +1700,14 @@ export async function resumeNodeSession(
       log.error(`Artifact generation failed for resumed node ${nodeId.slice(0, 8)}: ${artErr instanceof Error ? artErr.message : artErr}`);
     }
 
-    // Evaluate completion
-    try {
-      await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
-    } catch (evalErr) {
-      log.error(`Post-resume evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+    // Evaluate completion — skip in FSD/autopilot mode
+    const skipEval4 = blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd";
+    if (!skipEval4) {
+      try {
+        await evaluateNodeCompletion(blueprintId, nodeId, blueprint.projectCwd);
+      } catch (evalErr) {
+        log.error(`Post-resume evaluation failed for node ${nodeId.slice(0, 8)}: ${evalErr instanceof Error ? evalErr.message : evalErr}`);
+      }
     }
 
   } catch (err) {

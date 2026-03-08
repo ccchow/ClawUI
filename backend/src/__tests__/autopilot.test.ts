@@ -21,6 +21,10 @@ vi.mock("../plan-db.js", () => ({
   getAutopilotMemory: vi.fn(),
   getUnacknowledgedMessages: vi.fn(),
   getArtifactsForNode: vi.fn(),
+  clearBlueprintSuggestions: vi.fn(),
+  createBlueprintSuggestion: vi.fn(),
+  createSuggestion: vi.fn(),
+  createInsight: vi.fn(),
 }));
 
 // Mock plan-executor.js
@@ -28,7 +32,6 @@ vi.mock("../plan-executor.js", () => ({
   getQueueInfo: vi.fn(),
   executeNodeDirect: vi.fn(async () => {}),
   resumeNodeSession: vi.fn(async () => {}),
-  evaluateNodeCompletion: vi.fn(async () => {}),
   addPendingTask: vi.fn(),
   removePendingTask: vi.fn(),
 }));
@@ -122,13 +125,16 @@ import {
   setAutopilotMemory,
   getUnacknowledgedMessages,
   getArtifactsForNode,
+  clearBlueprintSuggestions,
+  createBlueprintSuggestion,
+  createSuggestion,
+  createInsight,
 } from "../plan-db.js";
 import type { MacroNodeStatus, Artifact, NodeExecution } from "../plan-db.js";
 import {
   getQueueInfo,
   executeNodeDirect,
   resumeNodeSession,
-  evaluateNodeCompletion,
   addPendingTask,
   removePendingTask,
 } from "../plan-executor.js";
@@ -519,18 +525,54 @@ describe("autopilot", () => {
       expect(result.error).toBe("no_session");
     });
 
-    it("evaluate_node: evaluates node directly", async () => {
-      const decision: AutopilotDecision = {
-        reasoning: "Check quality",
-        action: "evaluate_node",
-        params: { nodeId: "n1" },
-      };
-      const result = await executeDecision("bp-1", decision);
-
+    it("create_insight: creates a blueprint insight", async () => {
+      const result = await executeDecision("bp-1", {
+        reasoning: "Noticed pattern",
+        action: "create_insight",
+        params: { severity: "warning", message: "Test coverage is low", sourceNodeId: "n1" },
+      });
       expect(result.success).toBe(true);
-      expect(evaluateNodeCompletion).toHaveBeenCalledWith("bp-1", "n1");
-      expect(addPendingTask).toHaveBeenCalledWith("bp-1", expect.objectContaining({ type: "evaluate", nodeId: "n1" }));
-      expect(removePendingTask).toHaveBeenCalled();
+      expect(createInsight).toHaveBeenCalledWith("bp-1", "n1", "autopilot", "warning", "Test coverage is low");
+    });
+
+    it("create_insight: rejects invalid severity", async () => {
+      const result = await executeDecision("bp-1", {
+        reasoning: "test",
+        action: "create_insight",
+        params: { severity: "urgent", message: "Bad" },
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toBe("invalid_params");
+    });
+
+    it("create_node_suggestion: creates a per-node suggestion", async () => {
+      const result = await executeDecision("bp-1", {
+        reasoning: "Follow up needed",
+        action: "create_node_suggestion",
+        params: { nodeId: "n1", title: "Add tests", description: "Missing unit tests" },
+      });
+      expect(result.success).toBe(true);
+      expect(createSuggestion).toHaveBeenCalledWith("bp-1", "n1", "Add tests", "Missing unit tests");
+    });
+
+    it("create_blueprint_suggestion: creates a blueprint suggestion", async () => {
+      const result = await executeDecision("bp-1", {
+        reasoning: "User should consider",
+        action: "create_blueprint_suggestion",
+        params: { title: "Run full test suite", description: "All nodes are done, verify everything works" },
+      });
+      expect(result.success).toBe(true);
+      expect(createBlueprintSuggestion).toHaveBeenCalledWith("bp-1", "Run full test suite", "All nodes are done, verify everything works");
+    });
+
+    it("clear_blueprint_suggestions: clears all blueprint suggestions", async () => {
+      const result = await executeDecision("bp-1", {
+        reasoning: "Refresh suggestions",
+        action: "clear_blueprint_suggestions",
+        params: {},
+      });
+      expect(result.success).toBe(true);
+      expect(clearBlueprintSuggestions).toHaveBeenCalledWith("bp-1");
     });
 
     it("get_node_titles: returns all nodes with summary fields only (no descriptions)", async () => {
@@ -643,7 +685,7 @@ describe("autopilot", () => {
       expect(details.unusedSuggestions[0].title).toBe("Add tests");
     });
 
-    it("removed tools (enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all, acknowledge_message, read_user_messages, send_message) return unknown_action error", async () => {
+    it("removed tools (enrich_node, split_node, smart_dependencies, reevaluate_node, reevaluate_all, acknowledge_message, read_user_messages, send_message, evaluate_node) return unknown_action error", async () => {
       const removedTools = [
         "enrich_node",
         "split_node",
@@ -653,6 +695,7 @@ describe("autopilot", () => {
         "acknowledge_message",
         "read_user_messages",
         "send_message",
+        "evaluate_node",
       ];
 
       for (const toolName of removedTools) {
@@ -1015,7 +1058,7 @@ describe("autopilot", () => {
         }
 
         expect(checkSameAction("run_node", { nodeId: "n1" })).toBeNull();
-        expect(checkSameAction("evaluate_node", { nodeId: "n1" })).toBeNull();
+        expect(checkSameAction("create_insight", { severity: "info", message: "ok" })).toBeNull();
         expect(checkSameAction("run_node", { nodeId: "n1" })).toBeNull();
         // Not 3 consecutive identical — should not trigger
       });
@@ -1537,7 +1580,7 @@ describe("autopilot", () => {
           { action: "enrich_node", iteration: 1 },
           { action: "run_node", iteration: 2 },
           { action: "run_node", iteration: 3 },
-          { action: "evaluate_node", iteration: 4 },
+          { action: "create_insight", iteration: 4 },
           { action: "run_node", iteration: 5 },
           { action: "run_node", iteration: 6 },
           { action: "coordinate", iteration: 7 },
@@ -1782,4 +1825,5 @@ describe("autopilot", () => {
       expect(written.length).toBe(GLOBAL_MEMORY_MAX_CHARS);
     });
   });
+
 });
