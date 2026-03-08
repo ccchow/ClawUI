@@ -95,46 +95,62 @@ Communication:
 Context:
   get_node_titles()         — understand current plan structure
   get_node_details(nodeId)  — understand specific node info
+
+Control:
+  done()                    — signal that user intent is fully decomposed into nodes
 ```
+
+### Multi-Iteration Loop
+
+The Message Handler runs its own loop (max 10 iterations) to fully decompose user intent before handing off to the FSD loop. This is necessary because complex features require multiple steps to plan:
+
+1. LLM iteration 1: Create "Architecture Design" node
+2. LLM iteration 2: See Design node in state → create Implementation nodes, set dependencies
+3. LLM iteration 3: send_message confirming plan → call `done`
+
+Each iteration rebuilds the state snapshot so the LLM sees nodes created in previous iterations. The loop exits when:
+- LLM calls `done` (intent fully expressed)
+- LLM returns no actionable operations (only read tools or empty)
+- Max iterations reached (safety cap: 10)
 
 ### Decision Format
 
-Supports both single action and action arrays:
+Single action per iteration (one tool call at a time, like the FSD loop):
 
 ```json
-// Single action
 {
-  "reasoning": "User wants a login feature, need 3 nodes",
-  "action": "batch_create_nodes",
-  "params": { "nodes": [...] }
-}
-
-// Multiple actions (reply + operate in one LLM call)
-{
-  "reasoning": "...",
-  "actions": [
-    { "action": "send_message", "params": { "content": "Got it, creating nodes..." } },
-    { "action": "batch_create_nodes", "params": { "nodes": [...] } }
-  ]
+  "reasoning": "User wants a login feature — first create the design node",
+  "action": "create_node",
+  "params": { "title": "Login Architecture Design", "description": "..." }
 }
 ```
+
+The LLM is called again for the next action until it calls `done`.
 
 ### Execution Logic
 
 ```typescript
+const MH_MAX_ITERATIONS = 10;
+
 export async function handleUserMessage(blueprintId: string): Promise<void> {
   const messages = getUnacknowledgedMessages(blueprintId);
   if (messages.length === 0) return;  // idempotent
 
-  const state = buildMessageHandlerState(blueprintId);
-  const prompt = buildMessageHandlerPrompt(state, messages);
-  const decision = await callAgentForDecision(prompt, projectCwd);
+  const blueprint = getBlueprint(blueprintId);
+  if (!blueprint) return;
 
-  const actions = normalizeActions(decision);  // support single/multi action
-  for (const action of actions) {
-    await executeMessageAction(blueprintId, action);
+  for (let i = 0; i < MH_MAX_ITERATIONS; i++) {
+    // Rebuild state each iteration (reflects newly created nodes)
+    const state = buildMessageHandlerState(blueprintId);
+    const prompt = buildMessageHandlerPrompt(state, messages, i);
+    const decision = await callAgentForDecision(prompt, blueprint.projectCwd);
+
+    if (decision.action === "done") break;
+
+    await executeMessageAction(blueprintId, decision);
   }
 
+  // Acknowledge all messages after intent is fully decomposed
   for (const msg of messages) {
     acknowledgeMessage(msg.id);
   }

@@ -237,6 +237,8 @@ export function buildMessageHandlerState(blueprintId: string): MessageHandlerSta
 **Step 3: Build the Message Handler prompt**
 
 ```typescript
+export const MH_MAX_ITERATIONS = 10;
+
 const MH_TOOL_DESCRIPTIONS = `### Structural Operations
 - **create_node(title, description, dependsOn?, roles?)** — Create a new node. dependsOn is an array of node IDs. roles is an array of role IDs.
 - **batch_create_nodes([{title, description, dependsOn?, roles?}])** — Create multiple nodes at once.
@@ -257,65 +259,53 @@ const MH_TOOL_DESCRIPTIONS = `### Structural Operations
 
 ### Context
 - **get_node_titles()** — Returns all nodes with {id, seq, title, status, deps}. Use to understand the plan structure.
-- **get_node_details(nodeId)** — Returns full node context including description, error, suggestions.`;
+- **get_node_details(nodeId)** — Returns full node context including description, error, suggestions.
+
+### Control
+- **done()** — Signal that you have fully decomposed the user's request into nodes. Call this when there is nothing more to plan.`;
 
 export function buildMessageHandlerPrompt(
   state: MessageHandlerState,
   messages: AutopilotMessage[],
+  iteration: number = 0,
 ): string {
   const messageList = messages.map((m) => `- ${m.content}`).join("\n");
 
-  return `You are a Message Handler for a software blueprint. Your job is to understand user messages and translate them into concrete actions.
+  const iterationNote = iteration > 0
+    ? `\n## Iteration ${iteration + 1}\nYou have already taken ${iteration} action(s). The blueprint state above reflects your previous actions. Continue decomposing the user's request or call done() if complete.\n`
+    : "";
+
+  return `You are a Message Handler for a software blueprint. Your job is to fully understand user messages and translate them into a complete plan of action nodes.
 
 ## Current Blueprint
 ${JSON.stringify(state, null, 2)}
 
 ## User Messages
 ${messageList}
-
+${iterationNote}
 ## Available Tools
 ${MH_TOOL_DESCRIPTIONS}
 
 ## Instructions
 - Understand what the user wants and take action immediately.
 - For simple tasks (Q&A, git operations, quick checks): use **run_direct(prompt)**.
-- For complex tasks (new features, refactors, multi-step work): use **create_node** or **batch_create_nodes**.
+- For complex tasks (new features, refactors, multi-step work): decompose into nodes step by step. You will be called multiple times — create nodes incrementally, setting dependencies as you go.
 - For plan operations the user requests (split, enrich, etc.): use the corresponding tool.
-- You may combine a **send_message** with other actions to confirm your plan to the user.
-- Before creating nodes, check existing nodes to avoid duplicates.
+- You may use **send_message** to confirm your plan to the user.
+- Before creating nodes, check existing nodes in the state to avoid duplicates.
+- When you have fully expressed the user's intent as nodes, call **done()**.
 
 ## Response Format
-Respond with a JSON object. You may return a single action or multiple actions:
-
-Single action:
+Respond with exactly one JSON object:
 { "reasoning": "...", "action": "<tool>", "params": { ... } }
 
-Multiple actions:
-{ "reasoning": "...", "actions": [{ "action": "<tool>", "params": { ... } }, ...] }`;
+Pick the single best next action. You will be called again for the next action until you call done().`;
 }
 ```
 
-**Step 4: Implement action normalization and execution**
+**Step 4: Implement action execution**
 
 ```typescript
-interface MessageAction {
-  action: string;
-  params: Record<string, unknown>;
-}
-
-/** Normalize single-action or multi-action decision into an array. */
-export function normalizeActions(
-  decision: { action?: string; params?: Record<string, unknown>; actions?: MessageAction[] },
-): MessageAction[] {
-  if (decision.actions && Array.isArray(decision.actions)) {
-    return decision.actions;
-  }
-  if (decision.action && decision.params) {
-    return [{ action: decision.action, params: decision.params }];
-  }
-  return [];
-}
-
 /** Execute a single Message Handler action. */
 export async function executeMessageAction(
   blueprintId: string,
@@ -429,7 +419,7 @@ export async function executeMessageAction(
 }
 ```
 
-**Step 5: Implement the main `handleUserMessage` function**
+**Step 5: Implement the main `handleUserMessage` function with loop**
 
 ```typescript
 export async function handleUserMessage(blueprintId: string): Promise<void> {
@@ -448,20 +438,36 @@ export async function handleUserMessage(blueprintId: string): Promise<void> {
   });
 
   try {
-    const state = buildMessageHandlerState(blueprintId);
-    const prompt = buildMessageHandlerPrompt(state, messages);
-    const decision = await callAgentForDecision(prompt, blueprint.projectCwd);
+    let actionsExecuted = 0;
 
-    const actions = normalizeActions(decision);
-    for (const action of actions) {
-      await executeMessageAction(blueprintId, action);
+    for (let i = 0; i < MH_MAX_ITERATIONS; i++) {
+      // Rebuild state each iteration (reflects newly created nodes)
+      const state = buildMessageHandlerState(blueprintId);
+      const prompt = buildMessageHandlerPrompt(state, messages, i);
+
+      let decision;
+      try {
+        decision = await callAgentForDecision(prompt, blueprint.projectCwd);
+      } catch (err) {
+        log.error(`Message handler LLM call failed at iteration ${i}: ${err instanceof Error ? err.message : err}`);
+        break;
+      }
+
+      // Exit: LLM signals intent fully decomposed
+      if (decision.action === "done") {
+        log.info(`Message handler done at iteration ${i + 1}`);
+        break;
+      }
+
+      await executeMessageAction(blueprintId, decision);
+      actionsExecuted++;
     }
 
-    // Acknowledge all messages after successful processing
+    // Acknowledge all messages after intent is fully decomposed
     for (const msg of messages) {
       acknowledgeMessage(msg.id);
     }
-    log.info(`Message handler processed ${messages.length} message(s), executed ${actions.length} action(s)`);
+    log.info(`Message handler processed ${messages.length} message(s), executed ${actionsExecuted} action(s)`);
   } catch (err) {
     log.error(`Message handler failed for ${blueprintId}: ${err instanceof Error ? err.message : err}`);
     // Don't acknowledge — messages preserved for retry
