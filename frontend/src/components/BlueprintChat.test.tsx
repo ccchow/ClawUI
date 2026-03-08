@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BlueprintChat } from "./BlueprintChat";
-import type { AutopilotLogEntry, AutopilotMessage, ExecutionMode, BlueprintStatus } from "@/lib/api";
+import { BlueprintChat, VIRTUALIZATION_THRESHOLD } from "./BlueprintChat";
+import type { AutopilotLogEntry, AutopilotMessage, ExecutionMode, BlueprintStatus, BlueprintSuggestion } from "@/lib/api";
 
 // --- vi.hoisted mocks ---
 
@@ -21,6 +21,8 @@ const apiMocks = vi.hoisted(() => ({
   ),
   updateBlueprint: vi.fn(() => Promise.resolve({})),
   runAllNodes: vi.fn(() => Promise.resolve({ message: "ok", blueprintId: "bp-1" })),
+  getBlueprintSuggestions: vi.fn((): Promise<BlueprintSuggestion[]> => Promise.resolve([])),
+  useBlueprintSuggestion: vi.fn(() => Promise.resolve({ status: "ok" })),
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -342,15 +344,15 @@ describe("BlueprintChat", () => {
       expect(screen.getByText("Second action")).toBeInTheDocument();
       expect(screen.getByText("Third message")).toBeInTheDocument();
 
-      // Verify chronological order in the DOM
+      // Verify reverse chronological order in the DOM (newest first)
       const items = screen.getByText("First message")
         .closest(".space-y-3")!;
       const texts = Array.from(items.querySelectorAll(".text-sm"))
         .map((el) => el.textContent)
         .filter(Boolean);
 
-      expect(texts.indexOf("First message")).toBeLessThan(texts.indexOf("Second action"));
-      expect(texts.indexOf("Second action")).toBeLessThan(texts.indexOf("Third message"));
+      expect(texts.indexOf("Third message")).toBeLessThan(texts.indexOf("Second action"));
+      expect(texts.indexOf("Second action")).toBeLessThan(texts.indexOf("First message"));
     });
 
     it("shows empty state message for manual mode", async () => {
@@ -432,6 +434,106 @@ describe("BlueprintChat", () => {
     });
   });
 
+  // ─── Date separators ────────────────────────────────────────
+
+  describe("date separators", () => {
+    it("shows 'Today' separator for messages from today", async () => {
+      const now = new Date().toISOString();
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [makeMessage({ id: "msg-today", content: "Recent msg", createdAt: now })],
+        total: 1,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("Recent msg")).toBeInTheDocument();
+      });
+
+      expect(screen.getByText("Today")).toBeInTheDocument();
+    });
+
+    it("shows 'Yesterday' separator for messages from yesterday", async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [makeMessage({ id: "msg-yest", content: "Old msg", createdAt: yesterday })],
+        total: 1,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("Old msg")).toBeInTheDocument();
+      });
+
+      expect(screen.getByText("Yesterday")).toBeInTheDocument();
+    });
+
+    it("shows separate date headers when messages span multiple days", async () => {
+      const now = new Date();
+      const todayStr = now.toISOString();
+      const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [
+          makeMessage({ id: "msg-a", content: "Today msg", createdAt: todayStr }),
+          makeMessage({ id: "msg-b", content: "Older msg", createdAt: twoDaysAgo }),
+        ],
+        total: 2,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("Today msg")).toBeInTheDocument();
+      });
+
+      expect(screen.getByText("Today")).toBeInTheDocument();
+      // Two days ago should show formatted date (not "Today" or "Yesterday")
+      const separators = screen.getAllByText(/Today|Yesterday|[A-Z][a-z]{2} \d/);
+      expect(separators.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("does not duplicate separators for messages on the same day", async () => {
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [
+          makeMessage({ id: "msg-1", content: "First", createdAt: "2025-06-01T12:00:00Z" }),
+          makeMessage({ id: "msg-2", content: "Second", createdAt: "2025-06-01T14:00:00Z" }),
+        ],
+        total: 2,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("First")).toBeInTheDocument();
+      });
+
+      // Both messages are on the same day → only one date separator
+      const container = screen.getByText("First").closest(".space-y-3")!;
+      const stickyHeaders = container.querySelectorAll(".sticky");
+      expect(stickyHeaders).toHaveLength(1);
+    });
+
+    it("date separators have sticky positioning", async () => {
+      const now = new Date().toISOString();
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [makeMessage({ id: "msg-s", content: "Sticky test", createdAt: now })],
+        total: 1,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("Sticky test")).toBeInTheDocument();
+      });
+
+      const separator = screen.getByText("Today").closest(".sticky");
+      expect(separator).toBeInTheDocument();
+      expect(separator).toHaveClass("top-0", "z-10");
+    });
+  });
+
   // ─── Pause / Resume ────────────────────────────────────────
 
   describe("pause / resume", () => {
@@ -481,6 +583,124 @@ describe("BlueprintChat", () => {
       });
 
       expect(screen.getByText("FSD Paused")).toBeInTheDocument();
+    });
+  });
+
+  // ─── Virtual scrolling ────────────────────────────────────
+
+  describe("virtual scrolling", () => {
+    it("uses non-virtual rendering for small lists (space-y-3 wrapper present)", async () => {
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: [makeMessage({ id: "msg-1", content: "Small list item" })],
+        total: 1,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        expect(screen.getByText("Small list item")).toBeInTheDocument();
+      });
+
+      // Non-virtual path wraps items in a space-y-3 div
+      const wrapper = screen.getByText("Small list item").closest(".space-y-3");
+      expect(wrapper).toBeInTheDocument();
+    });
+
+    it(`activates virtual scrolling when items exceed threshold (${VIRTUALIZATION_THRESHOLD})`, async () => {
+      // Generate enough messages to trigger virtualization
+      const manyMessages = Array.from({ length: VIRTUALIZATION_THRESHOLD }, (_, i) =>
+        makeMessage({
+          id: `msg-${i}`,
+          content: `Message ${i}`,
+          createdAt: new Date(Date.now() - i * 60000).toISOString(),
+        }),
+      );
+
+      apiMocks.getBlueprintMessages.mockResolvedValue({
+        messages: manyMessages,
+        total: manyMessages.length,
+      });
+
+      renderChat();
+
+      await waitFor(() => {
+        // Virtual path uses a relative-positioned container instead of space-y-3
+        const container = document.querySelector("[style*='position: relative']");
+        expect(container).toBeInTheDocument();
+      });
+
+      // Non-virtual wrapper should NOT be present
+      expect(document.querySelector(".space-y-3")).not.toBeInTheDocument();
+    });
+
+    it("exports VIRTUALIZATION_THRESHOLD constant", () => {
+      expect(VIRTUALIZATION_THRESHOLD).toBe(100);
+    });
+  });
+
+  // ─── BlueprintSuggestions visibility ────────────────────────
+
+  describe("suggestions visibility", () => {
+    it("renders BlueprintSuggestions section in autopilot mode", async () => {
+      apiMocks.getBlueprintSuggestions.mockResolvedValue([
+        {
+          id: "sug-1",
+          blueprintId: "bp-1",
+          title: "Add validation",
+          description: "Add input validation",
+          used: false,
+          createdAt: "2025-06-01T12:00:00Z",
+        },
+      ]);
+
+      renderChat({ executionMode: "autopilot", blueprintStatus: "approved" });
+
+      await waitFor(() => {
+        expect(screen.getByText("Add validation")).toBeInTheDocument();
+      });
+      expect(screen.getByText("Suggestions")).toBeInTheDocument();
+    });
+
+    it("renders BlueprintSuggestions section in fsd mode", async () => {
+      apiMocks.getBlueprintSuggestions.mockResolvedValue([
+        {
+          id: "sug-2",
+          blueprintId: "bp-1",
+          title: "Optimize queries",
+          description: "Optimize database queries",
+          used: false,
+          createdAt: "2025-06-01T12:00:00Z",
+        },
+      ]);
+
+      renderChat({ executionMode: "fsd", blueprintStatus: "approved" });
+
+      await waitFor(() => {
+        expect(screen.getByText("Optimize queries")).toBeInTheDocument();
+      });
+    });
+
+    it("does not render BlueprintSuggestions in manual mode", async () => {
+      apiMocks.getBlueprintSuggestions.mockResolvedValue([
+        {
+          id: "sug-3",
+          blueprintId: "bp-1",
+          title: "Should not appear",
+          description: "This should be hidden",
+          used: false,
+          createdAt: "2025-06-01T12:00:00Z",
+        },
+      ]);
+
+      renderChat({ executionMode: "manual", blueprintStatus: "approved" });
+
+      await waitFor(() => {
+        expect(screen.getByPlaceholderText(/Ask autopilot/)).toBeInTheDocument();
+      });
+
+      // Suggestions should not be rendered in manual mode
+      expect(screen.queryByText("Should not appear")).not.toBeInTheDocument();
+      expect(screen.queryByText("Suggestions")).not.toBeInTheDocument();
     });
   });
 });

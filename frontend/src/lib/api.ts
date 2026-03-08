@@ -922,6 +922,44 @@ export function getBlueprintMessages(
   );
 }
 
+// ─── Blueprint Suggestions ────────────────────────────────────
+
+export interface BlueprintSuggestion {
+  id: string;
+  blueprintId: string;
+  title: string;
+  description: string;
+  used: boolean;
+  createdAt: string;
+}
+
+export function getBlueprintSuggestions(
+  blueprintId: string,
+): Promise<BlueprintSuggestion[]> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/suggestions`,
+  );
+}
+
+export function useBlueprintSuggestion(
+  blueprintId: string,
+  suggestionId: string,
+): Promise<{ status: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/suggestions/${encodeURIComponent(suggestionId)}/use`,
+    { method: "POST" },
+  );
+}
+
+export function dismissBlueprintSuggestions(
+  blueprintId: string,
+): Promise<{ status: string }> {
+  return fetchJSON(
+    `${API_BASE}/blueprints/${encodeURIComponent(blueprintId)}/suggestions/dismiss`,
+    { method: "POST" },
+  );
+}
+
 export function uploadImage(dataUrl: string, filename?: string): Promise<{ url: string }> {
   return fetchJSON(`${API_BASE}/uploads`, {
     method: "POST",

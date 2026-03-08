@@ -1709,4 +1709,111 @@ describe("plan-db", () => {
     expect(cleared).not.toBeNull();
     expect(cleared!.agentParams).toBeUndefined();
   });
+
+  // ─── Blueprint Suggestions CRUD ───────────────────────────────
+
+  it("createBlueprintSuggestion and getBlueprintSuggestions", async () => {
+    const { createBlueprint, createBlueprintSuggestion, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Suggestions Test");
+    const s1 = createBlueprintSuggestion(bp.id, "Title A", "Description A");
+    expect(s1.id).toBeDefined();
+    expect(s1.blueprintId).toBe(bp.id);
+    expect(s1.title).toBe("Title A");
+    expect(s1.description).toBe("Description A");
+    expect(s1.used).toBe(false);
+    expect(s1.createdAt).toBeDefined();
+
+    const s2 = createBlueprintSuggestion(bp.id, "Title B", "Description B");
+    expect(s2.id).not.toBe(s1.id);
+
+    const all = getBlueprintSuggestions(bp.id);
+    expect(all.length).toBe(2);
+    expect(all[0].title).toBe("Title A");
+    expect(all[1].title).toBe("Title B");
+  });
+
+  it("getBlueprintSuggestions returns empty array for unknown blueprint", async () => {
+    const { getBlueprintSuggestions } = await import("../plan-db.js");
+    const result = getBlueprintSuggestions("nonexistent-bp-id");
+    expect(result).toEqual([]);
+  });
+
+  it("markBlueprintSuggestionUsed marks a suggestion as used", async () => {
+    const { createBlueprint, createBlueprintSuggestion, markBlueprintSuggestionUsed, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Mark Used Test");
+    const s = createBlueprintSuggestion(bp.id, "Use Me", "Will be used");
+    expect(s.used).toBe(false);
+
+    const updated = markBlueprintSuggestionUsed(s.id);
+    expect(updated).not.toBeNull();
+    expect(updated!.used).toBe(true);
+    expect(updated!.title).toBe("Use Me");
+
+    // Verify persisted
+    const all = getBlueprintSuggestions(bp.id);
+    expect(all[0].used).toBe(true);
+  });
+
+  it("markBlueprintSuggestionUsed returns null for non-existent id", async () => {
+    const { markBlueprintSuggestionUsed } = await import("../plan-db.js");
+    const result = markBlueprintSuggestionUsed("no-such-id");
+    expect(result).toBeNull();
+  });
+
+  it("deleteBlueprintSuggestion removes a single suggestion", async () => {
+    const { createBlueprint, createBlueprintSuggestion, deleteBlueprintSuggestion, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Delete Test");
+    const s1 = createBlueprintSuggestion(bp.id, "Keep", "Keep this");
+    const s2 = createBlueprintSuggestion(bp.id, "Delete", "Delete this");
+
+    deleteBlueprintSuggestion(s2.id);
+
+    const remaining = getBlueprintSuggestions(bp.id);
+    expect(remaining.length).toBe(1);
+    expect(remaining[0].id).toBe(s1.id);
+  });
+
+  it("clearBlueprintSuggestions removes all suggestions for a blueprint", async () => {
+    const { createBlueprint, createBlueprintSuggestion, clearBlueprintSuggestions, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Clear Test");
+    createBlueprintSuggestion(bp.id, "S1", "Desc 1");
+    createBlueprintSuggestion(bp.id, "S2", "Desc 2");
+    createBlueprintSuggestion(bp.id, "S3", "Desc 3");
+
+    expect(getBlueprintSuggestions(bp.id).length).toBe(3);
+
+    clearBlueprintSuggestions(bp.id);
+    expect(getBlueprintSuggestions(bp.id)).toEqual([]);
+  });
+
+  it("clearBlueprintSuggestions only affects targeted blueprint", async () => {
+    const { createBlueprint, createBlueprintSuggestion, clearBlueprintSuggestions, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp1 = createBlueprint("Clear Isolation A");
+    const bp2 = createBlueprint("Clear Isolation B");
+    createBlueprintSuggestion(bp1.id, "A1", "Desc");
+    createBlueprintSuggestion(bp2.id, "B1", "Desc");
+
+    clearBlueprintSuggestions(bp1.id);
+    expect(getBlueprintSuggestions(bp1.id)).toEqual([]);
+    expect(getBlueprintSuggestions(bp2.id).length).toBe(1);
+  });
+
+  it("suggestions are ordered by created_at ASC", async () => {
+    const { createBlueprint, createBlueprintSuggestion, getBlueprintSuggestions } = await import("../plan-db.js");
+
+    const bp = createBlueprint("Order Test");
+    const s1 = createBlueprintSuggestion(bp.id, "First", "Desc");
+    const s2 = createBlueprintSuggestion(bp.id, "Second", "Desc");
+    const s3 = createBlueprintSuggestion(bp.id, "Third", "Desc");
+
+    const all = getBlueprintSuggestions(bp.id);
+    expect(all[0].id).toBe(s1.id);
+    expect(all[1].id).toBe(s2.id);
+    expect(all[2].id).toBe(s3.id);
+  });
 });

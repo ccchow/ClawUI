@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, Fragment } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   type AutopilotLogEntry,
@@ -14,6 +14,8 @@ import {
   runAllNodes,
 } from "@/lib/api";
 import { usePollingInterval } from "@/lib/polling-utils";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { BlueprintSuggestions } from "./BlueprintSuggestions";
 
 interface BlueprintChatProps {
   blueprintId: string;
@@ -71,6 +73,48 @@ function statusIcon(result: string | undefined): { icon: string; color: string }
 function extractNodeId(reason: string): string | null {
   const match = reason.match(/node[:\s]+([a-f0-9-]{8,})/i);
   return match ? match[1] : null;
+}
+
+function getDateKey(dateStr: string): string {
+  const d = new Date(dateStr);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function formatDateLabel(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+
+  const dateDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const diffDays = Math.round((today.getTime() - dateDay.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const label = `${months[date.getMonth()]} ${date.getDate()}`;
+  return date.getFullYear() === now.getFullYear() ? label : `${label}, ${date.getFullYear()}`;
+}
+
+// ─── Virtual scrolling ──────────────────────────────────────
+
+export const VIRTUALIZATION_THRESHOLD = 100;
+
+type DisplayItem =
+  | { type: "separator"; label: string; key: string }
+  | { type: "chat"; item: ChatItem; key: string };
+
+// ─── Sticky date separator ──────────────────────────────────
+
+function DateSeparator({ label }: { label: string }) {
+  return (
+    <div className="sticky top-0 z-10 flex justify-center py-1.5 -mx-4 px-4 bg-bg-primary">
+      <span className="text-[11px] font-medium text-text-muted bg-bg-tertiary px-3 py-0.5 rounded-full">
+        {label}
+      </span>
+    </div>
+  );
 }
 
 // ─── Log entry row (left-aligned) ─────────────────────────────
@@ -283,10 +327,7 @@ export function BlueprintChat({
 }: BlueprintChatProps) {
   const [messageText, setMessageText] = useState("");
   const [sending, setSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const isAtBottomRef = useRef(true);
-  const prevItemCountRef = useRef(0);
 
   const isAutopilotActive =
     (executionMode === "autopilot" || executionMode === "fsd") &&
@@ -346,40 +387,71 @@ export function BlueprintChat({
       items.push({ kind: "pause", id: "pause-current", reason: pauseReason, createdAt: new Date().toISOString() });
     }
 
-    // Sort ascending (oldest first → newest at bottom)
-    items.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // Sort descending (newest first → newest at top)
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
     return items;
   }, [messages, logEntries, isPaused, pauseReason]);
 
+  // ─── Virtual scrolling setup ─────────────────────────────
+
+  const displayItems: DisplayItem[] = useMemo(() => {
+    const result: DisplayItem[] = [];
+    for (let i = 0; i < chatItems.length; i++) {
+      const item = chatItems[i];
+      const dateKey = getDateKey(item.createdAt);
+      const prevDateKey = i > 0 ? getDateKey(chatItems[i - 1].createdAt) : null;
+      if (dateKey !== prevDateKey) {
+        result.push({ type: "separator", label: formatDateLabel(item.createdAt), key: `sep-${dateKey}-${i}` });
+      }
+      result.push({ type: "chat", item, key: item.id });
+    }
+    return result;
+  }, [chatItems]);
+
+  const shouldVirtualize = displayItems.length >= VIRTUALIZATION_THRESHOLD;
+
+  const virtualizer = useVirtualizer({
+    count: shouldVirtualize ? displayItems.length : 0,
+    getScrollElement: () => chatContainerRef.current,
+    estimateSize: (index) => (displayItems[index]?.type === "separator" ? 32 : 72),
+    overscan: 15,
+  });
+
+  const renderChatItem = (item: ChatItem) => {
+    switch (item.kind) {
+      case "user-message":
+        return <UserMessageBubble content={item.content} createdAt={item.createdAt} />;
+      case "assistant-message":
+        return <AssistantMessageBubble content={item.content} createdAt={item.createdAt} />;
+      case "system-message":
+        return <SystemMessageBubble content={item.content} createdAt={item.createdAt} />;
+      case "log-entry":
+        return <LogEntryBubble entry={item.entry} />;
+      case "pause":
+        return (
+          <PauseMessage
+            reason={item.reason}
+            createdAt={item.createdAt}
+            executionMode={executionMode}
+            blueprintId={blueprintId}
+            onUpdate={onUpdate}
+            onInvalidate={onInvalidate}
+            onBroadcast={onBroadcast}
+            onScrollToNode={onScrollToNode}
+          />
+        );
+      default:
+        return null;
+    }
+  };
+
   // ─── Auto-scroll ──────────────────────────────────────────
 
-  // Track if user is at the bottom via IntersectionObserver
+  // Scroll to top when new items arrive (newest messages are at top)
   useEffect(() => {
-    const el = bottomRef.current;
-    if (!el || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      ([entry]) => { isAtBottomRef.current = entry.isIntersecting; },
-      { threshold: 0.1 },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  // Scroll to bottom when new items arrive (if user was at bottom)
-  useEffect(() => {
-    if (chatItems.length > prevItemCountRef.current && prevItemCountRef.current > 0) {
-      if (isAtBottomRef.current && bottomRef.current) {
-        bottomRef.current.scrollIntoView({ behavior: "smooth" });
-      }
-    }
-    prevItemCountRef.current = chatItems.length;
-  }, [chatItems.length]);
-
-  // Scroll to bottom on initial load
-  useEffect(() => {
-    if (chatItems.length > 0 && prevItemCountRef.current === 0) {
-      bottomRef.current?.scrollIntoView({ behavior: "instant" as ScrollBehavior });
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = 0;
     }
   }, [chatItems.length]);
 
@@ -450,47 +522,60 @@ export function BlueprintChat({
       {/* Chat messages */}
       <div
         ref={chatContainerRef}
-        className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[200px] max-h-[400px]"
+        className="flex-1 overflow-y-auto px-4 py-3 min-h-[200px] max-h-[400px]"
       >
-        {chatItems.length === 0 && (
+        {chatItems.length === 0 ? (
           <div className="text-center py-8 text-text-muted text-sm">
             {isAutopilot
               ? "Send a message to interact with autopilot. Log entries and responses will appear here."
               : "Send messages to queue instructions. They will be processed when autopilot is enabled."}
           </div>
-        )}
-
-        {chatItems.map((item) => {
-          switch (item.kind) {
-            case "user-message":
-              return <UserMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
-            case "assistant-message":
-              return <AssistantMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
-            case "system-message":
-              return <SystemMessageBubble key={item.id} content={item.content} createdAt={item.createdAt} />;
-            case "log-entry":
-              return <LogEntryBubble key={item.id} entry={item.entry} />;
-            case "pause":
+        ) : shouldVirtualize ? (
+          <div
+            style={{
+              height: virtualizer.getTotalSize(),
+              width: "100%",
+              position: "relative",
+            }}
+          >
+            {virtualizer.getVirtualItems().map((virtualRow) => {
+              const di = displayItems[virtualRow.index];
               return (
-                <PauseMessage
-                  key={item.id}
-                  reason={item.reason}
-                  createdAt={item.createdAt}
-                  executionMode={executionMode}
-                  blueprintId={blueprintId}
-                  onUpdate={onUpdate}
-                  onInvalidate={onInvalidate}
-                  onBroadcast={onBroadcast}
-                  onScrollToNode={onScrollToNode}
-                />
+                <div
+                  key={di.key}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                  className="pb-3"
+                >
+                  {di.type === "separator"
+                    ? <DateSeparator label={di.label} />
+                    : renderChatItem(di.item)}
+                </div>
               );
-            default:
-              return null;
-          }
-        })}
-
-        {/* Scroll anchor */}
-        <div ref={bottomRef} />
+            })}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {chatItems.map((item, index) => {
+              const dateKey = getDateKey(item.createdAt);
+              const prevDateKey = index > 0 ? getDateKey(chatItems[index - 1].createdAt) : null;
+              const showSeparator = dateKey !== prevDateKey;
+              return (
+                <Fragment key={item.id}>
+                  {showSeparator && <DateSeparator label={formatDateLabel(item.createdAt)} />}
+                  {renderChatItem(item)}
+                </Fragment>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Manual mode note */}
@@ -499,6 +584,19 @@ export function BlueprintChat({
           <p className="text-xs text-text-muted text-center">
             Manual mode &mdash; messages will be processed when autopilot is enabled
           </p>
+        </div>
+      )}
+
+      {/* Suggestions (autopilot/fsd only) */}
+      {isAutopilot && (
+        <div className="px-4 py-2 border-t border-border-primary">
+          <BlueprintSuggestions
+            blueprintId={blueprintId}
+            onSuggestionUsed={() => {
+              refetchMessages();
+              onInvalidate();
+            }}
+          />
         </div>
       )}
 

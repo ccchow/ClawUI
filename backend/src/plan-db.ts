@@ -175,6 +175,15 @@ export interface NodeSuggestion {
   createdAt: string;
 }
 
+export interface BlueprintSuggestion {
+  id: string;
+  blueprintId: string;
+  title: string;
+  description: string;
+  used: boolean;
+  createdAt: string;
+}
+
 export interface AutopilotLogEntry {
   id: string;
   blueprintId: string;
@@ -321,6 +330,15 @@ export function initPlanTables(): void {
         created_at    TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS blueprint_suggestions (
+        id            TEXT PRIMARY KEY,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT NOT NULL,
+        used          INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS blueprint_insights (
         id              TEXT PRIMARY KEY,
         blueprint_id    TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
@@ -345,6 +363,7 @@ export function initPlanTables(): void {
       CREATE INDEX IF NOT EXISTS idx_related_sessions_blueprint ON node_related_sessions(blueprint_id);
       CREATE INDEX IF NOT EXISTS idx_suggestions_node ON node_suggestions(node_id);
       CREATE INDEX IF NOT EXISTS idx_suggestions_blueprint ON node_suggestions(blueprint_id);
+      CREATE INDEX IF NOT EXISTS idx_bp_suggestions_blueprint_used ON blueprint_suggestions(blueprint_id, used);
       CREATE INDEX IF NOT EXISTS idx_insights_blueprint_read ON blueprint_insights(blueprint_id, read);
     `);
   }
@@ -603,6 +622,22 @@ export function initPlanTables(): void {
         created_at      TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_autopilot_messages_blueprint ON autopilot_messages(blueprint_id, acknowledged, created_at);
+    `);
+  }
+
+  // Incremental migration: create blueprint_suggestions table if not exists
+  const bpSugTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='blueprint_suggestions'").all();
+  if (bpSugTables.length === 0) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS blueprint_suggestions (
+        id            TEXT PRIMARY KEY,
+        blueprint_id  TEXT NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT NOT NULL,
+        used          INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bp_suggestions_blueprint_used ON blueprint_suggestions(blueprint_id, used);
     `);
   }
 
@@ -1839,6 +1874,68 @@ export function markSuggestionUsed(id: string): NodeSuggestion | null {
 export function deleteSuggestion(id: string): void {
   const db = getDb();
   db.prepare("DELETE FROM node_suggestions WHERE id = ?").run(id);
+}
+
+// ─── Blueprint Suggestions ──────────────────────────────────
+
+interface BlueprintSuggestionRow {
+  id: string;
+  blueprint_id: string;
+  title: string;
+  description: string;
+  used: number;
+  created_at: string;
+}
+
+function rowToBlueprintSuggestion(row: BlueprintSuggestionRow): BlueprintSuggestion {
+  return {
+    id: row.id,
+    blueprintId: row.blueprint_id,
+    title: row.title,
+    description: row.description,
+    used: row.used === 1,
+    createdAt: row.created_at,
+  };
+}
+
+export function getBlueprintSuggestions(blueprintId: string): BlueprintSuggestion[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT * FROM blueprint_suggestions WHERE blueprint_id = ? ORDER BY created_at ASC")
+    .all(blueprintId) as BlueprintSuggestionRow[];
+  return rows.map(rowToBlueprintSuggestion);
+}
+
+export function createBlueprintSuggestion(
+  blueprintId: string,
+  title: string,
+  description: string,
+): BlueprintSuggestion {
+  const db = getDb();
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO blueprint_suggestions (id, blueprint_id, title, description, used, created_at)
+    VALUES (?, ?, ?, ?, 0, ?)
+  `).run(id, blueprintId, title, description, now);
+  return { id, blueprintId, title, description, used: false, createdAt: now };
+}
+
+export function markBlueprintSuggestionUsed(id: string): BlueprintSuggestion | null {
+  const db = getDb();
+  db.prepare("UPDATE blueprint_suggestions SET used = 1 WHERE id = ?").run(id);
+  const row = db.prepare("SELECT * FROM blueprint_suggestions WHERE id = ?").get(id) as BlueprintSuggestionRow | undefined;
+  return row ? rowToBlueprintSuggestion(row) : null;
+}
+
+export function deleteBlueprintSuggestion(id: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM blueprint_suggestions WHERE id = ?").run(id);
+}
+
+export function clearBlueprintSuggestions(blueprintId: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM blueprint_suggestions WHERE blueprint_id = ?").run(blueprintId);
 }
 
 // ─── Blueprint Insights ─────────────────────────────────────

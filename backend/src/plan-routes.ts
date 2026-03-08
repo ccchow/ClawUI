@@ -45,6 +45,9 @@ import {
   createAutopilotMessage,
   getMessageHistory,
   getMessageCount,
+  getBlueprintSuggestions,
+  markBlueprintSuggestionUsed,
+  clearBlueprintSuggestions,
 } from "./plan-db.js";
 import type { ArtifactType, ExecutionType, InsightSeverity, MacroNode, MacroNodeStatus, ReportedStatus } from "./plan-db.js";
 import {
@@ -1578,6 +1581,55 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/suggestions/:suggest
     if (!updated) { res.status(404).json({ error: "Suggestion not found" }); return; }
 
     res.json(updated);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// GET /api/blueprints/:blueprintId/suggestions — get unused blueprint-level suggestions
+planRouter.get("/api/blueprints/:blueprintId/suggestions", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const all = getBlueprintSuggestions(req.params.blueprintId);
+    const unused = all.filter((s) => !s.used);
+    res.json(unused);
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/suggestions/:suggestionId/use — atomically mark used + send as user message + trigger autopilot
+planRouter.post("/api/blueprints/:blueprintId/suggestions/:suggestionId/use", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    const suggestion = markBlueprintSuggestionUsed(req.params.suggestionId);
+    if (!suggestion) { res.status(404).json({ error: "Suggestion not found" }); return; }
+
+    // Atomically send the suggestion content as a user message
+    const msgContent = suggestion.description
+      ? `${suggestion.title}: ${suggestion.description}`
+      : suggestion.title;
+    const message = createAutopilotMessage(req.params.blueprintId, "user", msgContent);
+    triggerUserAgent(req.params.blueprintId);
+
+    res.json({ suggestion, message });
+  } catch (err) {
+    log.error(String(err)); res.status(500).json({ error: safeError(err) });
+  }
+});
+
+// POST /api/blueprints/:blueprintId/suggestions/dismiss — clear all unused blueprint suggestions
+planRouter.post("/api/blueprints/:blueprintId/suggestions/dismiss", (req, res) => {
+  try {
+    const blueprint = getBlueprint(req.params.blueprintId);
+    if (!blueprint) { res.status(404).json({ error: "Blueprint not found" }); return; }
+
+    clearBlueprintSuggestions(req.params.blueprintId);
+    res.json({ ok: true });
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
   }
