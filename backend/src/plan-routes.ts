@@ -65,6 +65,7 @@ import type { RoleDefinition } from "./roles/role-registry.js";
 import { createLogger } from "./logger.js";
 import { CLAWUI_DB_DIR, AGENT_TYPE } from "./config.js";
 import { runAutopilotLoop } from "./autopilot.js";
+import { triggerUserAgent } from "./user-agent.js";
 import {
   enrichNodeInternal,
   reevaluateNodeInternal,
@@ -90,24 +91,6 @@ function safeError(err: unknown): string {
   return "Internal server error";
 }
 
-/**
- * Check if the blueprint is in autopilot/FSD mode and no autopilot loop is
- * currently running. If so, enqueue a new autopilot loop. This avoids
- * duplicating the trigger logic across multiple endpoints.
- */
-function triggerAutopilotIfNeeded(blueprintId: string): void {
-  const bp = getBlueprint(blueprintId);
-  if (!bp) return;
-  const isAutopilot = bp.executionMode === "autopilot" || bp.executionMode === "fsd";
-  if (!isAutopilot) return;
-  const queueInfo = getQueueInfo(blueprintId);
-  const hasAutopilotTask = queueInfo.pendingTasks.some((t) => t.type === "autopilot");
-  if (!hasAutopilotTask && !queueInfo.running) {
-    enqueueBlueprintTask(blueprintId, () => runAutopilotLoop(blueprintId)).catch((err) => {
-      log.error(`Autopilot loop failed for ${blueprintId}: ${err instanceof Error ? err.message : err}`);
-    });
-  }
-}
 
 /**
  * Resets stuck "running" blueprints back to "approved" when no nodes are
@@ -440,7 +423,7 @@ planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => 
         ? `Enrich node ${nodeId}: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`
         : `Enrich new node: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`;
       createAutopilotMessage(blueprintId, "user", msgContent);
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ status: "queued", nodeId: nodeId ?? null });
       return;
     }
@@ -562,7 +545,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
     // In autopilot/FSD mode, route through message queue
     if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       createAutopilotMessage(blueprintId, "user", `Reevaluate node ${nodeId}: "${node.title}"`);
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ status: "queued", nodeId });
       return;
     }
@@ -616,7 +599,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/split", (req, res) =
     // In autopilot/FSD mode, route through message queue
     if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       createAutopilotMessage(blueprintId, "user", `Split node ${nodeId}: "${node.title}"`);
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ status: "queued", nodeId });
       return;
     }
@@ -668,7 +651,7 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies",
     // In autopilot/FSD mode, route through message queue
     if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       createAutopilotMessage(blueprintId, "user", `Smart dependencies for node ${nodeId}: "${node.title}"`);
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ status: "queued", nodeId });
       return;
     }
@@ -1802,7 +1785,7 @@ planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
     // In autopilot/FSD mode, route through message queue
     if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
       createAutopilotMessage(blueprintId, "user", "Reevaluate all non-done nodes");
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ message: "reevaluation requested via autopilot", blueprintId });
       return;
     }
@@ -1917,7 +1900,7 @@ planRouter.post("/api/blueprints/:id/generate", (req, res) => {
         ? `Generate nodes: ${description}`
         : "Generate nodes for this blueprint based on its title and description";
       createAutopilotMessage(blueprintId, "user", msgContent);
-      triggerAutopilotIfNeeded(blueprintId);
+      triggerUserAgent(blueprintId);
       res.json({ status: "queued", blueprintId });
       return;
     }
@@ -2609,7 +2592,7 @@ planRouter.post("/api/blueprints/:id/messages", (req, res) => {
       return;
     }
     const message = createAutopilotMessage(req.params.id, "user", content.trim());
-    triggerAutopilotIfNeeded(req.params.id);
+    triggerUserAgent(req.params.id);
     res.json(message);
   } catch (err) {
     log.error(String(err)); res.status(500).json({ error: safeError(err) });
