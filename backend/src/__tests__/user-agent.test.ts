@@ -18,7 +18,7 @@ vi.mock("../plan-executor.js", () => ({
 }));
 
 // Mock agent-runtime.js
-const mockRunSession = vi.fn(async () => "session output");
+const mockRunSession = vi.fn(async (_prompt: string, _cwd?: string) => "session output");
 vi.mock("../agent-runtime.js", () => ({
   getActiveRuntime: vi.fn(() => ({
     runSession: mockRunSession,
@@ -79,8 +79,10 @@ function makeBlueprint(overrides: Partial<Blueprint> = {}): Blueprint {
         description: "First task",
         status: "pending",
         dependencies: [],
-        suggestions: [],
         roles: [],
+        inputArtifacts: [],
+        outputArtifacts: [],
+        executions: [],
         createdAt: "2026-03-08T00:00:00Z",
         updatedAt: "2026-03-08T00:00:00Z",
       },
@@ -93,8 +95,10 @@ function makeBlueprint(overrides: Partial<Blueprint> = {}): Blueprint {
         description: "Second task",
         status: "done",
         dependencies: ["node-1"],
-        suggestions: [],
         roles: [],
+        inputArtifacts: [],
+        outputArtifacts: [],
+        executions: [],
         createdAt: "2026-03-08T00:00:00Z",
         updatedAt: "2026-03-08T00:00:00Z",
       },
