@@ -17,13 +17,11 @@ import {
   setAutopilotMemory,
   getAutopilotMemory,
   getUnacknowledgedMessages,
-  acknowledgeMessage,
   createAutopilotMessage,
   getArtifactsForNode,
 } from "./plan-db.js";
 import { CLAWUI_DB_DIR } from "./config.js";
 import type {
-  AutopilotMessage,
   BlueprintStatus,
   MacroNodeStatus,
   InsightSeverity,
@@ -38,6 +36,7 @@ import {
   evaluateNodeCompletion,
   addPendingTask,
   removePendingTask,
+  enqueueBlueprintTask,
 } from "./plan-executor.js";
 import type { PendingTask } from "./plan-executor.js";
 import { getActiveRuntime } from "./agent-runtime.js";
@@ -87,7 +86,6 @@ export function writeGlobalMemory(content: string): void {
 const ALL_TOOL_NAMES = [
   "run_node", "resume_node", "evaluate_node",
   "get_node_titles", "get_node_details", "get_node_handoff",
-  "read_user_messages", "acknowledge_message", "send_message",
   "run_direct",
   "create_node", "update_node", "skip_node", "batch_create_nodes", "reorder_nodes",
   "coordinate", "convene",
@@ -601,11 +599,6 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 - **get_node_details(nodeId)** — Returns full node context: description, prompt, error, resolved dependency titles+statuses, latest handoff content, unused suggestions. Use before modifying any node.
 - **get_node_handoff(nodeId)** — Returns just the latest handoff artifact content for a completed node. Lightweight alternative to get_node_details when you only need the output.
 
-### User Messages
-- **read_user_messages()** — Returns unacknowledged messages from the user. Check at the start of each iteration.
-- **acknowledge_message(messageId)** — Mark a message as acknowledged after reading it.
-- **send_message(content)** — Send a visible reply to the user in the chat. Use this to confirm receipt of requests, explain your plan, answer questions, or report results. Always send a message after acknowledging user input so they see your response.
-
 ### Direct Execution (Simple Tasks)
 - **run_direct(prompt)** — Run a prompt directly as a one-shot agent session in the blueprint's project directory. The agent has full access to shell commands, git, file operations, etc. Use for simple, transactional tasks (git commit, run tests, quick file edits, Q&A about the codebase) that do NOT need the full node lifecycle. The output is automatically sent as a reply visible to the user.
 
@@ -698,7 +691,6 @@ export function buildAutopilotPrompt(
   maxIterations: number,
   memory: AutopilotMemory = { blueprint: null, global: null },
   fsdMode: boolean = false,
-  userMessages: AutopilotMessage[] = [],
 ): string {
   const remaining = maxIterations === Infinity ? Infinity : maxIterations - iteration;
 
@@ -715,18 +707,16 @@ export function buildAutopilotPrompt(
     ? `## FSD Mode (Full Speed Drive)
 You are running in FSD mode — no safeguards, no throttling. Execute as fast and efficiently as possible.
 Focus on running nodes to completion. Use get_node_details only when needed for context before running complex nodes.
-Don't hesitate to run nodes back-to-back. Maximize throughput.
-Check read_user_messages() periodically — user messages always take priority.`
+Don't hesitate to run nodes back-to-back. Maximize throughput.`
     : `## Recommended Workflow Rhythm
 Follow this read-before-act pattern:
 
-1. **Check user messages first**: Call read_user_messages() at the start of each iteration. User messages contain instructions, feedback, or requests that should guide your next actions. Always acknowledge messages after reading them.
-2. **Read before modifying**: Before modifying any node, use get_node_details(nodeId) to understand its full context. Before creating nodes, use get_node_titles() to understand the current plan structure.
-3. **Before running a node**: Use get_node_details to check if its description is adequate. If it's short or vague, use update_node to improve the description/prompt yourself — you have the context to write good prompts.
-4. **After running a node**: Evaluation runs automatically — use get_node_details to check suggestions. Review them before moving on.
-5. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
-6. **When suggestions accumulate**: Review them via get_node_details — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
-7. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
+1. **Read before modifying**: Before modifying any node, use get_node_details(nodeId) to understand its full context. Before creating nodes, use get_node_titles() to understand the current plan structure.
+2. **Before running a node**: Use get_node_details to check if its description is adequate. If it's short or vague, use update_node to improve the description/prompt yourself — you have the context to write good prompts.
+3. **After running a node**: Evaluation runs automatically — use get_node_details to check suggestions. Review them before moving on.
+4. **Every ~5 completed nodes**: Use coordinate() to detect cross-cutting concerns across the blueprint.
+5. **When suggestions accumulate**: Review them via get_node_details — create_node for real issues, batch_mark_suggestions_used for minor/addressed ones.
+6. **When multiple roles are enabled and a design decision is ambiguous**: Use convene(topic, roleIds) to get multi-perspective input.
 
 A good rhythm: read context → improve prompt if needed → run → triage suggestions → repeat. Not every node needs all steps, but never do 5+ run_node calls in a row without a coordinate or suggestion triage in between.`;
 
@@ -734,8 +724,7 @@ A good rhythm: read context → improve prompt if needed → run → triage sugg
     ? `## Guidelines
 - Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
 - If a node failed, try resume with feedback or skip it — don't get stuck on any single node.
-- If user messages appear above, process them first — they take priority over everything else.
-- The loop exits automatically when all nodes are done and no user messages remain. Just focus on running nodes.
+- The loop exits automatically when all nodes are done. Just focus on running nodes.
 - No iteration limit — keep going until all nodes are done.`
     : `## Guidelines
 - Execute nodes in dependency order. Don't run a node whose dependencies aren't done.
@@ -750,40 +739,10 @@ A good rhythm: read context → improve prompt if needed → run → triage sugg
 - If warning insights exist, consider addressing them when convenient but don't block progress.
 - If you're stuck or need a human decision (architectural choice, ambiguous requirement, external dependency), use pause(reason).
 - You have ${remaining === Infinity ? "unlimited" : remaining} iterations left. Balance quality (coordinate, suggestion triage) with progress (run_node).
-- If user messages appear above, process them first — create new nodes if needed, then acknowledge.
-- The loop exits automatically when all nodes are done and no user messages remain. Just focus on making progress.`;
+- The loop exits automatically when all nodes are done. Just focus on making progress.`;
 
   // Build role descriptions
   const roleSection = buildRoleDescriptions(state.blueprint.enabledRoles);
-
-  // User messages section — stronger framing when messages exist
-  let userMessageSection = "";
-  if (userMessages.length > 0) {
-    userMessageSection = `## User Messages (HIGHEST PRIORITY — address before anything else)
-The user has sent messages that you MUST process before taking any other action.
-Do NOT call complete() while unacknowledged messages exist — the user may be requesting new work.
-
-${userMessages.map((m) => `- [${m.id}] ${m.content}`).join("\n")}
-
-**Choose the right path for each message**:
-
-**Path A — Simple tasks** (Q&A, git commit, run tests, quick file checks, status queries):
-→ Use **run_direct(prompt)** — executes immediately, output shown to user. Then acknowledge_message.
-
-**Path B — Complex tasks** (new features, refactors, multi-step work, engineering tasks):
-→ Use **create_node** + **run_node** — goes through the full node lifecycle. Then acknowledge_message.
-
-**Action order** (NEVER acknowledge before acting):
-1. **ACT FIRST**: Use run_direct for simple tasks, or create_node for complex ones.
-2. **THEN acknowledge_message(messageId)**: Mark as handled ONLY AFTER you have acted.
-
-CRITICAL RULES:
-- NEVER call acknowledge_message before acting. The message stays in your prompt until acknowledged — this preserves context.
-- NEVER pause because you think you "can't" do something. Use run_direct for immediate actions or create_node for complex ones.
-- If multiple messages request the same thing, act ONCE and acknowledge ALL of them.
-
-`;
-  }
 
   return `You are the Autopilot agent for a software blueprint. Your goal is to drive this blueprint to completion by choosing the best next action at each step. You can also create new nodes when the user requests additional work — even if all existing nodes are done.
 
@@ -791,7 +750,7 @@ CRITICAL RULES:
 ${JSON.stringify(state, null, 2)}
 
 ## Iteration ${iteration}${maxIterations === Infinity ? "" : ` of ${maxIterations}`}
-${memorySections}${userMessageSection}## Available Tools
+${memorySections}## Available Tools
 ${TOOL_DESCRIPTIONS}
 
 ${roleSection}
@@ -942,27 +901,6 @@ export async function executeDecision(
           return { success: true, message: JSON.stringify({ nodeId, handoff: null }) };
         }
         return { success: true, message: JSON.stringify({ nodeId, handoff: latestHandoff.content }) };
-      }
-
-      case "read_user_messages": {
-        const messages = getUnacknowledgedMessages(blueprintId);
-        return { success: true, message: JSON.stringify(messages) };
-      }
-
-      case "acknowledge_message": {
-        const messageId = p.messageId as string;
-        const result = acknowledgeMessage(messageId);
-        if (!result) return { success: false, message: `Message ${messageId} not found`, error: "not_found" };
-        return { success: true, message: `Acknowledged message ${messageId}` };
-      }
-
-      case "send_message": {
-        const content = p.content as string;
-        if (!content || content.trim().length === 0) {
-          return { success: false, message: "Message content is required", error: "invalid_params" };
-        }
-        createAutopilotMessage(blueprintId, "assistant", content.trim());
-        return { success: true, message: "Message sent to user" };
       }
 
       case "run_direct": {
@@ -1386,14 +1324,19 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       const state = buildStateSnapshot(blueprintId);
 
       // 2. CHECK EXIT CONDITIONS
-      // Exit loop when all nodes are done AND no pending user messages.
-      // Blueprint status is NOT changed — it's managed by the user only.
-      // Unacknowledged messages naturally prevent exit (pendingMessages > 0).
-      // After the LLM acknowledges (which happens AFTER taking action), exit is allowed.
+      // Exit when all nodes are done.
+      if (state.allNodesDone) {
+        logAutopilot(blueprintId, iteration, state.summary, "All nodes complete", "loop_exit");
+        log.info(`FSD loop exiting for ${blueprintId.slice(0, 8)} at iteration ${iteration} (all nodes done)`);
+        break;
+      }
+
+      // Yield: if user sent new messages, break so User Agent can process them.
+      // The User Agent will re-trigger the FSD loop after processing.
       const pendingMessages = getUnacknowledgedMessages(blueprintId);
-      if (state.allNodesDone && pendingMessages.length === 0) {
-        logAutopilot(blueprintId, iteration, state.summary, "All nodes complete, no pending user messages", "loop_exit");
-        log.info(`Autopilot loop exiting for ${blueprintId.slice(0, 8)} at iteration ${iteration} (all nodes done, no pending messages)`);
+      if (pendingMessages.length > 0) {
+        logAutopilot(blueprintId, iteration, state.summary, "yield", "Pending user messages");
+        log.info(`FSD loop yielding for ${blueprintId.slice(0, 8)} at iteration ${iteration}: ${pendingMessages.length} pending message(s)`);
         break;
       }
 
@@ -1447,11 +1390,10 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
       markSuggestionsSeen(blueprintId, unusedSuggestionIds);
 
       // 3. DECIDE — Ask AI what to do next
-      // pendingMessages already fetched above for exit condition check
       const prompt = buildAutopilotPrompt(state, iteration, maxIterations, {
         blueprint: blueprintMemory,
         global: globalMemory,
-      }, isFsd, pendingMessages);
+      }, isFsd);
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);
@@ -1545,10 +1487,20 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 }
 
 /**
- * Trigger the FSD loop if blueprint is in FSD mode and no loop is running.
- * Called by user-agent after handling a user message.
- * Stub — will be fully implemented when autopilot is refactored to pure FSD loop.
+ * Trigger the FSD loop if the blueprint is in autopilot/FSD mode
+ * and no loop is currently running or queued.
+ * Called by user-agent.ts after processing user messages.
  */
-export function triggerFsdLoopIfNeeded(_blueprintId: string): void {
-  // TODO: implement in Task 3 (simplify autopilot.ts to pure FSD loop)
+export function triggerFsdLoopIfNeeded(blueprintId: string): void {
+  const bp = getBlueprint(blueprintId);
+  if (!bp) return;
+  const isAutopilot = bp.executionMode === "autopilot" || bp.executionMode === "fsd";
+  if (!isAutopilot) return;
+  const queueInfo = getQueueInfo(blueprintId);
+  const hasLoopTask = queueInfo.pendingTasks.some((t) => t.type === "autopilot");
+  if (!hasLoopTask && !queueInfo.running) {
+    enqueueBlueprintTask(blueprintId, () => runAutopilotLoop(blueprintId)).catch((err) => {
+      log.error(`FSD loop failed for ${blueprintId}: ${err instanceof Error ? err.message : err}`);
+    });
+  }
 }
