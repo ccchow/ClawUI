@@ -374,6 +374,12 @@ vi.mock("../autopilot.js", () => ({
   runAutopilotLoop: vi.fn(async () => {}),
 }));
 
+vi.mock("../user-agent.js", () => ({
+  triggerUserAgent: vi.fn(),
+  handleUserMessage: vi.fn(),
+  buildUserAgentPrompt: vi.fn(() => "mock prompt"),
+}));
+
 vi.mock("../plan-operations.js", () => ({
   enrichNodeInternal: vi.fn(async () => {}),
   reevaluateNodeInternal: vi.fn(async () => {}),
@@ -440,6 +446,7 @@ import {
   enqueueBlueprintTask,
 } from "../plan-executor.js";
 import { runAutopilotLoop } from "../autopilot.js";
+import { triggerUserAgent } from "../user-agent.js";
 // getQueueInfo is auto-mocked by vi.mock("../plan-executor.js")
 
 function createApp() {
@@ -3051,7 +3058,7 @@ describe("plan-routes", () => {
       expect(res.status).toBe(400);
     });
 
-    it("triggers autopilot loop when blueprint is in FSD mode", async () => {
+    it("triggers user agent when blueprint is in FSD mode", async () => {
       const fsdBlueprint = {
         id: "bp-1",
         title: "Test",
@@ -3063,18 +3070,14 @@ describe("plan-routes", () => {
         createdAt: "2024-01-01",
         updatedAt: "2024-01-01",
       } as any;
-      // First call: route handler checks blueprint exists
-      // Second call: triggerAutopilotIfNeeded checks executionMode
-      vi.mocked(getBlueprint)
-        .mockReturnValueOnce(fsdBlueprint)
-        .mockReturnValueOnce(fsdBlueprint);
+      vi.mocked(getBlueprint).mockReturnValueOnce(fsdBlueprint);
 
       const res = await request(app)
         .post("/api/blueprints/bp-1/messages")
         .send({ content: "Do something" });
       expect(res.status).toBe(200);
-      // triggerAutopilotIfNeeded checks mode and enqueues if needed
-      expect(enqueueBlueprintTask).toHaveBeenCalled();
+      // triggerUserAgent is called (it internally checks mode and enqueues if needed)
+      expect(triggerUserAgent).toHaveBeenCalledWith("bp-1");
     });
 
     it("returns 404 for missing blueprint", async () => {
