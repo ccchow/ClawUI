@@ -1543,3 +1543,12 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
 
   log.info(`Autopilot loop ended for blueprint ${blueprintId.slice(0, 8)} after ${iteration} iterations`);
 }
+
+/**
+ * Trigger the FSD loop if blueprint is in FSD mode and no loop is running.
+ * Called by user-agent after handling a user message.
+ * Stub — will be fully implemented when autopilot is refactored to pure FSD loop.
+ */
+export function triggerFsdLoopIfNeeded(_blueprintId: string): void {
+  // TODO: implement in Task 3 (simplify autopilot.ts to pure FSD loop)
+}
