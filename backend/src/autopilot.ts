@@ -605,7 +605,7 @@ const TOOL_DESCRIPTIONS = `### Context Gathering (Read Tools)
 - **get_node_handoff(nodeId)** — Returns just the latest handoff artifact content for a completed node. Lightweight alternative to get_node_details when you only need the output.
 
 ### Direct Execution (Simple Tasks)
-- **run_direct(prompt)** — Run a prompt directly as a one-shot agent session in the blueprint's project directory. The agent has full access to shell commands, git, file operations, etc. Use for simple, transactional tasks (git commit, run tests, quick file edits, Q&A about the codebase) that do NOT need the full node lifecycle. The output is automatically sent as a reply visible to the user.
+- **run_direct(prompt)** — Run a prompt directly as a one-shot agent session in the blueprint's project directory. The agent has full access to shell commands, git, file operations, etc. ONLY use for non-code tasks: git operations, answering questions, status checks, running tests, reading files. NEVER use for writing or modifying code — always create a node for code changes, no matter how small. The output is automatically sent as a reply visible to the user.
 
 ### Node Execution (Complex Tasks)
 - **run_node(nodeId)** — Execute a single pending/queued node. Dependencies must be done first.
