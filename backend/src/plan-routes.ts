@@ -420,17 +420,6 @@ planRouter.post("/api/blueprints/:blueprintId/enrich-node", async (req, res) => 
       }
     }
 
-    // In autopilot/FSD mode, route through message queue
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      const msgContent = nodeId
-        ? `Enrich node ${nodeId}: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`
-        : `Enrich new node: title="${title.trim()}"${description ? `, description="${description.trim()}"` : ""}`;
-      createAutopilotMessage(blueprintId, "user", msgContent);
-      triggerUserAgent(blueprintId);
-      res.json({ status: "queued", nodeId: nodeId ?? null });
-      return;
-    }
-
     // Build context: dependencies (titles + handoffs) take priority.
     // Workspace (projectCwd) provides broader context — never list all other nodes.
     const currentNode = nodeId ? blueprint.nodes.find((n) => n.id === nodeId) : null;
@@ -545,14 +534,6 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/reevaluate", (req, r
     const blueprintId = req.params.blueprintId;
     const nodeId = req.params.nodeId;
 
-    // In autopilot/FSD mode, route through message queue
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      createAutopilotMessage(blueprintId, "user", `Reevaluate node ${nodeId}: "${node.title}"`);
-      triggerUserAgent(blueprintId);
-      res.json({ status: "queued", nodeId });
-      return;
-    }
-
     // Track in pending tasks for queue status API
     addPendingTask(blueprintId, { type: "reevaluate", nodeId, queuedAt: new Date().toISOString() });
 
@@ -599,14 +580,6 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/split", (req, res) =
     const blueprintId = req.params.blueprintId;
     const nodeId = req.params.nodeId;
 
-    // In autopilot/FSD mode, route through message queue
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      createAutopilotMessage(blueprintId, "user", `Split node ${nodeId}: "${node.title}"`);
-      triggerUserAgent(blueprintId);
-      res.json({ status: "queued", nodeId });
-      return;
-    }
-
     // Track in pending tasks for queue status API
     addPendingTask(blueprintId, { type: "split", nodeId, queuedAt: new Date().toISOString() });
 
@@ -648,14 +621,6 @@ planRouter.post("/api/blueprints/:blueprintId/nodes/:nodeId/smart-dependencies",
     }
     if (!["pending", "failed", "blocked"].includes(node.status)) {
       res.status(400).json({ error: "Smart dependencies only available for pending/failed/blocked nodes" });
-      return;
-    }
-
-    // In autopilot/FSD mode, route through message queue
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      createAutopilotMessage(blueprintId, "user", `Smart dependencies for node ${nodeId}: "${node.title}"`);
-      triggerUserAgent(blueprintId);
-      res.json({ status: "queued", nodeId });
       return;
     }
 
@@ -1834,14 +1799,6 @@ planRouter.post("/api/blueprints/:id/reevaluate-all", (req, res) => {
 
     const blueprintId = req.params.id;
 
-    // In autopilot/FSD mode, route through message queue
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      createAutopilotMessage(blueprintId, "user", "Reevaluate all non-done nodes");
-      triggerUserAgent(blueprintId);
-      res.json({ message: "reevaluation requested via autopilot", blueprintId });
-      return;
-    }
-
     const nonDoneNodes = blueprint.nodes.filter(
       (n) => n.status !== "done" && n.status !== "running" && n.status !== "queued",
     );
@@ -1945,17 +1902,6 @@ planRouter.post("/api/blueprints/:id/generate", (req, res) => {
 
     const blueprintId = req.params.id;
     const { description } = req.body as { description?: string };
-
-    // In autopilot/FSD mode, route through message queue instead of running directly
-    if (blueprint.executionMode === "autopilot" || blueprint.executionMode === "fsd") {
-      const msgContent = description
-        ? `Generate nodes: ${description}`
-        : "Generate nodes for this blueprint based on its title and description";
-      createAutopilotMessage(blueprintId, "user", msgContent);
-      triggerUserAgent(blueprintId);
-      res.json({ status: "queued", blueprintId });
-      return;
-    }
 
     // Track as a pending generate task for queue status API
     addPendingTask(blueprintId, { type: "generate", queuedAt: new Date().toISOString() });
