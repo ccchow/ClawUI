@@ -16,6 +16,7 @@ import {
 import { usePollingInterval } from "@/lib/polling-utils";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { BlueprintSuggestions } from "./BlueprintSuggestions";
+import { MarkdownContent } from "./MarkdownContent";
 
 interface BlueprintChatProps {
   blueprintId: string;
@@ -163,7 +164,7 @@ function UserMessageBubble({ content, createdAt }: { content: string; createdAt:
     <div className="flex justify-end">
       <div className="max-w-[85%] lg:max-w-[70%]">
         <div className="rounded-xl bg-accent-blue/10 border border-accent-blue/20 px-3 py-2">
-          <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{content}</p>
+          <MarkdownContent content={content} maxHeight="none" className="text-sm" />
         </div>
         <span
           className="text-[10px] text-text-muted mr-3 mt-0.5 block text-right"
@@ -183,7 +184,7 @@ function SystemMessageBubble({ content, createdAt }: { content: string; createdA
     <div className="flex justify-center">
       <div className="max-w-[85%]">
         <div className="rounded-lg bg-bg-tertiary/50 border border-border-primary px-3 py-1.5 text-center">
-          <p className="text-xs text-text-secondary">{content}</p>
+          <MarkdownContent content={content} maxHeight="none" className="text-xs" />
         </div>
         <span
           className="text-[10px] text-text-muted mt-0.5 block text-center"
@@ -203,7 +204,7 @@ function AssistantMessageBubble({ content, createdAt }: { content: string; creat
     <div className="flex justify-start">
       <div className="max-w-[85%] lg:max-w-[70%]">
         <div className="rounded-xl bg-accent-green/10 border border-accent-green/20 px-3 py-2">
-          <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{content}</p>
+          <MarkdownContent content={content} maxHeight="none" className="text-sm" />
         </div>
         <span
           className="text-[10px] text-text-muted ml-3 mt-0.5 block"
