@@ -69,10 +69,11 @@ describe("logger module", () => {
     expect(msg).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
   });
 
-  it("passes extra arguments through to console", () => {
+  it("inlines extra arguments into formatted message", () => {
     const log = createLogger("test");
-    const extra = { key: "value" };
-    log.error("msg", extra);
-    expect(consoleSpy.error).toHaveBeenCalledWith(expect.any(String), extra);
+    log.error("value is %s", "hello");
+    expect(consoleSpy.error).toHaveBeenCalledWith(
+      expect.stringContaining("value is hello"),
+    );
   });
 });
