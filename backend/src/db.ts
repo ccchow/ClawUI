@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, sep } from "node:path";
 import { parseTimelineRaw } from "./jsonl-parser.js";
 import type { TimelineNode, ProjectInfo, SessionMeta } from "./jsonl-parser.js";
 import { CLAWUI_DB_DIR } from "./config.js";
@@ -16,6 +16,21 @@ import "./agent-openclaw.js"; // Side-effect: registers OpenClawAgentRuntime
 import "./agent-codex.js"; // Side-effect: registers CodexAgentRuntime
 
 const log = createLogger("db");
+
+/**
+ * Decode a Claude project directory name back to an OS-native path.
+ * On Windows, project dirs look like "Q--src-ClawUI" (drive letter + double dash).
+ * On Unix/macOS, they look like "-home-user-project" (leading dash = root /).
+ */
+export function naiveDecodePath(projectId: string, pathSep: string = sep): string {
+  const winMatch = projectId.match(/^([A-Za-z])--(.*)/);
+  if (winMatch) {
+    const drive = winMatch[1].toUpperCase();
+    const rest = winMatch[2].replace(/-/g, pathSep);
+    return `${drive}:${pathSep}${rest}`;
+  }
+  return projectId.replace(/-/g, "/");
+}
 
 const DB_DIR = CLAWUI_DB_DIR;
 const DB_PATH = join(DB_DIR, "index.db");
@@ -195,8 +210,8 @@ function syncFlatProjectDirs(sessionsDir: string, agentType: AgentType): void {
     const projDir = join(sessionsDir, dirName);
 
     // Decode project name
-    const decodedPath = dirName.replace(/-/g, "/");
-    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+    const decodedPath = naiveDecodePath(dirName);
+    const projectName = decodedPath.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
 
     const jsonlFiles = readdirSync(projDir).filter((f) => f.endsWith(".jsonl"));
 
@@ -289,13 +304,13 @@ function syncOpenClawSessions(agentsDir: string, allSeenProjectIds?: Set<string>
       const { cwd } = readOpenClawSessionHeader(filePath);
       // Create project ID from CWD or fall back to agent name
       const cwdForProject = cwd || agentEntry.name;
-      const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+      const encodedCwd = cwdForProject.replace(/:/g, "-").replace(/[/\\]\./g, "/-").replace(/[/\\]/g, "-").replace(/^-/, "");
       const projectId = `openclaw:${encodedCwd}`;
 
       allSeenProjectIds?.add(projectId);
 
       const decodedPath = cwdForProject;
-      const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+      const projectName = decodedPath.split(/[/\\]/).filter(Boolean).slice(-2).join("/");
 
       const sessions = projectSessions.get(projectId) ?? [];
       sessions.push({ sessionId, filePath, projectName, decodedPath });
@@ -383,13 +398,13 @@ function syncCodexSessions(sessionsDir: string): void {
 
     const sessionId = id;
     const cwdForProject = cwd || "unknown";
-    const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+    const encodedCwd = cwdForProject.replace(/:/g, "-").replace(/[/\\]\./g, "/-").replace(/[/\\]/g, "-").replace(/^-/, "");
     const projectId = `codex:${encodedCwd}`;
 
     seenProjectIds.add(projectId);
 
     const decodedPath = cwdForProject;
-    const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+    const projectName = decodedPath.split(/[/\\]/).filter(Boolean).slice(-2).join("/");
 
     const sessions = projectSessions.get(projectId) ?? [];
     sessions.push({ sessionId, filePath, projectName, decodedPath });
@@ -587,7 +602,7 @@ function findSessionFileAcrossRuntimes(sessionId: string, agentType: AgentType):
         if (existsSync(filePath)) {
           const { cwd } = readOpenClawSessionHeader(filePath);
           const cwdForProject = cwd || agentEntry.name;
-          const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+          const encodedCwd = cwdForProject.replace(/:/g, "-").replace(/[/\\]\./g, "/-").replace(/[/\\]/g, "-").replace(/^-/, "");
           const projectId = `openclaw:${encodedCwd}`;
           return { filePath, projectId };
         }
@@ -601,7 +616,7 @@ function findSessionFileAcrossRuntimes(sessionId: string, agentType: AgentType):
     if (filePath) {
       const { cwd: sessionCwd } = readCodexSessionHeader(filePath);
       const cwdForProject = sessionCwd || "unknown";
-      const encodedCwd = cwdForProject.replace(/\//g, "-").replace(/^-/, "");
+      const encodedCwd = cwdForProject.replace(/:/g, "-").replace(/[/\\]\./g, "/-").replace(/[/\\]/g, "-").replace(/^-/, "");
       const projectId = `codex:${encodedCwd}`;
       return { filePath, projectId };
     }
@@ -706,8 +721,8 @@ function syncSessionFile(sessionId: string, projectId: string, filePath: string,
     // session detection during execution polling) may encounter a new project.
     const projectExists = db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId);
     if (!projectExists) {
-      const decodedPath = cwd || projectId;
-      const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/") || projectId;
+      const decodedPath = cwd || naiveDecodePath(projectId);
+      const projectName = decodedPath.split(/[\\/]/).filter(Boolean).slice(-2).join("/") || projectId;
       db.prepare(`
         INSERT INTO projects (id, name, decoded_path, session_count, updated_at, agent_type)
         VALUES (?, ?, ?, 1, ?, ?)
@@ -790,8 +805,8 @@ export function getProjects(agentType?: AgentType): ProjectInfo[] {
 export function getSessions(projectId: string, agentType?: AgentType): SessionMeta[] {
   // Decode project name for the response — strip agent prefix if present
   const rawProjectId = projectId.replace(/^(pi|openclaw):/, "");
-  const decodedPath = rawProjectId.replace(/-/g, "/");
-  const projectName = decodedPath.split("/").filter(Boolean).slice(-2).join("/");
+  const decodedPath = naiveDecodePath(rawProjectId);
+  const projectName = decodedPath.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
 
   let sql = `
     SELECT id, project_id, slug, cwd, created_at, updated_at, node_count, agent_type

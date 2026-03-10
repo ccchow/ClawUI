@@ -1,5 +1,5 @@
 // backend/src/cli-utils.ts
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -46,6 +46,36 @@ export function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+// ─── Process tree cleanup ────────────────────────────────────
+
+/**
+ * Kill a process and its entire child tree.
+ * Windows: uses `taskkill /T` (tree kill), falling back to `/F` (force).
+ * Unix: sends SIGTERM to the process.
+ * Returns true if the kill was sent, false if the process was already dead.
+ */
+export function killProcessTree(pid: number): boolean {
+  if (process.platform === "win32") {
+    try {
+      execSync(`taskkill /PID ${pid} /T`, { stdio: "ignore", timeout: 10000, windowsHide: true });
+      return true;
+    } catch {
+      try {
+        execSync(`taskkill /F /PID ${pid} /T`, { stdio: "ignore", timeout: 10000, windowsHide: true });
+        return true;
+      } catch {
+        return false; // Process already exited
+      }
+    }
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false; // Process already exited
   }
 }
 
