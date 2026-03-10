@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { requireLocalAuth, LOCAL_AUTH_TOKEN } from "./auth.js";
 import { setChildPidTracker } from "./cli-runner.js";
 import { getAvailableAgents } from "./db.js";
+import { killProcessTree } from "./cli-utils.js";
 
 const log = createLogger("server");
 
@@ -47,11 +48,9 @@ export function untrackChildPid(pid: number): void {
 
 function cleanupChildProcesses(): void {
   for (const pid of activeChildPids) {
-    try {
-      process.kill(pid, "SIGTERM");
-      log.info(`Sent SIGTERM to child process ${pid}`);
-    } catch {
-      // Process already exited
+    const killed = killProcessTree(pid);
+    if (killed) {
+      log.info(`Killed child process tree ${pid}`);
     }
   }
   activeChildPids.clear();

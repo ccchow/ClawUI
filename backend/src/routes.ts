@@ -333,6 +333,7 @@ router.post("/api/dev/redeploy", (_req, res) => {
       cwd: projectRoot,
       detached: true,
       stdio: "ignore",
+      windowsHide: true,
     });
     child.unref();
 

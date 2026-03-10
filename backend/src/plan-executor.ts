@@ -24,6 +24,7 @@ import { syncSession, getDb } from "./db.js";
 import type { Blueprint, MacroNode, NodeExecution, Artifact, FailureReason } from "./plan-db.js";
 import { getApiBase, getAuthParam } from "./plan-generator.js";
 import { getActiveRuntime } from "./agent-runtime.js";
+import { isProcessAlive, killProcessTree } from "./cli-utils.js";
 import { acquireSessionLock, releaseSessionLock } from "./session-lock.js";
 import "./agent-claude.js"; // Side-effect: registers ClaudeAgentRuntime
 import "./agent-pimono.js"; // Side-effect: registers PiMonoAgentRuntime
@@ -1842,18 +1843,6 @@ export function requeueOrphanedNodes(): void {
 // ─── Smart execution recovery (resilient to server restarts) ─
 
 /**
- * Check if a process is still alive by sending signal 0.
- */
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Get the mtime (in ms since epoch) of a session's JSONL file.
  * Returns null if the file doesn't exist.
  */
@@ -2156,6 +2145,13 @@ function startRecoveryMonitor(): void {
       const elapsedMs = Date.now() - new Date(entry.startedAt).getTime();
       if (elapsedMs > 45 * 60 * 1000) {
         recoveryLog.warn(`Execution ${execId.slice(0, 8)} timed out after ${Math.round(elapsedMs / 60000)}min`);
+        // Kill the CLI process tree if still alive
+        if (entry.cliPid) {
+          const killed = killProcessTree(entry.cliPid);
+          if (killed) {
+            recoveryLog.info(`Killed timed-out process tree ${entry.cliPid} for execution ${execId.slice(0, 8)}`);
+          }
+        }
         if (entry.sessionId) {
           finalizeRecoveredExecution(execId, entry.nodeId, entry.blueprintId, entry.sessionId, entry.projectCwd, entry.startedAt);
         } else {
