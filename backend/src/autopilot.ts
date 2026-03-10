@@ -273,6 +273,7 @@ Rules:
 
 Respond with ONLY the updated memory markdown. No preamble, no explanation.`;
 
+    log.info(`Reflection prompt:\n${prompt}`);
     const runtime = getActiveRuntime();
     let updatedMemory = await runtime.runSession(prompt, blueprint?.projectCwd);
 
@@ -344,6 +345,7 @@ Rules:
 
 Respond with ONLY the updated global strategy markdown.`;
 
+    log.info(`Global memory prompt:\n${prompt}`);
     const runtime = getActiveRuntime();
     let updatedGlobal = await runtime.runSession(prompt, blueprint.projectCwd);
 
@@ -971,6 +973,7 @@ export async function executeDecision(
         const cwd = blueprint?.projectCwd;
         try {
           const runtime = getActiveRuntime();
+          log.info(`run_direct prompt:\n${directPrompt.trim()}`);
           const output = await runtime.runSession(directPrompt.trim(), cwd);
           // Send the output as an assistant message visible to the user
           const trimmedOutput = output.trim();
@@ -1454,6 +1457,7 @@ export async function runAutopilotLoop(blueprintId: string, options?: AutopilotL
         blueprint: blueprintMemory,
         global: globalMemory,
       }, isFsd, completedThisRound);
+      log.info(`Autopilot decision prompt (iteration ${iteration}):\n${prompt}`);
       let decision: AutopilotDecision;
       try {
         decision = await callAgentForDecision(prompt, current.projectCwd);

@@ -113,6 +113,7 @@ export async function handleUserMessage(blueprintId: string): Promise<void> {
 
   try {
     const prompt = buildUserAgentPrompt(blueprintId, messages);
+    log.info(`User agent prompt:\n${prompt}`);
     const runtime = getActiveRuntime();
     const output = await runtime.runSession(prompt, blueprint.projectCwd);
     log.info(`User agent session completed (${output.length} chars)`);
