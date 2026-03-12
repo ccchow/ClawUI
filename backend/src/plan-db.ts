@@ -1573,22 +1573,24 @@ export function reorderNodes(blueprintId: string, ordering: { id: string; seq: n
  * Batch lookup: for a list of session IDs, return the associated macro node title + description.
  * Uses a single SQL query for efficiency.
  */
-export function getNodeInfoForSessions(sessionIds: string[]): Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }> {
+export function getNodeInfoForSessions(sessionIds: string[]): Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string; blueprintName: string }> {
   if (sessionIds.length === 0) return new Map();
-  const rows = queryInChunks<{ session_id: string; title: string; description: string | null; blueprint_id: string }>(
-    (ph) => `SELECT ne.session_id, mn.title, mn.description, mn.blueprint_id
+  const rows = queryInChunks<{ session_id: string; title: string; description: string | null; blueprint_id: string; blueprint_title: string }>(
+    (ph) => `SELECT ne.session_id, mn.title, mn.description, mn.blueprint_id, b.title AS blueprint_title
     FROM node_executions ne
     JOIN macro_nodes mn ON ne.node_id = mn.id
+    JOIN blueprints b ON mn.blueprint_id = b.id
     WHERE ne.session_id IN (${ph})`,
     sessionIds,
   );
 
-  const result = new Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string }>();
+  const result = new Map<string, { nodeTitle: string; nodeDescription: string; blueprintId: string; blueprintName: string }>();
   for (const row of rows) {
     result.set(row.session_id, {
       nodeTitle: row.title,
       nodeDescription: row.description ?? "",
       blueprintId: row.blueprint_id,
+      blueprintName: row.blueprint_title,
     });
   }
   return result;

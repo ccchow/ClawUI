@@ -381,8 +381,8 @@ export function SessionList({
                     )}
                   </div>
                   {s.macroNodeTitle && (
-                    <p className="text-xs text-accent-purple truncate" title={s.macroNodeDescription || s.macroNodeTitle}>
-                      {s.macroNodeTitle}{s.macroNodeDescription ? ` — ${s.macroNodeDescription}` : ""}
+                    <p className="text-xs text-accent-purple truncate" title={`${s.macroNodeBlueprintName || "Blueprint"} → ${s.macroNodeTitle}`}>
+                      {s.macroNodeBlueprintName || "Blueprint"} → {s.macroNodeTitle}
                     </p>
                   )}
                   {s.cwd && (

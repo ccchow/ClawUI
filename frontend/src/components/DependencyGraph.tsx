@@ -49,7 +49,8 @@ function statusToColor(status: MacroNodeStatus): string {
 
 export function computeDepLayout(
   allNodes: MacroNode[],
-  displayedNodes: MacroNode[]
+  displayedNodes: MacroNode[],
+  showAllDeps = false
 ): DepRowLayout[] {
   if (displayedNodes.length === 0) return [];
 
@@ -82,7 +83,7 @@ export function computeDepLayout(
       if (!src || sourceRow === targetRow) continue;
 
       // Hide edges where both endpoints are completed — reduces visual clutter
-      if (completedStatuses.has(src.status) && completedStatuses.has(node.status)) continue;
+      if (!showAllDeps && completedStatuses.has(src.status) && completedStatuses.has(node.status)) continue;
 
       edges.push({
         topRow: Math.min(sourceRow, targetRow),

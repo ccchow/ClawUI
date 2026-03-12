@@ -151,6 +151,7 @@ export default function BlueprintDetailPage() {
   const [nodeSearchQuery, setNodeSearchQuery] = useState("");
   const nodeSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showOlderNodes, setShowOlderNodes] = useState(false);
+  const [showAllDeps, setShowAllDeps] = useState(false);
   const [approving, setApproving] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
   const [reevaluating, setReevaluating] = useState(false);
@@ -774,7 +775,7 @@ export default function BlueprintDetailPage() {
   // Compute dependency lane layouts for visible nodes
   // When expanded (or no collapsed nodes), use all displayNodes; when collapsed, use topDisplayNodes only
   const visibleNodes = showOlderNodes || olderDisplayNodes.length === 0 ? displayNodes : topDisplayNodes;
-  const depLayouts = computeDepLayout(blueprint.nodes, visibleNodes);
+  const depLayouts = computeDepLayout(blueprint.nodes, visibleNodes, showAllDeps);
 
   return (
     <div className="animate-fade-in">
@@ -1921,6 +1922,24 @@ export default function BlueprintDetailPage() {
                     <span className="block w-[18px] h-[2px] bg-text-muted/60 rotate-45 rounded" />
                   </span>
                 )}
+              </button>
+              <span className="w-px h-4 bg-border-primary mx-0.5" />
+              <button
+                onClick={() => setShowAllDeps((v) => !v)}
+                className={`flex items-center gap-1.5 px-2.5 py-2 sm:py-1 rounded-lg text-xs transition-all active:scale-[0.97] ${
+                  showAllDeps
+                    ? "bg-accent-blue/15 border border-accent-blue/40 text-accent-blue"
+                    : "bg-bg-secondary border border-border-primary text-text-muted hover:text-text-secondary hover:border-border-hover"
+                }`}
+                title={showAllDeps ? "Showing all dependency lines (click to hide completed)" : "Completed dependency lines hidden (click to show all)"}
+                aria-label="Toggle dependency visibility"
+                aria-pressed={showAllDeps}
+              >
+                <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2 4h4M10 4h4M2 12h4M10 12h4" />
+                  <path d="M4 4v4l4 0v4" />
+                </svg>
+                Deps
               </button>
             </div>
           </div>

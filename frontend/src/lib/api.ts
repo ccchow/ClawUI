@@ -46,6 +46,7 @@ export interface SessionMeta {
   macroNodeTitle?: string;
   macroNodeDescription?: string;
   macroNodeBlueprintId?: string;
+  macroNodeBlueprintName?: string;
 }
 
 export interface TimelineNode {

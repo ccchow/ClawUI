@@ -81,6 +81,7 @@ router.get("/api/projects/:id/sessions", (req, res) => {
             macroNodeTitle: nodeInfo.nodeTitle,
             macroNodeDescription: nodeInfo.nodeDescription,
             macroNodeBlueprintId: nodeInfo.blueprintId,
+            macroNodeBlueprintName: nodeInfo.blueprintName,
           } : {}),
         };
       })
